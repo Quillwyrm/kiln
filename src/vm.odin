@@ -8,6 +8,8 @@ Opcode :: enum u8 {
     HALT,          // ABC
     LOAD_CONST,    // ABx
     LOAD_FUNC,     // ABx
+    NEW_ARRAY,     // ABx: A=dst, B=capacity hint
+    ARRAY_LEN,     // ABx
     // MOVE,       // ABC
     ADD,           // ABC
     SUB,           // ABC
@@ -56,10 +58,11 @@ InstAsBx :: bit_field u32 {
     sb: i16    | 16, // signed wide second operand
 }
 
-InstAx :: bit_field u32 {
-    op:     Opcode | 8,
-    a: u32    | 24, // wide unsigned
-}
+// InstAx :: bit_field u32 {
+//     op: Opcode | 8,
+//     a:  u32    | 24, // wide unsigned
+// }
+// Reserved for future one-wide-operand opcodes.
 
 InstJump :: bit_field u32 {
     op:     Opcode | 8,
@@ -76,6 +79,7 @@ ObjectKind :: enum u8 {
     STRING,
     FUNCTION_PROTO,
     FUNCTION_NATIVE,
+    ARRAY,
 }
 
 ObjectHeader :: struct {
@@ -88,6 +92,13 @@ ObjectHeader :: struct {
 StringObject :: struct {
     header: ObjectHeader, // must be first
     text:   string,
+}
+
+// Array objects ==================================================================================
+
+ArrayObject :: struct {
+    header: ObjectHeader, // must be first
+    items:  [dynamic]Value,
 }
 
 
@@ -564,6 +575,29 @@ run_vm :: proc(vm: ^vmState) -> Value {
             function_index := int(inst.b)
             vm.slots[dst] = Value(vm.functions[function_index])
 
+        // NEW_ARRAY A, B
+        // Creates an empty array in slot A. Length starts at 0.
+        // B reserves backing capacity for future pushes (B elements).
+        case .NEW_ARRAY:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            array_cap := int(inst.b)
+            array_object := new(ArrayObject)
+            array_object.header.kind = .ARRAY
+            array_object.items = make([dynamic]Value, 0, array_cap)
+            vm.slots[dst] = Value(cast(^ObjectHeader)array_object)
+
+        case .ARRAY_LEN:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            src := frame.slot_base + int(inst.b)
+            header, is_object := vm.slots[src].(^ObjectHeader)
+            if !is_object || header.kind != .ARRAY {
+                panic("ARRAY_LEN expected array object")
+            }
+            array_object := cast(^ArrayObject)header
+            vm.slots[dst] = Value(i64(len(array_object.items)))
+
         case .ADD:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
@@ -706,6 +740,8 @@ run_vm :: proc(vm: ^vmState) -> Value {
                 vm.call_frame_count += 1
 
             case .STRING:
+                panic("CALL expected function object")
+            case .ARRAY:
                 panic("CALL expected function object")
             }
 

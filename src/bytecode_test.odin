@@ -57,23 +57,19 @@ native_print :: proc(
 }
 
 main :: proc() {
-    const_pool := [?]Value{
-        Value(i64(20)), // const[0]
-        Value(i64(22)), // const[1]
-    }
+    const_pool := [?]Value{}
 
-    bytecode := [?]u32{                               // SOURCE        ; VM
-        u32(InstABx{ op=.LOAD_CONST, a=0, b=0    }), // a = 20        ; r0 = const[0]
-        u32(InstABx{ op=.LOAD_CONST, a=1, b=1    }), // b = 22        ; r1 = const[1]
-        u32(InstABC{ op=.ADD,        a=2, b=0, c=1 }), // a+b       ; r2 = r0 + r1
-        u32(InstABx{ op=.RETURN,     a=2, b=1    }), // return r2     ; return r2
+    bytecode := [?]u32{                               // SOURCE             ; VM
+        u32(InstABx{ op=.NEW_ARRAY, a=0, b=8    }),   // arr = [] cap=8     ; r0 = new array
+        u32(InstABx{ op=.ARRAY_LEN, a=1, b=0    }),   // n = len(arr)       ; r1 = len(r0)
+        u32(InstABx{ op=.RETURN,    a=1, b=1    }),   // return n           ; return r1
     }
 
     entry_proto := FunctionProto{
         name             = "entry",
         bytecode         = bytecode[:],
         const_pool       = const_pool[:],
-        frame_slot_count = 3,
+        frame_slot_count = 2,
         param_count      = 0,
     }
 
@@ -93,4 +89,12 @@ main :: proc() {
 
     result := run_vm(&state)
     fmt.printf("bytecode test: %v\n", result)
+
+    // Quick removable check: print array capacity for NEW_ARRAY capacity hint.
+    array_header, is_object := state.slots[0].(^ObjectHeader)
+    if !is_object || array_header.kind != .ARRAY {
+        panic("expected array object in r0")
+    }
+    array_object := cast(^ArrayObject)array_header
+    fmt.printf("array cap: %d\n", cap(array_object.items))
 }
