@@ -4,30 +4,30 @@ package vm
 // Opcodes ========================================================================================
 
 Opcode :: enum u8 {
-    // OP                // LAYOUT
-    HALT, // ABC
-    LOAD_CONST, // ABx
-    // LOAD_FUNC,        // ABx
-    // MOVE,             // ABC
-    ADD, // ABC
-    SUB, // ABC
-    MUL, // ABC
-    DIV, // ABC
-    NEG, // ABC
+    // OP          // LAYOUT
+    HALT,          // ABC
+    LOAD_CONST,    // ABx
+    LOAD_FUNC,     // ABx
+    // MOVE,       // ABC
+    ADD,           // ABC
+    SUB,           // ABC
+    MUL,           // ABC
+    DIV,           // ABC
+    NEG,           // ABx
 
-    EQUAL, // ABC
-    LESS, // ABC
+    EQUAL,         // ABC
+    LESS,          // ABC
     LESS_OR_EQUAL, // ABC
-    NOT, // ABx
+    NOT,           // ABx
 
-    JUMP, // Jump
-    JUMP_FALSE, // AsBx: jump if slot[a] is falsey
+    JUMP,          // Jump
+    JUMP_FALSE,    // AsBx: jump if slot[a] is falsey
 
-    // CALL,             // ABC
-    RETURN, // ABx
+    CALL,          // ABC
+    RETURN,        // ABx
 
-    // GET_GLOBAL,       // ABx
-    // SET_GLOBAL,       // ABx
+    GET_GLOBAL,    // ABx
+    SET_GLOBAL,    // ABx
 }
 
 
@@ -54,6 +54,11 @@ InstAsBx :: bit_field u32 {
     op: Opcode | 8,
     a:  u8     | 8,
     sb: i16    | 16, // signed wide second operand
+}
+
+InstAx :: bit_field u32 {
+    op:     Opcode | 8,
+    a: u32    | 24, // wide unsigned
 }
 
 InstJump :: bit_field u32 {
@@ -92,13 +97,13 @@ StringObject :: struct {
 // It is not itself the runtime function value.
 // `bytecode` is the fixed instruction stream for the function.
 // `const_pool` is the fixed constant table used by that bytecode.
-// `slot_count` is the size of the function's slot window.
+// `frame_slot_count` is the size of the function's slot window.
 
 FunctionProto :: struct {
     name:        string,
     bytecode:    []u32,
     const_pool:  []Value,
-    slot_count:  int,
+    frame_slot_count: int,
     param_count: int,
 }
 
@@ -166,15 +171,17 @@ GlobalBinding :: struct {
 // Logical slots for this frame are addressed relative to that slot base.
 // `return_slot_base` and `wanted_result_count` describe where this frame must place return values
 // in its caller's slot window. The top-level frame has no caller; top-level RETURN ends execution.
-// `previous_used_slot_count` restores the caller's live slot range when this frame returns.
+// `caller_slot_count` restores the caller's live slot range when this frame returns.
 
 CallFrame :: struct {
     proto:                    ^FunctionProto,
     instruction_index:        int,
     slot_base:                int,
+
     return_slot_base:         int,
     wanted_result_count:      int,
-    previous_used_slot_count: int,
+
+    caller_slot_count: int,
 }
 
 
@@ -184,11 +191,11 @@ VM_MAX_SLOTS :: 4096
 VM_MAX_CALL_FRAMES :: 256
 VM_MAX_GLOBALS :: 256
 
-// `function_table[0]` is the entry function by convention and must be a FUNCTION_PROTO object.
-// LOAD_FUNC indexes `function_table` because slots store runtime Values.
+// `functions[0]` is the entry function by convention and must be a FUNCTION_PROTO object.
+// LOAD_FUNC indexes `functions` because slots store runtime Values.
 // CALL dispatches callable objects by ObjectHeader.kind.
 // `slots` is fixed runtime storage for all active call-frame windows.
-// `used_slot_count` is the number of slots claimed by active windows.
+// `slot_count` is the number of slots claimed by active windows.
 // `call_frames` is fixed runtime storage for active bytecode calls.
 // `call_frame_count` is the number of live frames.
 // `global_bindings` is fixed runtime storage for named global bindings.
@@ -197,7 +204,7 @@ VM_MAX_GLOBALS :: 256
 vmState :: struct {
     functions:   []^ObjectHeader,
     slots:            [VM_MAX_SLOTS]Value,
-    used_slot_count:  int,
+    slot_count: int,
 
     call_frames:      [VM_MAX_CALL_FRAMES]CallFrame,
     call_frame_count: int,
@@ -519,14 +526,14 @@ run_vm :: proc(vm: ^vmState) -> Value {
     entry_proto := entry_function.proto
 
     // Seed the first frame at slot window base 0.
-    vm.used_slot_count = entry_proto.slot_count
+    vm.slot_count = entry_proto.frame_slot_count
     vm.call_frames[0] = CallFrame {
         proto                    = entry_proto,
         instruction_index        = 0,
         slot_base                = 0,
         return_slot_base         = 0,
         wanted_result_count      = 1,
-        previous_used_slot_count = 0,
+        caller_slot_count = 0,
     }
     vm.call_frame_count = 1
 
@@ -540,6 +547,8 @@ run_vm :: proc(vm: ^vmState) -> Value {
         frame.instruction_index += 1
 
         // Decode/dispatch by opcode, then interpret the matching layout view.
+        // All slot operands are frame-relative:
+        // slot[A] == vm.slots[frame.slot_base + A]
         switch decode_op(word) {
         case .HALT:
             return Value{}
@@ -548,6 +557,12 @@ run_vm :: proc(vm: ^vmState) -> Value {
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             vm.slots[dst] = frame.proto.const_pool[int(inst.b)]
+
+        case .LOAD_FUNC:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            function_index := int(inst.b)
+            vm.slots[dst] = Value(vm.functions[function_index])
 
         case .ADD:
             inst := InstABC(word)
@@ -621,13 +636,179 @@ run_vm :: proc(vm: ^vmState) -> Value {
                 frame.instruction_index += int(inst.sb)
             }
 
-        case .RETURN:
+        case .CALL:
+            inst := InstABC(word)
+
+            // CALL A, B, C
+            // A = callee/result base slot
+            // B = argument count
+            // C = wanted result count
+            call_base := frame.slot_base + int(inst.a)
+            args_base := call_base + 1
+            arg_count := int(inst.b)
+            wanted_result_count := int(inst.c)
+
+            callee_header, is_object := vm.slots[call_base].(^ObjectHeader)
+            if !is_object {
+                panic("CALL expected function object")
+            }
+
+            switch callee_header.kind {
+            case .FUNCTION_NATIVE:
+                // Native calls execute immediately in the caller frame.
+                // Native writes results at return_slot_base and reports produced count.
+                native_function := cast(^FunctionNativeObject)callee_header
+                produced_result_count := native_function.native_proc(
+                    vm,
+                    args_base,
+                    arg_count,
+                    call_base,
+                    wanted_result_count,
+                )
+
+                if produced_result_count < wanted_result_count {
+                    // Native produced fewer than caller wants.
+                    // Fill the missing result slots with nil.
+                    for fill_index := produced_result_count; fill_index < wanted_result_count; fill_index += 1 {
+                        vm.slots[call_base + fill_index] = Value{}
+                    }
+                }
+                // Extra produced results beyond wanted count are ignored by contract.
+
+            case .FUNCTION_PROTO:
+                // Proto calls push a new frame and continue the VM loop.
+                proto_function := cast(^FunctionProtoObject)callee_header
+                callee_proto := proto_function.proto
+
+                if vm.call_frame_count >= VM_MAX_CALL_FRAMES {
+                    panic("CALL exceeded VM_MAX_CALL_FRAMES")
+                }
+
+                callee_slot_base := args_base
+                callee_slot_top := callee_slot_base + callee_proto.frame_slot_count
+                if callee_slot_top > VM_MAX_SLOTS {
+                    panic("CALL exceeded VM_MAX_SLOTS")
+                }
+
+                caller_slot_count := vm.slot_count
+                if callee_slot_top > vm.slot_count {
+                    vm.slot_count = callee_slot_top
+                }
+
+                vm.call_frames[vm.call_frame_count] = CallFrame{
+                    proto                    = callee_proto,
+                    instruction_index        = 0,
+                    slot_base                = callee_slot_base,
+                    return_slot_base         = call_base,
+                    wanted_result_count      = wanted_result_count,
+                    caller_slot_count        = caller_slot_count,
+                }
+                vm.call_frame_count += 1
+
+            case .STRING:
+                panic("CALL expected function object")
+            }
+
+        case .GET_GLOBAL:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            name_const := frame.proto.const_pool[int(inst.b)]
+            name_header, is_object := name_const.(^ObjectHeader)
+            if !is_object || name_header.kind != .STRING {
+                panic("GET_GLOBAL expected string const")
+            }
+
+            global_name := cast(^StringObject)name_header
+            vm.slots[dst] = Value{}
+
+            // Miss returns nil. First match wins.
+            for binding_index := 0; binding_index < vm.global_count; binding_index += 1 {
+                if vm.global_bindings[binding_index].name == global_name.text {
+                    vm.slots[dst] = vm.global_bindings[binding_index].value
+                    break
+                }
+            }
+
+        case .SET_GLOBAL:
             inst := InstABx(word)
             src := frame.slot_base + int(inst.a)
+            name_const := frame.proto.const_pool[int(inst.b)]
+            name_header, is_object := name_const.(^ObjectHeader)
+            if !is_object || name_header.kind != .STRING {
+                panic("SET_GLOBAL expected string const")
+            }
 
-            // First runner returns a single Value directly.
-            // Full call/multi-return handling will use inst.b as produced return count.
-            return vm.slots[src]
+            global_name := cast(^StringObject)name_header
+
+            // Update existing binding if present.
+            found_binding := false
+            for binding_index := 0; binding_index < vm.global_count; binding_index += 1 {
+                if vm.global_bindings[binding_index].name == global_name.text {
+                    vm.global_bindings[binding_index].value = vm.slots[src]
+                    found_binding = true
+                    break
+                }
+            }
+
+            if !found_binding {
+                // Otherwise append a new binding.
+                if vm.global_count >= VM_MAX_GLOBALS {
+                    panic("SET_GLOBAL exceeded VM_MAX_GLOBALS")
+                }
+
+                vm.global_bindings[vm.global_count] = GlobalBinding{
+                    name  = global_name.text,
+                    value = vm.slots[src],
+                }
+                vm.global_count += 1
+            }
+
+        case .RETURN:
+            inst := InstABx(word)
+            produced_slot_base := frame.slot_base + int(inst.a)
+            produced_result_count := int(inst.b)
+
+            if vm.call_frame_count == 1 {
+                // Top-level RETURN ends execution and returns to the host.
+                // Return first produced value when present, else nil.
+                if produced_result_count > 0 {
+                    return vm.slots[produced_slot_base]
+                }
+                return Value{}
+            }
+
+            caller_result_base := frame.return_slot_base
+            wanted_result_count := frame.wanted_result_count
+
+            copied_result_count := produced_result_count
+            if copied_result_count > wanted_result_count {
+                copied_result_count = wanted_result_count
+            }
+
+            // Copy produced values into caller result slots.
+            // Source and destination can overlap in the shared slot array.
+            if copied_result_count > 0 {
+                if caller_result_base < produced_slot_base {
+                    for value_index := 0; value_index < copied_result_count; value_index += 1 {
+                        vm.slots[caller_result_base + value_index] = vm.slots[produced_slot_base + value_index]
+                    }
+                } else {
+                    for value_index := copied_result_count - 1; value_index >= 0; value_index -= 1 {
+                        vm.slots[caller_result_base + value_index] = vm.slots[produced_slot_base + value_index]
+                    }
+                }
+            }
+
+            // Fill missing wanted results with nil.
+            if copied_result_count < wanted_result_count {
+                for fill_index := copied_result_count; fill_index < wanted_result_count; fill_index += 1 {
+                    vm.slots[caller_result_base + fill_index] = Value{}
+                }
+            }
+
+            // Pop current frame and restore caller's used slot range.
+            vm.slot_count = frame.caller_slot_count
+            vm.call_frame_count -= 1
         }
     }
 }
