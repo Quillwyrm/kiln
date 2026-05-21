@@ -2,7 +2,6 @@ package main
 
 import "core:fmt"
 import bcg "bytecode_gen"
-import "kiln"
 import "vm"
 
 main :: proc() {
@@ -92,18 +91,6 @@ main :: proc() {
     bcg.end_proto()
 
     kiln_state := bcg.build_vm_state()
-
-    print_function := vm.FunctionNativeObject{
-        header      = vm.ObjectHeader{kind = .FUNCTION_NATIVE},
-        name        = "print",
-        native_proc = kiln.native_print,
-    }
-
-    kiln_state.global_bindings[0] = vm.GlobalBinding{
-        name  = "print",
-        value = vm.Value(cast(^vm.ObjectHeader)&print_function.header),
-    }
-    kiln_state.global_count = 1
 
     result := vm.run_vm(&kiln_state)
     fmt.printf("bytecode_gen surface: %v\n", result)

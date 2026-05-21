@@ -194,14 +194,10 @@ Value :: union {
 
 // Globals ========================================================================================
 
-// Globals are VM-owned name bindings.
-// GET_GLOBAL searches by name and reads `value`.
-// SET_GLOBAL updates an existing binding or appends a new one.
-
-GlobalBinding :: struct {
-    name:  string,
-    value: Value,
-}
+// `globals` is the active global environment map.
+// GET_GLOBAL reads from `globals.items`.
+// SET_GLOBAL writes to `globals.items`.
+// Miss returns nil. Setting nil deletes the name.
 
 
 // Call frames ====================================================================================
@@ -228,7 +224,6 @@ CallFrame :: struct {
 
 VM_MAX_SLOTS :: 4096
 VM_MAX_CALL_FRAMES :: 256
-VM_MAX_GLOBALS :: 256
 
 // `functions[0]` is the entry function by convention and must be a FUNCTION_PROTO object.
 // LOAD_FUNC indexes `functions` because slots store runtime Values.
@@ -238,19 +233,16 @@ VM_MAX_GLOBALS :: 256
 // `call_frames` is fixed runtime storage for active bytecode calls.
 // `call_frame_count` is the number of occupied entries in call_frames.
 // The current frame is call_frames[call_frame_count - 1].
-// `global_bindings` is fixed runtime storage for named global bindings.
-// `global_count` is the number of occupied entries in global_bindings.
+// `globals` is the active global environment map.
 
 State :: struct {
-    function_table:        []^ObjectHeader,
+    function_table:   []^ObjectHeader,
     slots:            [VM_MAX_SLOTS]Value,
-    slot_count: int,
+    slot_count:       int,
 
-    call_frames:      [VM_MAX_CALL_FRAMES]CallFrame,
-    call_frame_count: int,
-
-    global_bindings:  [VM_MAX_GLOBALS]GlobalBinding,
-    global_count:     int,
+    frame_stack:      [VM_MAX_CALL_FRAMES]CallFrame,
+    frame_count:      int,
+    globals:          ^MapObject,
 }
 
 
@@ -567,7 +559,7 @@ run_vm :: proc(vm: ^State) -> Value {
 
     // Seed the first frame at slot window base 0.
     vm.slot_count = entry_proto.frame_slot_count
-    vm.call_frames[0] = CallFrame {
+    vm.frame_stack[0] = CallFrame {
         proto                    = entry_proto,
         instruction_index        = 0,
         slot_base                = 0,
@@ -575,11 +567,11 @@ run_vm :: proc(vm: ^State) -> Value {
         wanted_result_count      = 1,
         caller_slot_count = 0,
     }
-    vm.call_frame_count = 1
+    vm.frame_count = 1
 
     for {
         // Current frame is always the last occupied call-frame entry.
-        frame := &vm.call_frames[vm.call_frame_count - 1]
+        frame := &vm.frame_stack[vm.frame_count - 1]
 
         // Fetch then advance instruction_index.
         // Jump offsets are applied relative to this post-fetch index.
@@ -937,7 +929,7 @@ run_vm :: proc(vm: ^State) -> Value {
                 proto_function := cast(^FunctionProtoObject)callee_header
                 callee_proto := proto_function.proto
 
-                if vm.call_frame_count >= VM_MAX_CALL_FRAMES {
+                if vm.frame_count >= VM_MAX_CALL_FRAMES {
                     panic("CALL exceeded VM_MAX_CALL_FRAMES")
                 }
 
@@ -952,7 +944,7 @@ run_vm :: proc(vm: ^State) -> Value {
                     vm.slot_count = callee_slot_top
                 }
 
-                vm.call_frames[vm.call_frame_count] = CallFrame{
+                vm.frame_stack[vm.frame_count] = CallFrame{
                     proto                    = callee_proto,
                     instruction_index        = 0,
                     slot_base                = callee_slot_base,
@@ -960,7 +952,7 @@ run_vm :: proc(vm: ^State) -> Value {
                     wanted_result_count      = wanted_result_count,
                     caller_slot_count        = caller_slot_count,
                 }
-                vm.call_frame_count += 1
+                vm.frame_count += 1
 
             case .STRING:
                 panic("CALL expected function object")
@@ -980,14 +972,11 @@ run_vm :: proc(vm: ^State) -> Value {
             }
 
             global_name := cast(^StringObject)name_header
-            vm.slots[dst] = Value{}
-
-            // Miss returns nil. First match wins.
-            for binding_index := 0; binding_index < vm.global_count; binding_index += 1 {
-                if vm.global_bindings[binding_index].name == global_name.text {
-                    vm.slots[dst] = vm.global_bindings[binding_index].value
-                    break
-                }
+            global_value, exists := vm.globals.items[global_name.text]
+            if exists {
+                vm.slots[dst] = global_value
+            } else {
+                vm.slots[dst] = Value{}
             }
 
         case .SET_GLOBAL:
@@ -1000,28 +989,11 @@ run_vm :: proc(vm: ^State) -> Value {
             }
 
             global_name := cast(^StringObject)name_header
-
-            // Update existing binding if present.
-            found_binding := false
-            for binding_index := 0; binding_index < vm.global_count; binding_index += 1 {
-                if vm.global_bindings[binding_index].name == global_name.text {
-                    vm.global_bindings[binding_index].value = vm.slots[src]
-                    found_binding = true
-                    break
-                }
-            }
-
-            if !found_binding {
-                // Otherwise append a new binding.
-                if vm.global_count >= VM_MAX_GLOBALS {
-                    panic("SET_GLOBAL exceeded VM_MAX_GLOBALS")
-                }
-
-                vm.global_bindings[vm.global_count] = GlobalBinding{
-                    name  = global_name.text,
-                    value = vm.slots[src],
-                }
-                vm.global_count += 1
+            global_value := vm.slots[src]
+            if global_value == nil {
+                delete_key(&vm.globals.items, global_name.text)
+            } else {
+                vm.globals.items[global_name.text] = global_value
             }
 
         case .RETURN:
@@ -1029,7 +1001,7 @@ run_vm :: proc(vm: ^State) -> Value {
             produced_slot_base := frame.slot_base + int(inst.a)
             produced_result_count := int(inst.b)
 
-            if vm.call_frame_count == 1 {
+            if vm.frame_count == 1 {
                 // Top-level RETURN ends execution and returns to the host.
                 // Return first produced value when present, else nil.
                 if produced_result_count > 0 {
@@ -1069,7 +1041,7 @@ run_vm :: proc(vm: ^State) -> Value {
 
             // Pop current frame and restore caller's used slot range.
             vm.slot_count = frame.caller_slot_count
-            vm.call_frame_count -= 1
+            vm.frame_count -= 1
         }
     }
 }

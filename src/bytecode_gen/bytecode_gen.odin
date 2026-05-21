@@ -1,6 +1,7 @@
 package bytecode_gen
 
 import vm "../vm"
+import kiln "../kiln"
 
 
 
@@ -27,11 +28,26 @@ record_slots :: proc(slots: ..int) {
     }
 }
 
+bind_global_env :: proc() -> ^vm.MapObject {
+    globals := new(vm.MapObject)
+    globals.header.kind = .MAP
+    globals.items = make(map[string]vm.Value)
+
+    print_function := new(vm.FunctionNativeObject)
+    print_function.header.kind = .FUNCTION_NATIVE
+    print_function.name = "print"
+    print_function.native_proc = kiln.native_print
+
+    globals.items["print"] = vm.Value(cast(^vm.ObjectHeader)print_function)
+    return globals
+}
+
 // VM state construction ==========================================================================
 
 build_vm_state :: proc() -> vm.State {
     return vm.State{
         function_table = Ctx.function_table[:],
+        globals        = bind_global_env(),
     }
 }
 
@@ -74,21 +90,6 @@ end_proto :: proc() -> int {
 
     return function_index
 }
-
-native_function :: proc(name: string, native_proc: vm.FunctionNative) -> int {
-    function_object := new(vm.FunctionNativeObject)
-    function_object^ = vm.FunctionNativeObject{
-        header      = vm.ObjectHeader{kind = .FUNCTION_NATIVE},
-        name        = name,
-        native_proc = native_proc,
-    }
-
-    function_index := len(Ctx.function_table)
-    append(&Ctx.function_table, &function_object.header)
-
-    return function_index
-}
-
 
 // Constants ======================================================================================
 
