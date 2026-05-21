@@ -4,32 +4,53 @@ package vm
 // Opcodes ========================================================================================
 
 Opcode :: enum u8 {
-    // OP          // LAYOUT
-    HALT,          // ABC
-    LOAD_CONST,    // ABx
-    LOAD_FUNC,     // ABx
-    NEW_ARRAY,     // ABx: A=dst, B=capacity hint
-    ARRAY_LEN,     // ABx
-    // MOVE,       // ABC
-    ADD,           // ABC
-    SUB,           // ABC
-    MUL,           // ABC
-    DIV,           // ABC
-    NEG,           // ABx
+    // Immediate, Constant, and Function Loads
+    LOAD_NIL,      // Ax: A=dst
+    LOAD_TRUE,     // Ax: A=dst
+    LOAD_FALSE,    // Ax: A=dst
+    LOAD_CONST,    // ABx: A=dst, B=const
+    LOAD_FUNC,     // ABx: A=dst, B=function
+    MOVE,          // ABx: A=dst, B=src
 
-    EQUAL,         // ABC
-    LESS,          // ABC
-    LESS_OR_EQUAL, // ABC
-    NOT,           // ABx
+    // Array Operations
+    NEW_ARRAY,     // ABx: A=dst,       B=initial capacity
+    ARRAY_LEN,     // ABx: A=dst,       B=src_array
+    ARRAY_GET,     // ABC: A=dst,       B=src_array, C=index
+    ARRAY_SET,     // ABC: A=dst_array, B=src, C=index
+    ARRAY_PUSH,    // ABx: A=dst_array, B=src
+    ARRAY_POP,     // ABx: A=dst,       B=src_array
 
-    JUMP,          // Jump
-    JUMP_FALSE,    // AsBx: jump if slot[a] is falsey
+    // Map Operations
+    NEW_MAP,       // ABx: A=dst,     B=reserved
+    MAP_LEN,       // ABx: A=dst,     B=src_map
+    MAP_GET,       // ABC: A=dst,     B=src_map, C=key
+    MAP_SET,       // ABC: A=dst_map, B=key, C=src
 
-    CALL,          // ABC
-    RETURN,        // ABx
+    // Numeric Operations
+    ADD,           // ABC: A=dst, B=lhs, C=rhs
+    SUB,           // ABC: A=dst, B=lhs, C=rhs
+    MUL,           // ABC: A=dst, B=lhs, C=rhs
+    DIV,           // ABC: A=dst, B=lhs, C=rhs
+    NEG,           // ABx: A=dst, B=src
 
-    GET_GLOBAL,    // ABx
-    SET_GLOBAL,    // ABx
+    // Comparison and Boolean Operations
+    EQUAL,         // ABC: A=dst, B=lhs, C=rhs
+    LESS,          // ABC: A=dst, B=lhs, C=rhs
+    LESS_OR_EQUAL, // ABC: A=dst, B=lhs, C=rhs
+    NOT,           // ABx: A=dst, B=src
+
+    // Control Flow
+    JUMP,          // Jump: offset (relative to post-fetch instruction_index)
+    JUMP_FALSE,    // AsBx: A=cond, B=offset; jump if slot[A] is falsey
+    HALT,          // ABC: no operands used; stop VM and return nil
+
+    // Calls and Returns
+    CALL,          // ABC: A=callee/result base, B=arg_count, C=wanted_result_count
+    RETURN,        // ABx: A=first_return, B=produced_result_count
+
+    // Global Bindings
+    GET_GLOBAL,    // ABx: A=dst, B=name_const
+    SET_GLOBAL,    // ABx: A=src, B=name_const
 }
 
 
@@ -58,11 +79,10 @@ InstAsBx :: bit_field u32 {
     sb: i16    | 16, // signed wide second operand
 }
 
-// InstAx :: bit_field u32 {
-//     op: Opcode | 8,
-//     a:  u32    | 24, // wide unsigned
-// }
-// Reserved for future one-wide-operand opcodes.
+InstAx :: bit_field u32 {
+    op: Opcode | 8,
+    a:  u32    | 24, // wide unsigned
+}
 
 InstJump :: bit_field u32 {
     op:     Opcode | 8,
@@ -80,6 +100,7 @@ ObjectKind :: enum u8 {
     FUNCTION_PROTO,
     FUNCTION_NATIVE,
     ARRAY,
+    MAP,
 }
 
 ObjectHeader :: struct {
@@ -99,6 +120,13 @@ StringObject :: struct {
 ArrayObject :: struct {
     header: ObjectHeader, // must be first
     items:  [dynamic]Value,
+}
+
+// Map objects ====================================================================================
+
+MapObject :: struct {
+    header: ObjectHeader, // must be first
+    items:  map[string]Value,
 }
 
 
@@ -125,7 +153,7 @@ FunctionProto :: struct {
 // The returned int is the number of result values the native function produced.
 
 FunctionNative :: proc(
-    vm: ^vmState,
+    vm: ^State,
     args_base: int,
     arg_count: int,
     return_slot_base: int,
@@ -182,7 +210,7 @@ GlobalBinding :: struct {
 // Logical slots for this frame are addressed relative to that slot base.
 // `return_slot_base` and `wanted_result_count` describe where this frame must place return values
 // in its caller's slot window. The top-level frame has no caller; top-level RETURN ends execution.
-// `caller_slot_count` restores the caller's live slot range when this frame returns.
+// `caller_slot_count` restores the caller's occupied slot range when this frame returns.
 
 CallFrame :: struct {
     proto:                    ^FunctionProto,
@@ -208,12 +236,13 @@ VM_MAX_GLOBALS :: 256
 // `slots` is fixed runtime storage for all active call-frame windows.
 // `slot_count` is the number of slots claimed by active windows.
 // `call_frames` is fixed runtime storage for active bytecode calls.
-// `call_frame_count` is the number of live frames.
+// `call_frame_count` is the number of occupied entries in call_frames.
+// The current frame is call_frames[call_frame_count - 1].
 // `global_bindings` is fixed runtime storage for named global bindings.
-// `global_count` is the number of live globals.
+// `global_count` is the number of occupied entries in global_bindings.
 
-vmState :: struct {
-    functions:   []^ObjectHeader,
+State :: struct {
+    function_table:        []^ObjectHeader,
     slots:            [VM_MAX_SLOTS]Value,
     slot_count: int,
 
@@ -530,9 +559,9 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
 
 // VM runner ======================================================================================
 
-run_vm :: proc(vm: ^vmState) -> Value {
+run_vm :: proc(vm: ^State) -> Value {
     // Entry must be a proto-backed function object.
-    entry_header := vm.functions[0]
+    entry_header := vm.function_table[0]
     entry_function := cast(^FunctionProtoObject)entry_header
     entry_proto := entry_function.proto
 
@@ -549,7 +578,7 @@ run_vm :: proc(vm: ^vmState) -> Value {
     vm.call_frame_count = 1
 
     for {
-        // Current frame is always the last live frame.
+        // Current frame is always the last occupied call-frame entry.
         frame := &vm.call_frames[vm.call_frame_count - 1]
 
         // Fetch then advance instruction_index.
@@ -564,6 +593,21 @@ run_vm :: proc(vm: ^vmState) -> Value {
         case .HALT:
             return Value{}
 
+        case .LOAD_NIL:
+            inst := InstAx(word)
+            dst := frame.slot_base + int(inst.a)
+            vm.slots[dst] = Value{}
+
+        case .LOAD_TRUE:
+            inst := InstAx(word)
+            dst := frame.slot_base + int(inst.a)
+            vm.slots[dst] = Value(bool(true))
+
+        case .LOAD_FALSE:
+            inst := InstAx(word)
+            dst := frame.slot_base + int(inst.a)
+            vm.slots[dst] = Value(bool(false))
+
         case .LOAD_CONST:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
@@ -573,7 +617,13 @@ run_vm :: proc(vm: ^vmState) -> Value {
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             function_index := int(inst.b)
-            vm.slots[dst] = Value(vm.functions[function_index])
+            vm.slots[dst] = Value(vm.function_table[function_index])
+
+        case .MOVE:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            src := frame.slot_base + int(inst.b)
+            vm.slots[dst] = vm.slots[src]
 
         // NEW_ARRAY A, B
         // Creates an empty array in slot A. Length starts at 0.
@@ -597,6 +647,179 @@ run_vm :: proc(vm: ^vmState) -> Value {
             }
             array_object := cast(^ArrayObject)header
             vm.slots[dst] = Value(i64(len(array_object.items)))
+
+        // ARRAY_GET A, B, C
+        // Reads array[B][index in C] into slot A.
+        case .ARRAY_GET:
+            inst := InstABC(word)
+            dst := frame.slot_base + int(inst.a)
+            array_slot := frame.slot_base + int(inst.b)
+            index_slot := frame.slot_base + int(inst.c)
+
+            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            if !is_object || array_header.kind != .ARRAY {
+                panic("ARRAY_GET expected array object")
+            }
+            array_object := cast(^ArrayObject)array_header
+
+            index_i64, is_i64 := vm.slots[index_slot].(i64)
+            if !is_i64 {
+                panic("ARRAY_GET expected i64 index")
+            }
+            if index_i64 < 0 {
+                panic("ARRAY_GET index out of bounds")
+            }
+
+            index := int(index_i64)
+            if index >= len(array_object.items) {
+                panic("ARRAY_GET index out of bounds")
+            }
+            vm.slots[dst] = array_object.items[index]
+
+        // ARRAY_SET A, B, C
+        // Writes slot B into array A at index in slot C.
+        case .ARRAY_SET:
+            inst := InstABC(word)
+            array_slot := frame.slot_base + int(inst.a)
+            value_slot := frame.slot_base + int(inst.b)
+            index_slot := frame.slot_base + int(inst.c)
+
+            value := vm.slots[value_slot]
+            if value == nil {
+                panic("ARRAY_SET does not allow nil values")
+            }
+
+            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            if !is_object || array_header.kind != .ARRAY {
+                panic("ARRAY_SET expected array object")
+            }
+            array_object := cast(^ArrayObject)array_header
+
+            index_i64, is_i64 := vm.slots[index_slot].(i64)
+            if !is_i64 {
+                panic("ARRAY_SET expected i64 index")
+            }
+            if index_i64 < 0 {
+                panic("ARRAY_SET index out of bounds")
+            }
+
+            index := int(index_i64)
+            if index >= len(array_object.items) {
+                panic("ARRAY_SET index out of bounds")
+            }
+            array_object.items[index] = value
+
+        // ARRAY_PUSH A, B
+        // Appends slot B to array in slot A.
+        case .ARRAY_PUSH:
+            inst := InstABx(word)
+            array_slot := frame.slot_base + int(inst.a)
+            value_slot := frame.slot_base + int(inst.b)
+
+            value := vm.slots[value_slot]
+            if value == nil {
+                panic("ARRAY_PUSH does not allow nil values")
+            }
+
+            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            if !is_object || array_header.kind != .ARRAY {
+                panic("ARRAY_PUSH expected array object")
+            }
+            array_object := cast(^ArrayObject)array_header
+
+            _, append_error := append(&array_object.items, value)
+            if append_error != nil {
+                panic("ARRAY_PUSH failed to append")
+            }
+
+        // ARRAY_POP A, B
+        // Pops tail of array in slot B into slot A. Empty pop returns nil.
+        case .ARRAY_POP:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            array_slot := frame.slot_base + int(inst.b)
+
+            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            if !is_object || array_header.kind != .ARRAY {
+                panic("ARRAY_POP expected array object")
+            }
+            array_object := cast(^ArrayObject)array_header
+
+            popped_value, ok := pop_safe(&array_object.items)
+            if ok {
+                vm.slots[dst] = popped_value
+            } else {
+                vm.slots[dst] = Value{}
+            }
+
+        case .NEW_MAP:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            map_object := new(MapObject)
+            map_object.header.kind = .MAP
+            map_object.items = make(map[string]Value)
+            vm.slots[dst] = Value(cast(^ObjectHeader)map_object)
+
+        case .MAP_LEN:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            map_slot := frame.slot_base + int(inst.b)
+            map_header, is_object := vm.slots[map_slot].(^ObjectHeader)
+            if !is_object || map_header.kind != .MAP {
+                panic("MAP_LEN expected map object")
+            }
+            map_object := cast(^MapObject)map_header
+            vm.slots[dst] = Value(i64(len(map_object.items)))
+
+        case .MAP_GET:
+            inst := InstABC(word)
+            dst := frame.slot_base + int(inst.a)
+            map_slot := frame.slot_base + int(inst.b)
+            key_slot := frame.slot_base + int(inst.c)
+
+            map_header, is_map_object := vm.slots[map_slot].(^ObjectHeader)
+            if !is_map_object || map_header.kind != .MAP {
+                panic("MAP_GET expected map object")
+            }
+            map_object := cast(^MapObject)map_header
+
+            key_header, is_key_object := vm.slots[key_slot].(^ObjectHeader)
+            if !is_key_object || key_header.kind != .STRING {
+                panic("MAP_GET expected string key")
+            }
+            key_object := cast(^StringObject)key_header
+
+            value, exists := map_object.items[key_object.text]
+            if exists {
+                vm.slots[dst] = value
+            } else {
+                vm.slots[dst] = Value{}
+            }
+
+        case .MAP_SET:
+            inst := InstABC(word)
+            map_slot := frame.slot_base + int(inst.a)
+            key_slot := frame.slot_base + int(inst.b)
+            value_slot := frame.slot_base + int(inst.c)
+
+            map_header, is_map_object := vm.slots[map_slot].(^ObjectHeader)
+            if !is_map_object || map_header.kind != .MAP {
+                panic("MAP_SET expected map object")
+            }
+            map_object := cast(^MapObject)map_header
+
+            key_header, is_key_object := vm.slots[key_slot].(^ObjectHeader)
+            if !is_key_object || key_header.kind != .STRING {
+                panic("MAP_SET expected string key")
+            }
+            key_object := cast(^StringObject)key_header
+
+            value := vm.slots[value_slot]
+            if value == nil {
+                delete_key(&map_object.items, key_object.text)
+            } else {
+                map_object.items[key_object.text] = value
+            }
 
         case .ADD:
             inst := InstABC(word)
@@ -742,6 +965,8 @@ run_vm :: proc(vm: ^vmState) -> Value {
             case .STRING:
                 panic("CALL expected function object")
             case .ARRAY:
+                panic("CALL expected function object")
+            case .MAP:
                 panic("CALL expected function object")
             }
 
