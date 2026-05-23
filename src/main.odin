@@ -1,97 +1,305 @@
 package main
 
 import "core:fmt"
-import bcg "bytecode_gen"
+import compiler "compiler"
 import "vm"
 
 main :: proc() {
     // Pseudo-source:
     //
-    // numbers = []
-    // push numbers, 10
-    // push numbers, 3.5
-    // push numbers, true
+    // numbers = [10, 20, 30]
+    // numbers[1] = nil
     //
-    // data = {}
-    // data["name"] = "kiln"
-    // data["count"] = 2
-    // data["ok"] = true
-    // data["items"] = numbers
+    // player = {
+    //     name: "kiln"
+    //     hp: 99
+    //     alive: true
+    // }
     //
-    // print(len(numbers))
-    // print(data["items"])
-    // print(numbers[0])
+    // i = 0
+    // sum = 0
+    // while i < 5 {
+    //     sum = sum + i
+    //     i = i + 1
+    // }
+    //
     // print(numbers)
-    // print(data)
+    // print(player)
+    // print(sum)
     //
-    // return len(numbers)
+    // print(length(numbers))
+    // print(length(player))
+    // print(length("kiln"))
+    //
+    // print(type(nil))
+    // print(type(true))
+    // print(type(123))
+    // print(type(3.5))
+    // print(type("kiln"))
+    // print(type(numbers))
+    // print(type(player))
+    // print(type(print))
+    //
+    // print(to_string(123))
+    // print(to_string(numbers))
+    //
+    // print(to_number(123))
+    // print(to_number(3.5))
+    // print(to_number("42"))
+    // print(to_number("4.5"))
+    // print(to_number("wat"))
+    //
+    // assert(true, "should not fail")
+    //
+    // return length(numbers)
 
-    bcg.begin_proto("bcg_surface", 0)
+    compiler.begin_proto("builtin_surface", 0)
 
-    c10 := bcg.const_int(10)
-    c35 := bcg.const_float(3.5)
-    c2 := bcg.const_int(2)
-    c0 := bcg.const_int(0)
-    print_name := bcg.const_string("print")
-    name_key := bcg.const_string("name")
-    count_key := bcg.const_string("count")
-    ok_key := bcg.const_string("ok")
-    items_key := bcg.const_string("items")
-    name_value := bcg.const_string("kiln")
+    c10 := compiler.const_int(10)
+    c0 := compiler.const_int(0)
+    c1 := compiler.const_int(1)
+    c5 := compiler.const_int(5)
+    c20 := compiler.const_int(20)
+    c30 := compiler.const_int(30)
+    c99 := compiler.const_int(99)
+    c123 := compiler.const_int(123)
+    c35 := compiler.const_float(3.5)
 
-    bcg.new_array(1, 3)
-    bcg.load_const(10, c10)
-    bcg.array_push(1, 10)
-    bcg.load_const(10, c35)
-    bcg.array_push(1, 10)
-    bcg.load_true(10)
-    bcg.array_push(1, 10)
+    print_name := compiler.const_string("print")
+    length_name := compiler.const_string("length")
+    type_name := compiler.const_string("type")
+    assert_name := compiler.const_string("assert")
+    to_string_name := compiler.const_string("to_string")
+    to_number_name := compiler.const_string("to_number")
 
-    bcg.new_map(3)
-    bcg.load_const(10, name_key)
-    bcg.load_const(11, name_value)
-    bcg.map_set(3, 10, 11)
-    bcg.load_const(10, count_key)
-    bcg.load_const(11, c2)
-    bcg.map_set(3, 10, 11)
-    bcg.load_const(10, ok_key)
-    bcg.load_true(11)
-    bcg.map_set(3, 10, 11)
-    bcg.load_const(10, items_key)
-    bcg.map_set(3, 10, 1)
+    name_key := compiler.const_string("name")
+    hp_key := compiler.const_string("hp")
+    alive_key := compiler.const_string("alive")
 
-    bcg.array_len(5, 1)
-    bcg.load_const(10, items_key)
-    bcg.map_get(7, 3, 10)
-    bcg.load_const(10, c0)
-    bcg.array_get(9, 1, 10)
+    kiln_string := compiler.const_string("kiln")
+    text_42 := compiler.const_string("42")
+    text_45 := compiler.const_string("4.5")
+    text_wat := compiler.const_string("wat")
+    assert_message := compiler.const_string("should not fail")
 
-    bcg.get_global(20, print_name)
-    bcg.move(21, 5)
-    bcg.call(20, 1, 0)
+    // numbers = [10, 20, 30]
+    compiler.emit_new_array(1, 3)
+    compiler.emit_load_const(10, c10)
+    compiler.emit_array_push(1, 10)
+    compiler.emit_load_const(10, c20)
+    compiler.emit_array_push(1, 10)
+    compiler.emit_load_const(10, c30)
+    compiler.emit_array_push(1, 10)
+    compiler.emit_load_nil(10)
+    compiler.emit_load_const(11, c1)
+    compiler.emit_array_set(1, 10, 11)
 
-    bcg.get_global(20, print_name)
-    bcg.move(21, 7)
-    bcg.call(20, 1, 0)
+    // player = { name: "kiln", hp: 99, alive: true }
+    compiler.emit_new_map(2)
+    compiler.emit_load_const(10, name_key)
+    compiler.emit_load_const(11, kiln_string)
+    compiler.emit_map_set(2, 10, 11)
+    compiler.emit_load_const(10, hp_key)
+    compiler.emit_load_const(11, c99)
+    compiler.emit_map_set(2, 10, 11)
+    compiler.emit_load_const(10, alive_key)
+    compiler.emit_load_true(11)
+    compiler.emit_map_set(2, 10, 11)
 
-    bcg.get_global(20, print_name)
-    bcg.move(21, 9)
-    bcg.call(20, 1, 0)
+    // i = 0
+    // sum = 0
+    // while i < 5 {
+    //     sum = sum + i
+    //     i = i + 1
+    // }
+    compiler.emit_load_const(3, c0)
+    compiler.emit_load_const(4, c0)
+    compiler.emit_load_const(5, c5)
+    compiler.emit_load_const(7, c1)
 
-    bcg.get_global(20, print_name)
-    bcg.move(21, 1)
-    bcg.call(20, 1, 0)
+    loop_start := compiler.next_inst_index()
+    compiler.emit_less(6, 3, 5)
+    loop_exit := compiler.emit_jump_false(6)
+    compiler.emit_add(4, 4, 3)
+    compiler.emit_add(3, 3, 7)
+    compiler.emit_jump(loop_start)
+    compiler.patch_jump(loop_exit)
 
-    bcg.get_global(20, print_name)
-    bcg.move(21, 3)
-    bcg.call(20, 1, 0)
+    // print(numbers)
+    compiler.emit_get_global(20, print_name)
+    compiler.emit_move(21, 1)
+    compiler.emit_call(20, 1, 0)
 
-    bcg.return_values(5, 1)
+    // print(player)
+    compiler.emit_get_global(20, print_name)
+    compiler.emit_move(21, 2)
+    compiler.emit_call(20, 1, 0)
 
-    bcg.end_proto()
+    // print(sum)
+    compiler.emit_get_global(20, print_name)
+    compiler.emit_move(21, 4)
+    compiler.emit_call(20, 1, 0)
 
-    kiln_state := bcg.build_vm_state()
+    // print(length(numbers))
+    compiler.emit_get_global(20, length_name)
+    compiler.emit_move(21, 1)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(length(player))
+    compiler.emit_get_global(20, length_name)
+    compiler.emit_move(21, 2)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(length("kiln"))
+    compiler.emit_get_global(20, length_name)
+    compiler.emit_load_const(21, kiln_string)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type(nil))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_load_nil(21)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type(true))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_load_true(21)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type(123))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_load_const(21, c123)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type(3.5))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_load_const(21, c35)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type("kiln"))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_load_const(21, kiln_string)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type(numbers))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_move(21, 1)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type(player))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_move(21, 2)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(type(print))
+    compiler.emit_get_global(20, type_name)
+    compiler.emit_get_global(21, print_name)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(to_string(123))
+    compiler.emit_get_global(20, to_string_name)
+    compiler.emit_load_const(21, c123)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(to_string(numbers))
+    compiler.emit_get_global(20, to_string_name)
+    compiler.emit_move(21, 1)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(to_number(123))
+    compiler.emit_get_global(20, to_number_name)
+    compiler.emit_load_const(21, c123)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(to_number(3.5))
+    compiler.emit_get_global(20, to_number_name)
+    compiler.emit_load_const(21, c35)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(to_number("42"))
+    compiler.emit_get_global(20, to_number_name)
+    compiler.emit_load_const(21, text_42)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(to_number("4.5"))
+    compiler.emit_get_global(20, to_number_name)
+    compiler.emit_load_const(21, text_45)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // print(to_number("wat"))
+    compiler.emit_get_global(20, to_number_name)
+    compiler.emit_load_const(21, text_wat)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_get_global(30, print_name)
+    compiler.emit_move(31, 20)
+    compiler.emit_call(30, 1, 0)
+
+    // assert(true, "should not fail")
+    compiler.emit_get_global(20, assert_name)
+    compiler.emit_load_true(21)
+    compiler.emit_load_const(22, assert_message)
+    compiler.emit_call(20, 2, 1)
+
+    // return length(numbers)
+    compiler.emit_get_global(20, length_name)
+    compiler.emit_move(21, 1)
+    compiler.emit_call(20, 1, 1)
+    compiler.emit_return(20, 1)
+
+    compiler.end_proto()
+
+    kiln_state := compiler.build_vm_state()
 
     result := vm.run_vm(&kiln_state)
-    fmt.printf("bytecode_gen surface: %v\n", result)
+    fmt.printf("builtin surface: %v\n", result)
 }

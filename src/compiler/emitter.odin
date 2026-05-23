@@ -1,11 +1,11 @@
-package bytecode_gen
+package compiler
 
-import vm "../vm"
-import kiln "../kiln"
+import "../vm"
+import "../kiln"
 
 
 
-// Generator state ===============================================================================
+// Emitter state ===============================================================================
 
 Ctx := struct {
     function_table:   [dynamic]^vm.ObjectHeader,
@@ -21,24 +21,34 @@ Ctx := struct {
 
 record_slots :: proc(slots: ..int) {
     for slot in slots {
-        needed_slot_count := slot + 1
-        if needed_slot_count > Ctx.frame_slot_count {
-            Ctx.frame_slot_count = needed_slot_count
+        required_slots := slot + 1
+        if required_slots > Ctx.frame_slot_count {
+            Ctx.frame_slot_count = required_slots
         }
     }
+}
+
+bind_native_global :: proc(globals: ^vm.MapObject, name: string, native_proc: vm.FunctionNative) {
+    native_function := new(vm.FunctionNativeObject)
+    native_function.header.kind = .FUNCTION_NATIVE
+    native_function.name = name
+    native_function.native_proc = native_proc
+
+    globals.data[name] = vm.Value(cast(^vm.ObjectHeader)native_function)
 }
 
 bind_global_env :: proc() -> ^vm.MapObject {
     globals := new(vm.MapObject)
     globals.header.kind = .MAP
-    globals.items = make(map[string]vm.Value)
+    globals.data = make(map[string]vm.Value)
 
-    print_function := new(vm.FunctionNativeObject)
-    print_function.header.kind = .FUNCTION_NATIVE
-    print_function.name = "print"
-    print_function.native_proc = kiln.native_print
+    bind_native_global(globals, "print", kiln.native_print)
+    bind_native_global(globals, "type", kiln.native_type)
+    bind_native_global(globals, "length", kiln.native_length)
+    bind_native_global(globals, "assert", kiln.native_assert)
+    bind_native_global(globals, "to_string", kiln.native_to_string)
+    bind_native_global(globals, "to_number", kiln.native_to_number)
 
-    globals.items["print"] = vm.Value(cast(^vm.ObjectHeader)print_function)
     return globals
 }
 
@@ -91,6 +101,8 @@ end_proto :: proc() -> int {
     return function_index
 }
 
+
+
 // Constants ======================================================================================
 
 const_int :: proc(value: i64) -> int {
@@ -110,7 +122,7 @@ const_float :: proc(value: f64) -> int {
 const_string :: proc(text: string) -> int {
     string_object := new(vm.StringObject)
     string_object.header.kind = .STRING
-    string_object.text = text
+    string_object.data = text
 
     const_index := len(Ctx.const_pool)
     append(&Ctx.const_pool, vm.Value(cast(^vm.ObjectHeader)string_object))
@@ -118,45 +130,46 @@ const_string :: proc(text: string) -> int {
     return const_index
 }
 
+// Instruction Emitters ======================================================================================
 
 // Loads ==========================================================================================
 
-load_nil :: proc(dst: int) {
+emit_load_nil :: proc(dst: int) {
     record_slots(dst)
 
     inst := u32(vm.InstAx{ op= .LOAD_NIL, a= u32(dst) })
     append(&Ctx.bytecode, inst)
 }
 
-load_true :: proc(dst: int) {
+emit_load_true :: proc(dst: int) {
     record_slots(dst)
 
     inst := u32(vm.InstAx{ op= .LOAD_TRUE, a= u32(dst) })
     append(&Ctx.bytecode, inst)
 }
 
-load_false :: proc(dst: int) {
+emit_load_false :: proc(dst: int) {
     record_slots(dst)
 
     inst := u32(vm.InstAx{ op= .LOAD_FALSE, a= u32(dst) })
     append(&Ctx.bytecode, inst)
 }
 
-load_const :: proc(dst, const_index: int) {
+emit_load_const :: proc(dst, const_index: int) {
     record_slots(dst)
 
     inst := u32(vm.InstABx{ op= .LOAD_CONST, a= u8(dst), b= u16(const_index) })
     append(&Ctx.bytecode, inst)
 }
 
-load_func :: proc(dst, function_index: int) {
+emit_load_func :: proc(dst, function_index: int) {
     record_slots(dst)
 
     inst := u32(vm.InstABx{ op= .LOAD_FUNC, a= u8(dst), b= u16(function_index) })
     append(&Ctx.bytecode, inst)
 }
 
-move :: proc(dst, src: int) {
+emit_move :: proc(dst, src: int) {
     record_slots(dst, src)
 
     inst := u32(vm.InstABx{ op= .MOVE, a= u8(dst), b= u16(src) })
@@ -166,42 +179,42 @@ move :: proc(dst, src: int) {
 
 // Array operations ===============================================================================
 
-new_array :: proc(dst, array_cap: int) {
+emit_new_array :: proc(dst, array_cap: int) {
     record_slots(dst)
 
     inst := u32(vm.InstABx{ op= .NEW_ARRAY, a= u8(dst), b= u16(array_cap) })
     append(&Ctx.bytecode, inst)
 }
 
-array_len :: proc(dst, src_array: int) {
+emit_array_len :: proc(dst, src_array: int) {
     record_slots(dst, src_array)
 
     inst := u32(vm.InstABx{ op= .ARRAY_LEN, a= u8(dst), b= u16(src_array) })
     append(&Ctx.bytecode, inst)
 }
 
-array_get :: proc(dst, src_array, index: int) {
+emit_array_get :: proc(dst, src_array, index: int) {
     record_slots(dst, src_array, index)
 
     inst := u32(vm.InstABC{ op= .ARRAY_GET, a= u8(dst), b= u8(src_array), c= u8(index) })
     append(&Ctx.bytecode, inst)
 }
 
-array_set :: proc(dst_array, src, index: int) {
+emit_array_set :: proc(dst_array, src, index: int) {
     record_slots(dst_array, src, index)
 
     inst := u32(vm.InstABC{ op= .ARRAY_SET, a= u8(dst_array), b= u8(src), c= u8(index) })
     append(&Ctx.bytecode, inst)
 }
 
-array_push :: proc(dst_array, src: int) {
+emit_array_push :: proc(dst_array, src: int) {
     record_slots(dst_array, src)
 
     inst := u32(vm.InstABx{ op= .ARRAY_PUSH, a= u8(dst_array), b= u16(src) })
     append(&Ctx.bytecode, inst)
 }
 
-array_pop :: proc(dst, src_array: int) {
+emit_array_pop :: proc(dst, src_array: int) {
     record_slots(dst, src_array)
 
     inst := u32(vm.InstABx{ op= .ARRAY_POP, a= u8(dst), b= u16(src_array) })
@@ -211,28 +224,28 @@ array_pop :: proc(dst, src_array: int) {
 
 // Map operations =================================================================================
 
-new_map :: proc(dst: int) {
+emit_new_map :: proc(dst: int) {
     record_slots(dst)
 
     inst := u32(vm.InstABx{ op= .NEW_MAP, a= u8(dst), b= 0 })
     append(&Ctx.bytecode, inst)
 }
 
-map_len :: proc(dst, src_map: int) {
+emit_map_len :: proc(dst, src_map: int) {
     record_slots(dst, src_map)
 
     inst := u32(vm.InstABx{ op= .MAP_LEN, a= u8(dst), b= u16(src_map) })
     append(&Ctx.bytecode, inst)
 }
 
-map_get :: proc(dst, src_map, key: int) {
+emit_map_get :: proc(dst, src_map, key: int) {
     record_slots(dst, src_map, key)
 
     inst := u32(vm.InstABC{ op= .MAP_GET, a= u8(dst), b= u8(src_map), c= u8(key) })
     append(&Ctx.bytecode, inst)
 }
 
-map_set :: proc(dst_map, key, src: int) {
+emit_map_set :: proc(dst_map, key, src: int) {
     record_slots(dst_map, key, src)
 
     inst := u32(vm.InstABC{ op= .MAP_SET, a= u8(dst_map), b= u8(key), c= u8(src) })
@@ -242,35 +255,35 @@ map_set :: proc(dst_map, key, src: int) {
 
 // Numeric operations =============================================================================
 
-add :: proc(dst, lhs, rhs: int) {
+emit_add :: proc(dst, lhs, rhs: int) {
     record_slots(dst, lhs, rhs)
 
     inst := u32(vm.InstABC{ op= .ADD, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&Ctx.bytecode, inst)
 }
 
-sub :: proc(dst, lhs, rhs: int) {
+emit_sub :: proc(dst, lhs, rhs: int) {
     record_slots(dst, lhs, rhs)
 
     inst := u32(vm.InstABC{ op= .SUB, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&Ctx.bytecode, inst)
 }
 
-mul :: proc(dst, lhs, rhs: int) {
+emit_mul :: proc(dst, lhs, rhs: int) {
     record_slots(dst, lhs, rhs)
 
     inst := u32(vm.InstABC{ op= .MUL, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&Ctx.bytecode, inst)
 }
 
-div :: proc(dst, lhs, rhs: int) {
+emit_div :: proc(dst, lhs, rhs: int) {
     record_slots(dst, lhs, rhs)
 
     inst := u32(vm.InstABC{ op= .DIV, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&Ctx.bytecode, inst)
 }
 
-neg :: proc(dst, src: int) {
+emit_neg :: proc(dst, src: int) {
     record_slots(dst, src)
 
     inst := u32(vm.InstABx{ op= .NEG, a= u8(dst), b= u16(src) })
@@ -280,28 +293,28 @@ neg :: proc(dst, src: int) {
 
 // Comparison and boolean operations ==============================================================
 
-equal :: proc(dst, lhs, rhs: int) {
+emit_equal :: proc(dst, lhs, rhs: int) {
     record_slots(dst, lhs, rhs)
 
     inst := u32(vm.InstABC{ op= .EQUAL, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&Ctx.bytecode, inst)
 }
 
-less :: proc(dst, lhs, rhs: int) {
+emit_less :: proc(dst, lhs, rhs: int) {
     record_slots(dst, lhs, rhs)
 
     inst := u32(vm.InstABC{ op= .LESS, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&Ctx.bytecode, inst)
 }
 
-less_or_equal :: proc(dst, lhs, rhs: int) {
+emit_less_or_equal :: proc(dst, lhs, rhs: int) {
     record_slots(dst, lhs, rhs)
 
     inst := u32(vm.InstABC{ op= .LESS_OR_EQUAL, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&Ctx.bytecode, inst)
 }
 
-not :: proc(dst, src: int) {
+emit_not :: proc(dst, src: int) {
     record_slots(dst, src)
 
     inst := u32(vm.InstABx{ op= .NOT, a= u8(dst), b= u16(src) })
@@ -309,21 +322,81 @@ not :: proc(dst, src: int) {
 }
 
 
+// Jumps and patching =============================================================================
+
+// Jump offsets are relative to the instruction after the jump.
+// Current code assumes generated offsets fit the VM instruction layouts.
+
+next_inst_index :: proc() -> int {
+    return len(Ctx.bytecode)
+}
+
+emit_jump :: proc(target_index: int = -1) -> int {
+    jump_index := next_inst_index()
+    offset := 0
+    if target_index >= 0 {
+        offset = target_index - (jump_index + 1)
+    }
+
+    inst := u32(vm.InstJump{ op= .JUMP, offset= i32(offset) })
+    append(&Ctx.bytecode, inst)
+
+    return jump_index
+}
+
+emit_jump_false :: proc(cond_slot: int, target_index: int = -1) -> int {
+    record_slots(cond_slot)
+
+    jump_index := next_inst_index()
+    offset := 0
+    if target_index >= 0 {
+        offset = target_index - (jump_index + 1)
+    }
+
+    inst := u32(vm.InstAsBx{ op= .JUMP_FALSE, a= u8(cond_slot), sb= i16(offset) })
+    append(&Ctx.bytecode, inst)
+
+    return jump_index
+}
+
+patch_jump :: proc(jump_index: int) {
+    word := Ctx.bytecode[jump_index]
+    target_index := next_inst_index()
+    offset := target_index - (jump_index + 1)
+
+    op := vm.decode_op(word)
+    if op == .JUMP {
+        inst := u32(vm.InstJump{ op= .JUMP, offset= i32(offset) })
+        Ctx.bytecode[jump_index] = inst
+        return
+    }
+
+    if op == .JUMP_FALSE {
+        old_inst := vm.InstAsBx(word)
+        inst := u32(vm.InstAsBx{ op= .JUMP_FALSE, a= old_inst.a, sb= i16(offset) })
+        Ctx.bytecode[jump_index] = inst
+        return
+    }
+
+    panic("patch_jump expected JUMP or JUMP_FALSE")
+}
+
+
 // Calls and returns ==============================================================================
 
-call :: proc(call_base, arg_count, wanted_result_count: int) {
+emit_call :: proc(call_base, arg_count, requested_results: int) {
     occupied_call_slots := arg_count + 1
-    if wanted_result_count > occupied_call_slots {
-        occupied_call_slots = wanted_result_count
+    if requested_results > occupied_call_slots {
+        occupied_call_slots = requested_results
     }
     record_slots(call_base + occupied_call_slots - 1)
 
-    inst := u32(vm.InstABC{ op= .CALL, a= u8(call_base), b= u8(arg_count), c= u8(wanted_result_count) })
+    inst := u32(vm.InstABC{ op= .CALL, a= u8(call_base), b= u8(arg_count), c= u8(requested_results) })
     append(&Ctx.bytecode, inst)
 }
 
 
-return_values :: proc(first_slot, result_count: int) {
+emit_return :: proc(first_slot, result_count: int) {
     if result_count > 0 {
         record_slots(first_slot + result_count - 1)
     }
@@ -332,7 +405,7 @@ return_values :: proc(first_slot, result_count: int) {
     append(&Ctx.bytecode, inst)
 }
 
-halt :: proc() {
+emit_halt :: proc() {
     inst := u32(vm.InstABC{ op= .HALT })
     append(&Ctx.bytecode, inst)
 }
@@ -340,14 +413,14 @@ halt :: proc() {
 
 // Global bindings ================================================================================
 
-get_global :: proc(dst, name_const: int) {
+emit_get_global :: proc(dst, name_const: int) {
     record_slots(dst)
 
     inst := u32(vm.InstABx{ op= .GET_GLOBAL, a= u8(dst), b= u16(name_const) })
     append(&Ctx.bytecode, inst)
 }
 
-set_global :: proc(src, name_const: int) {
+emit_set_global :: proc(src, name_const: int) {
     record_slots(src)
 
     inst := u32(vm.InstABx{ op= .SET_GLOBAL, a= u8(src), b= u16(name_const) })
