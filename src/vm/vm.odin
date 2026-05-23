@@ -49,8 +49,8 @@ Opcode :: enum u8 {
     RETURN,        // ABx: A=first_return, B=produced_results
 
     // Global Bindings
-    GET_GLOBAL,    // ABx: A=dst, B=name_const
-    SET_GLOBAL,    // ABx: A=src, B=name_const
+    GET_GLOBAL,    // ABx: A=dst, B=binding_id
+    SET_GLOBAL,    // ABx: A=src, B=binding_id
 }
 
 
@@ -192,12 +192,19 @@ Value :: union {
 }
 
 
-// Globals ========================================================================================
+// Bindings =======================================================================================
 
-// `globals` is the active global environment map.
-// GET_GLOBAL reads from `globals.items`.
-// SET_GLOBAL writes to `globals.items`.
-// Miss returns nil. Setting nil deletes the name.
+MAX_BINDINGS :: 256
+
+BindingId :: distinct int
+
+// BindingTable is a named value namespace.
+// BindingId values are indexes into one specific BindingTable.
+BindingTable :: struct {
+    names:  [MAX_BINDINGS]string,
+    values: [MAX_BINDINGS]Value,
+    count:  int,
+}
 
 
 // Call frames ====================================================================================
@@ -222,8 +229,8 @@ CallFrame :: struct {
 
 // VM state =======================================================================================
 
-VM_MAX_SLOTS :: 4096
-VM_MAX_CALL_FRAMES :: 256
+MAX_VM_SLOTS :: 4096
+MAX_CALLFRAMES :: 256
 
 // `functions[0]` is the entry function by convention and must be a FUNCTION_PROTO object.
 // LOAD_FUNC indexes `functions` because slots store runtime Values.
@@ -233,16 +240,16 @@ VM_MAX_CALL_FRAMES :: 256
 // `call_frames` is fixed runtime storage for active bytecode calls.
 // `call_frame_count` is the number of occupied entries in call_frames.
 // The current frame is call_frames[call_frame_count - 1].
-// `globals` is the active global environment map.
+// `global_env` is the active global namespace.
 
 State :: struct {
     function_table:   []^ObjectHeader,
-    slots:            [VM_MAX_SLOTS]Value,
+    slots:            [MAX_VM_SLOTS]Value,
     slot_count:       int,
 
-    frame_stack:      [VM_MAX_CALL_FRAMES]CallFrame,
+    frame_stack:      [MAX_CALLFRAMES]CallFrame,
     frame_count:      int,
-    globals:          ^MapObject,
+    global_env:       BindingTable,
 }
 
 
@@ -917,13 +924,13 @@ run_vm :: proc(vm: ^State) -> Value {
                 proto_function := cast(^FunctionProtoObject)callee_header
                 callee_proto := proto_function.proto
 
-                if vm.frame_count >= VM_MAX_CALL_FRAMES {
+                if vm.frame_count >= MAX_CALLFRAMES {
                     panic("CALL exceeded VM_MAX_CALL_FRAMES")
                 }
 
                 callee_slot_base := args_base
                 callee_slot_top := callee_slot_base + callee_proto.frame_slot_count
-                if callee_slot_top > VM_MAX_SLOTS {
+                if callee_slot_top > MAX_VM_SLOTS {
                     panic("CALL exceeded VM_MAX_SLOTS")
                 }
 
@@ -953,36 +960,14 @@ run_vm :: proc(vm: ^State) -> Value {
         case .GET_GLOBAL:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
-            name_const := frame.proto.const_pool[int(inst.b)]
-            name_header, is_object := name_const.(^ObjectHeader)
-            if !is_object || name_header.kind != .STRING {
-                panic("GET_GLOBAL expected string const")
-            }
-
-            global_name := cast(^StringObject)name_header
-            global_value, exists := vm.globals.data[global_name.data]
-            if exists {
-                vm.slots[dst] = global_value
-            } else {
-                vm.slots[dst] = Value{}
-            }
+            binding_id := int(inst.b)
+            vm.slots[dst] = vm.global_env.values[binding_id]
 
         case .SET_GLOBAL:
             inst := InstABx(word)
             src := frame.slot_base + int(inst.a)
-            name_const := frame.proto.const_pool[int(inst.b)]
-            name_header, is_object := name_const.(^ObjectHeader)
-            if !is_object || name_header.kind != .STRING {
-                panic("SET_GLOBAL expected string const")
-            }
-
-            global_name := cast(^StringObject)name_header
-            global_value := vm.slots[src]
-            if global_value == nil {
-                delete_key(&vm.globals.data, global_name.data)
-            } else {
-                vm.globals.data[global_name.data] = global_value
-            }
+            binding_id := int(inst.b)
+            vm.global_env.values[binding_id] = vm.slots[src]
 
         case .RETURN:
             inst := InstABx(word)

@@ -9,6 +9,7 @@ import "../kiln"
 
 Ctx := struct {
     function_table:   [dynamic]^vm.ObjectHeader,
+    global_env:       vm.BindingTable,
     function_index:   int,
     name:             string,
     param_count:      int,
@@ -28,28 +29,37 @@ record_slots :: proc(slots: ..int) {
     }
 }
 
-bind_native_global :: proc(globals: ^vm.MapObject, name: string, native_proc: vm.FunctionNative) {
+bind_global :: proc(name: string) -> vm.BindingId {
+    for binding_index := 0; binding_index < Ctx.global_env.count; binding_index += 1 {
+        if Ctx.global_env.names[binding_index] == name {
+            return vm.BindingId(binding_index)
+        }
+    }
+
+    binding_id := vm.BindingId(Ctx.global_env.count)
+    Ctx.global_env.names[Ctx.global_env.count] = name
+    Ctx.global_env.count += 1
+
+    return binding_id
+}
+
+bind_native_global :: proc(name: string, native_proc: vm.FunctionNative) {
     native_function := new(vm.FunctionNativeObject)
     native_function.header.kind = .FUNCTION_NATIVE
     native_function.name = name
     native_function.native_proc = native_proc
 
-    globals.data[name] = vm.Value(cast(^vm.ObjectHeader)native_function)
+    binding_id := bind_global(name)
+    Ctx.global_env.values[int(binding_id)] = vm.Value(cast(^vm.ObjectHeader)native_function)
 }
 
-bind_global_env :: proc() -> ^vm.MapObject {
-    globals := new(vm.MapObject)
-    globals.header.kind = .MAP
-    globals.data = make(map[string]vm.Value)
-
-    bind_native_global(globals, "print", kiln.native_print)
-    bind_native_global(globals, "type", kiln.native_type)
-    bind_native_global(globals, "length", kiln.native_length)
-    bind_native_global(globals, "assert", kiln.native_assert)
-    bind_native_global(globals, "to_string", kiln.native_to_string)
-    bind_native_global(globals, "to_number", kiln.native_to_number)
-
-    return globals
+bind_global_env :: proc() {
+    bind_native_global("print", kiln.native_print)
+    bind_native_global("type", kiln.native_type)
+    bind_native_global("length", kiln.native_length)
+    bind_native_global("assert", kiln.native_assert)
+    bind_native_global("to_string", kiln.native_to_string)
+    bind_native_global("to_number", kiln.native_to_number)
 }
 
 // VM state construction ==========================================================================
@@ -57,7 +67,7 @@ bind_global_env :: proc() -> ^vm.MapObject {
 build_vm_state :: proc() -> vm.State {
     return vm.State{
         function_table = Ctx.function_table[:],
-        globals        = bind_global_env(),
+        global_env     = Ctx.global_env,
     }
 }
 
@@ -65,6 +75,10 @@ build_vm_state :: proc() -> vm.State {
 // Proto construction =============================================================================
 
 begin_proto :: proc(name: string, param_count: int) -> int {
+    if Ctx.global_env.count == 0 {
+        bind_global_env()
+    }
+
     function_index := len(Ctx.function_table)
     append(&Ctx.function_table, nil)
 
@@ -413,16 +427,16 @@ emit_halt :: proc() {
 
 // Global bindings ================================================================================
 
-emit_get_global :: proc(dst, name_const: int) {
+emit_get_global :: proc(dst: int, binding_id: vm.BindingId) {
     record_slots(dst)
 
-    inst := u32(vm.InstABx{ op= .GET_GLOBAL, a= u8(dst), b= u16(name_const) })
+    inst := u32(vm.InstABx{ op= .GET_GLOBAL, a= u8(dst), b= u16(int(binding_id)) })
     append(&Ctx.bytecode, inst)
 }
 
-emit_set_global :: proc(src, name_const: int) {
+emit_set_global :: proc(src: int, binding_id: vm.BindingId) {
     record_slots(src)
 
-    inst := u32(vm.InstABx{ op= .SET_GLOBAL, a= u8(src), b= u16(name_const) })
+    inst := u32(vm.InstABx{ op= .SET_GLOBAL, a= u8(src), b= u16(int(binding_id)) })
     append(&Ctx.bytecode, inst)
 }
