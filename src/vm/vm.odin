@@ -9,7 +9,7 @@ Opcode :: enum u8 {
     LOAD_TRUE,     // Ax: A=dst
     LOAD_FALSE,    // Ax: A=dst
     LOAD_CONST,    // ABx: A=dst, B=const
-    LOAD_FUNC,     // ABx: A=dst, B=function
+    LOAD_FUNC,     // ABx: A=dst, B=child_proto
     MOVE,          // ABx: A=dst, B=src
 
     // Array Operations
@@ -90,20 +90,20 @@ InstJump :: bit_field u32 {
 }
 
 
-// Heap object header =============================================================================
+// Heap objects ===================================================================================
 
-// Heap-backed values start with ObjectHeader.
-// Value stores heap-backed values as ^ObjectHeader and uses kind to recover the full object type.
+// Heap-backed values start with Object.
+// Value stores heap-backed values as ^Object and uses kind to recover the full object type.
 
 ObjectKind :: enum u8 {
     STRING,
-    FUNCTION_PROTO,
-    FUNCTION_NATIVE,
+    PROTO_FUNCTION,
+    NATIVE_FUNCTION,
     ARRAY,
     MAP,
 }
 
-ObjectHeader :: struct {
+Object :: struct {
     kind: ObjectKind,
 }
 
@@ -111,48 +111,50 @@ ObjectHeader :: struct {
 // String objects =================================================================================
 
 StringObject :: struct {
-    header: ObjectHeader, // must be first
+    header: Object, // must be first
     data:   string,
 }
 
 // Array objects ==================================================================================
 
 ArrayObject :: struct {
-    header: ObjectHeader, // must be first
+    header: Object, // must be first
     data:  [dynamic]Value,
 }
 
 // Map objects ====================================================================================
 
 MapObject :: struct {
-    header: ObjectHeader, // must be first
+    header: Object, // must be first
     data:  map[string]Value,
 }
 
 
-// Function values ================================================================================
+// Functions ======================================================================================
 
-// FunctionProto is compiled bytecode function data.
+// Proto is compiled bytecode function data.
 // It is not itself the runtime function value.
 // `bytecode` is the fixed instruction stream for the function.
 // `const_pool` is the fixed constant table used by that bytecode.
+// `child_protos` is the fixed table of function bodies declared inside this proto.
 // `frame_slot_count` is the size of the function's slot window.
 
-FunctionProto :: struct {
+Proto :: struct {
     name:        string,
     bytecode:    []u32,
     const_pool:  []Value,
+    child_protos: []^Proto,
     frame_slot_count: int,
     param_count: int,
 }
 
-// FunctionNative is an Odin-backed function implementation.
+// NativeFunction is an Odin-backed function implementation.
 // Args live in vmState.slots starting at args_base.
 // Native functions write results directly into vmState.slots starting at return_slot_base.
 // requested_results is the exact number of result slots the caller requests.
 // The returned int is the number of result values the native function produced.
 
-FunctionNative :: proc(
+NativeFunction :: proc(
     vm: ^State,
     args_base: int,
     arg_count: int,
@@ -160,35 +162,35 @@ FunctionNative :: proc(
     requested_results: int,
 ) -> int
 
-// FunctionProtoObject is a runtime callable object backed by bytecode.
-// Values point to this through ^ObjectHeader when header.kind == .FUNCTION_PROTO.
+// ProtoFunctionObject is a runtime callable object backed by bytecode.
+// Values point to this through ^Object when header.kind == .PROTO_FUNCTION.
 
-FunctionProtoObject :: struct {
-    header: ObjectHeader, // must be first
+ProtoFunctionObject :: struct {
+    header: Object, // must be first
     name:   string,
-    proto:  ^FunctionProto,
+    impl:  ^Proto,
 }
 
-// FunctionNativeObject is a runtime callable object backed by an Odin procedure.
-// Values point to this through ^ObjectHeader when header.kind == .FUNCTION_NATIVE.
+// NativeFunctionObject is a runtime callable object backed by an Odin procedure.
+// Values point to this through ^Object when header.kind == .NATIVE_FUNCTION.
 
-FunctionNativeObject :: struct {
-    header:      ObjectHeader, // must be first
+NativeFunctionObject :: struct {
+    header:      Object, // must be first
     name:        string,
-    native_proc: FunctionNative,
+    impl: NativeFunction,
 }
 
 
 // Value type =====================================================================================
 
 // Nil is the zero value of the union.
-// Immediates live inline. Heap-backed values are stored as ^ObjectHeader.
+// Immediates live inline. Heap-backed values are stored as ^Object.
 
 Value :: union {
     bool,
     i64,
     f64,
-    ^ObjectHeader,
+    ^Object,
 }
 
 
@@ -216,7 +218,7 @@ BindingTable :: struct {
 // `caller_slot_count` restores the caller's occupied slot range when this frame returns.
 
 CallFrame :: struct {
-    proto:                    ^FunctionProto,
+    proto:                    ^Proto,
     instruction_index:        int,
     slot_base:                int,
 
@@ -232,9 +234,9 @@ CallFrame :: struct {
 MAX_VM_SLOTS :: 4096
 MAX_CALLFRAMES :: 256
 
-// `functions[0]` is the entry function by convention and must be a FUNCTION_PROTO object.
-// LOAD_FUNC indexes `functions` because slots store runtime Values.
-// CALL dispatches callable objects by ObjectHeader.kind.
+// `entry_function` is the top-level function object run by `run_vm`.
+// LOAD_FUNC indexes the currently executing proto's child protos.
+// CALL dispatches callable objects by Object.kind.
 // `slots` is fixed runtime storage for all active call-frame windows.
 // `slot_count` is the number of slots claimed by active windows.
 // `call_frames` is fixed runtime storage for active bytecode calls.
@@ -243,7 +245,7 @@ MAX_CALLFRAMES :: 256
 // `global_env` is the active global namespace.
 
 State :: struct {
-    function_table:   []^ObjectHeader,
+    entry_function:   ^ProtoFunctionObject,
     slots:            [MAX_VM_SLOTS]Value,
     slot_count:       int,
 
@@ -471,9 +473,9 @@ value_equal :: proc(lhs, rhs: Value) -> bool {
         return false
     }
 
-    left_object, is_object := lhs.(^ObjectHeader)
+    left_object, is_object := lhs.(^Object)
     if is_object {
-        right_object, is_object := rhs.(^ObjectHeader)
+        right_object, is_object := rhs.(^Object)
         if is_object {
             return left_object == right_object
         }
@@ -559,10 +561,7 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
 // VM runner ======================================================================================
 
 run_vm :: proc(vm: ^State) -> Value {
-    // Entry must be a proto-backed function object.
-    entry_header := vm.function_table[0]
-    entry_function := cast(^FunctionProtoObject)entry_header
-    entry_proto := entry_function.proto
+    entry_proto := vm.entry_function.impl
 
     // Seed the first frame at slot window base 0.
     vm.slot_count = entry_proto.frame_slot_count
@@ -615,8 +614,14 @@ run_vm :: proc(vm: ^State) -> Value {
         case .LOAD_FUNC:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
-            function_index := int(inst.b)
-            vm.slots[dst] = Value(vm.function_table[function_index])
+            child_proto := frame.proto.child_protos[int(inst.b)]
+
+            function_object := new(ProtoFunctionObject)
+            function_object.header.kind = .PROTO_FUNCTION
+            function_object.name = child_proto.name
+            function_object.impl = child_proto
+
+            vm.slots[dst] = Value(cast(^Object)function_object)
 
         case .MOVE:
             inst := InstABx(word)
@@ -634,13 +639,13 @@ run_vm :: proc(vm: ^State) -> Value {
             array_object := new(ArrayObject)
             array_object.header.kind = .ARRAY
             array_object.data = make([dynamic]Value, 0, array_cap)
-            vm.slots[dst] = Value(cast(^ObjectHeader)array_object)
+            vm.slots[dst] = Value(cast(^Object)array_object)
 
         case .ARRAY_LEN:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             src := frame.slot_base + int(inst.b)
-            header, is_object := vm.slots[src].(^ObjectHeader)
+            header, is_object := vm.slots[src].(^Object)
             if !is_object || header.kind != .ARRAY {
                 panic("ARRAY_LEN expected array object")
             }
@@ -655,7 +660,7 @@ run_vm :: proc(vm: ^State) -> Value {
             array_slot := frame.slot_base + int(inst.b)
             index_slot := frame.slot_base + int(inst.c)
 
-            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            array_header, is_object := vm.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_GET expected array object")
             }
@@ -685,7 +690,7 @@ run_vm :: proc(vm: ^State) -> Value {
 
             value := vm.slots[value_slot]
 
-            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            array_header, is_object := vm.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_SET expected array object")
             }
@@ -714,7 +719,7 @@ run_vm :: proc(vm: ^State) -> Value {
 
             value := vm.slots[value_slot]
 
-            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            array_header, is_object := vm.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_PUSH expected array object")
             }
@@ -732,7 +737,7 @@ run_vm :: proc(vm: ^State) -> Value {
             dst := frame.slot_base + int(inst.a)
             array_slot := frame.slot_base + int(inst.b)
 
-            array_header, is_object := vm.slots[array_slot].(^ObjectHeader)
+            array_header, is_object := vm.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_POP expected array object")
             }
@@ -751,13 +756,13 @@ run_vm :: proc(vm: ^State) -> Value {
             map_object := new(MapObject)
             map_object.header.kind = .MAP
             map_object.data = make(map[string]Value)
-            vm.slots[dst] = Value(cast(^ObjectHeader)map_object)
+            vm.slots[dst] = Value(cast(^Object)map_object)
 
         case .MAP_LEN:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             map_slot := frame.slot_base + int(inst.b)
-            map_header, is_object := vm.slots[map_slot].(^ObjectHeader)
+            map_header, is_object := vm.slots[map_slot].(^Object)
             if !is_object || map_header.kind != .MAP {
                 panic("MAP_LEN expected map object")
             }
@@ -770,13 +775,13 @@ run_vm :: proc(vm: ^State) -> Value {
             map_slot := frame.slot_base + int(inst.b)
             key_slot := frame.slot_base + int(inst.c)
 
-            map_header, is_map_object := vm.slots[map_slot].(^ObjectHeader)
+            map_header, is_map_object := vm.slots[map_slot].(^Object)
             if !is_map_object || map_header.kind != .MAP {
                 panic("MAP_GET expected map object")
             }
             map_object := cast(^MapObject)map_header
 
-            key_header, is_key_object := vm.slots[key_slot].(^ObjectHeader)
+            key_header, is_key_object := vm.slots[key_slot].(^Object)
             if !is_key_object || key_header.kind != .STRING {
                 panic("MAP_GET expected string key")
             }
@@ -795,13 +800,13 @@ run_vm :: proc(vm: ^State) -> Value {
             key_slot := frame.slot_base + int(inst.b)
             value_slot := frame.slot_base + int(inst.c)
 
-            map_header, is_map_object := vm.slots[map_slot].(^ObjectHeader)
+            map_header, is_map_object := vm.slots[map_slot].(^Object)
             if !is_map_object || map_header.kind != .MAP {
                 panic("MAP_SET expected map object")
             }
             map_object := cast(^MapObject)map_header
 
-            key_header, is_key_object := vm.slots[key_slot].(^ObjectHeader)
+            key_header, is_key_object := vm.slots[key_slot].(^Object)
             if !is_key_object || key_header.kind != .STRING {
                 panic("MAP_SET expected string key")
             }
@@ -898,17 +903,17 @@ run_vm :: proc(vm: ^State) -> Value {
             arg_count := int(inst.b)
             requested_results := int(inst.c)
 
-            callee_header, is_object := vm.slots[call_base].(^ObjectHeader)
+            callee_header, is_object := vm.slots[call_base].(^Object)
             if !is_object {
                 panic("CALL expected function object")
             }
 
             switch callee_header.kind {
-            case .FUNCTION_NATIVE:
+            case .NATIVE_FUNCTION:
                 // Native calls execute immediately in the caller frame.
                 // Native writes results at return_slot_base and reports produced count.
-                native_function := cast(^FunctionNativeObject)callee_header
-                produced_results := native_function.native_proc(vm, args_base, arg_count, call_base, requested_results)
+                native_function := cast(^NativeFunctionObject)callee_header
+                produced_results := native_function.impl(vm, args_base, arg_count, call_base, requested_results)
 
                 if produced_results < requested_results {
                     // Native produced fewer than caller wants.
@@ -919,10 +924,10 @@ run_vm :: proc(vm: ^State) -> Value {
                 }
                 // Extra produced results beyond requested count are ignored by contract.
 
-            case .FUNCTION_PROTO:
+            case .PROTO_FUNCTION:
                 // Proto calls push a new frame and continue the VM loop.
-                proto_function := cast(^FunctionProtoObject)callee_header
-                callee_proto := proto_function.proto
+                proto_function := cast(^ProtoFunctionObject)callee_header
+                callee_proto := proto_function.impl
 
                 if vm.frame_count >= MAX_CALLFRAMES {
                     panic("CALL exceeded VM_MAX_CALL_FRAMES")

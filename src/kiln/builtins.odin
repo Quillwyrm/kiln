@@ -20,7 +20,7 @@ new_string_value :: proc(text: string) -> vm.Value {
     string_object := new(vm.StringObject)
     string_object.header.kind = .STRING
     string_object.data = text
-    return vm.Value(cast(^vm.ObjectHeader)string_object)
+    return vm.Value(cast(^vm.Object)string_object)
 }
 
 value_to_string :: proc(value: vm.Value) -> string {
@@ -43,7 +43,7 @@ value_to_string :: proc(value: vm.Value) -> string {
         return fmt.tprint(bool_value)
     }
 
-    object_header, is_object := value.(^vm.ObjectHeader)
+    object_header, is_object := value.(^vm.Object)
     if is_object {
         switch object_header.kind {
         case .STRING:
@@ -81,11 +81,11 @@ value_to_string :: proc(value: vm.Value) -> string {
             append(&parts, "}")
             return strings.concatenate(parts[:])
 
-        case .FUNCTION_PROTO:
-            return "<object:FUNCTION_PROTO>"
+        case .PROTO_FUNCTION:
+            return "<object:PROTO_FUNCTION>"
 
-        case .FUNCTION_NATIVE:
-            return "<object:FUNCTION_NATIVE>"
+        case .NATIVE_FUNCTION:
+            return "<object:NATIVE_FUNCTION>"
         }
     }
 
@@ -119,7 +119,7 @@ print_value :: proc(value: vm.Value) {
         return
     }
 
-    object_header, is_object := value.(^vm.ObjectHeader)
+    object_header, is_object := value.(^vm.Object)
     if is_object {
         switch object_header.kind {
         case .STRING:
@@ -157,7 +157,7 @@ print_value :: proc(value: vm.Value) {
             fmt.print("}")
             return
 
-        case .FUNCTION_PROTO, .FUNCTION_NATIVE:
+        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
             fmt.print("<object:", object_header.kind, ">")
             return
         }
@@ -209,7 +209,7 @@ native_type :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, retur
         return 1
     }
 
-    object_header, is_object := value.(^vm.ObjectHeader)
+    object_header, is_object := value.(^vm.Object)
     if !is_object {
         panic("unreachable: type expected valid Value")
     }
@@ -221,7 +221,7 @@ native_type :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, retur
         kiln_state.slots[return_slot_base] = new_string_value("array")
     case .MAP:
         kiln_state.slots[return_slot_base] = new_string_value("map")
-    case .FUNCTION_PROTO, .FUNCTION_NATIVE:
+    case .PROTO_FUNCTION, .NATIVE_FUNCTION:
         kiln_state.slots[return_slot_base] = new_string_value("function")
     }
     return 1
@@ -234,7 +234,7 @@ native_length :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, ret
     }
 
     value := kiln_state.slots[args_base]
-    object_header, is_object := value.(^vm.ObjectHeader)
+    object_header, is_object := value.(^vm.Object)
     if !is_object {
         panic("length expected array, map, or string")
     }
@@ -252,7 +252,7 @@ native_length :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, ret
         string_object := cast(^vm.StringObject)object_header
         kiln_state.slots[return_slot_base] = vm.Value(i64(len(string_object.data)))
         return 1
-    case .FUNCTION_PROTO, .FUNCTION_NATIVE:
+    case .PROTO_FUNCTION, .NATIVE_FUNCTION:
         panic("length expected array, map, or string")
     }
 
@@ -308,7 +308,7 @@ native_to_number :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, 
         return 1
     }
 
-    object_header, is_object := value.(^vm.ObjectHeader)
+    object_header, is_object := value.(^vm.Object)
     if !is_object || object_header.kind != .STRING {
         kiln_state.slots[return_slot_base] = vm.Value{}
         return 1

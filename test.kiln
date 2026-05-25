@@ -1,0 +1,19 @@
+name := "kiln"
+alive := true
+missing := nil
+count := length(name)
+
+print(name, alive, missing, count)
+print(type(name), type(alive), type(missing), type(count), type(print))
+
+text := to_string(count)
+print(text, type(text))
+
+number := to_number("42")
+decimal := to_number("4.5")
+bad := to_number("wat")
+print(number, decimal, bad)
+
+decimal = 0xFF
+print(decimal)
+assert(alive, "alive should be true")
