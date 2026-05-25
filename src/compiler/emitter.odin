@@ -1,11 +1,8 @@
 package compiler
 
 import "../vm"
-import "../kiln"
 
-
-
-// Emitter state ===============================================================================
+// Emitter state ==================================================================================
 
 Emitter := struct {
     entry_function:   ^vm.ProtoFunctionObject,
@@ -53,15 +50,6 @@ bind_native_global :: proc(name: string, native_proc: vm.NativeFunction) {
     Emitter.global_env.values[int(binding_id)] = vm.Value(cast(^vm.Object)native_function)
 }
 
-bind_global_env :: proc() {
-    bind_native_global("print", kiln.native_print)
-    bind_native_global("type", kiln.native_type)
-    bind_native_global("length", kiln.native_length)
-    bind_native_global("assert", kiln.native_assert)
-    bind_native_global("to_string", kiln.native_to_string)
-    bind_native_global("to_number", kiln.native_to_number)
-}
-
 // VM state construction ==========================================================================
 
 build_vm_state :: proc() -> vm.State {
@@ -75,10 +63,6 @@ build_vm_state :: proc() -> vm.State {
 // Proto construction =============================================================================
 
 begin_proto :: proc(name: string, param_count: int) {
-    if Emitter.global_env.count == 0 {
-        bind_global_env()
-    }
-
     Emitter.name = name
     Emitter.param_count = param_count
     Emitter.bytecode = make([dynamic]u32)
@@ -108,8 +92,6 @@ end_proto :: proc() {
     Emitter.entry_function = function_object
 }
 
-
-
 // Constants ======================================================================================
 
 const_int :: proc(value: i64) -> int {
@@ -137,7 +119,7 @@ const_string :: proc(text: string) -> int {
     return const_index
 }
 
-// Instruction Emitters ======================================================================================
+// Instruction emitters ===========================================================================
 
 // Loads ==========================================================================================
 
@@ -183,7 +165,6 @@ emit_move :: proc(dst, src: int) {
     append(&Emitter.bytecode, inst)
 }
 
-
 // Array operations ===============================================================================
 
 emit_new_array :: proc(dst, array_cap: int) {
@@ -228,7 +209,6 @@ emit_array_pop :: proc(dst, src_array: int) {
     append(&Emitter.bytecode, inst)
 }
 
-
 // Map operations =================================================================================
 
 emit_new_map :: proc(dst: int) {
@@ -258,7 +238,6 @@ emit_map_set :: proc(dst_map, key, src: int) {
     inst := u32(vm.InstABC{ op= .MAP_SET, a= u8(dst_map), b= u8(key), c= u8(src) })
     append(&Emitter.bytecode, inst)
 }
-
 
 // Numeric operations =============================================================================
 
@@ -297,7 +276,6 @@ emit_neg :: proc(dst, src: int) {
     append(&Emitter.bytecode, inst)
 }
 
-
 // Comparison and boolean operations ==============================================================
 
 emit_equal :: proc(dst, lhs, rhs: int) {
@@ -327,7 +305,6 @@ emit_not :: proc(dst, src: int) {
     inst := u32(vm.InstABx{ op= .NOT, a= u8(dst), b= u16(src) })
     append(&Emitter.bytecode, inst)
 }
-
 
 // Jumps and patching =============================================================================
 
@@ -388,7 +365,6 @@ patch_jump :: proc(jump_index: int) {
     panic("patch_jump expected JUMP or JUMP_FALSE")
 }
 
-
 // Calls and returns ==============================================================================
 
 emit_call :: proc(call_base, arg_count, requested_results: int) {
@@ -398,10 +374,14 @@ emit_call :: proc(call_base, arg_count, requested_results: int) {
     }
     record_slots(call_base + occupied_call_slots - 1)
 
-    inst := u32(vm.InstABC{ op= .CALL, a= u8(call_base), b= u8(arg_count), c= u8(requested_results) })
+    inst := u32(vm.InstABC{
+        op= .CALL,
+        a= u8(call_base),
+        b= u8(arg_count),
+        c= u8(requested_results),
+    })
     append(&Emitter.bytecode, inst)
 }
-
 
 emit_return :: proc(first_slot, result_count: int) {
     if result_count > 0 {
@@ -416,7 +396,6 @@ emit_halt :: proc() {
     inst := u32(vm.InstABC{ op= .HALT })
     append(&Emitter.bytecode, inst)
 }
-
 
 // Global bindings ================================================================================
 

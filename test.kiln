@@ -2,7 +2,6 @@ name := "kiln"
 alive := true
 missing := nil
 count := length(name)
-
 print(name, alive, missing, count)
 print(type(name), type(alive), type(missing), type(count), type(print))
 

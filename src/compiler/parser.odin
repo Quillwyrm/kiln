@@ -25,6 +25,25 @@ Parser := struct {
 }{}
 
 
+// Compiler state =================================================================================
+
+reset_state :: proc() {
+	Emitter.entry_function = nil
+	Emitter.global_env = vm.BindingTable{}
+	Emitter.name = ""
+	Emitter.param_count = 0
+	Emitter.bytecode = nil
+	Emitter.const_pool = nil
+	Emitter.child_protos = nil
+	Emitter.frame_slot_count = 0
+
+	Parser.tokens = nil
+	Parser.index = 0
+	Parser.local_count = 0
+	Parser.temp_slot = 0
+}
+
+
 // Token cursor ===================================================================================
 
 current_token :: proc() -> Token {
@@ -73,7 +92,23 @@ reset_temps :: proc() {
 	Parser.temp_slot = Parser.local_count
 }
 
-declare_local :: proc(name: string) -> int {
+declare_local :: proc(name_token: Token) -> int {
+	name, _ := name_token.value.(string)
+
+	// Kiln does not allow redeclaring a visible local name.
+	// This first parser has only one flat local scope, so any existing match is an error.
+	for local_index := 0; local_index < Parser.local_count; local_index += 1 {
+		if Parser.locals[local_index].name == name {
+			panic(fmt.tprintf(
+				"parser error at %d:%d offset %d: local already declared: %s",
+				name_token.line,
+				name_token.column,
+				name_token.offset,
+				name,
+			))
+		}
+	}
+
 	slot := Parser.local_count
 	Parser.locals[Parser.local_count] = Local_Binding{name = name, slot = slot}
 	Parser.local_count += 1
@@ -178,11 +213,10 @@ parse_expression_into :: proc(dst: int, requested_results: int = 1) {
 
 parse_local_declaration :: proc() {
 	name_token := consume_token(.IDENT, "expected local name")
-	name, _ := name_token.value.(string)
 
 	consume_token(.DECL, "expected ':=' after local name")
 
-	slot := declare_local(name)
+	slot := declare_local(name_token)
 	parse_expression_into(slot)
 }
 

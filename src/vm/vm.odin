@@ -150,9 +150,11 @@ Proto :: struct {
 
 // NativeFunction is an Odin-backed function implementation.
 // Args live in vmState.slots starting at args_base.
-// Native functions write results directly into vmState.slots starting at return_slot_base.
-// requested_results is the exact number of result slots the caller requests.
+// Native functions write produced results into vm.slots starting at return_slot_base.
+// requested_results is the number of result slots the caller wants.
 // The returned int is the number of result values the native function produced.
+// CALL shapes produced results to requested results, like proto RETURN does:
+// missing requested results become nil, and extra produced results are ignored.
 
 NativeFunction :: proc(
     vm: ^State,
@@ -239,9 +241,9 @@ MAX_CALLFRAMES :: 256
 // CALL dispatches callable objects by Object.kind.
 // `slots` is fixed runtime storage for all active call-frame windows.
 // `slot_count` is the number of slots claimed by active windows.
-// `call_frames` is fixed runtime storage for active bytecode calls.
-// `call_frame_count` is the number of occupied entries in call_frames.
-// The current frame is call_frames[call_frame_count - 1].
+// `frame_stack` is fixed runtime storage for active bytecode calls.
+// `frame_count` is the number of occupied entries in frame_stack.
+// The current frame is frame_stack[frame_count - 1].
 // `global_env` is the active global namespace.
 
 State :: struct {
@@ -725,10 +727,7 @@ run_vm :: proc(vm: ^State) -> Value {
             }
             array_object := cast(^ArrayObject)array_header
 
-            _, append_error := append(&array_object.data, value)
-            if append_error != nil {
-                panic("ARRAY_PUSH failed to append")
-            }
+            append(&array_object.data, value)
 
         // ARRAY_POP A, B
         // Pops tail of array in slot B into slot A. Empty pop is an error.
@@ -930,13 +929,13 @@ run_vm :: proc(vm: ^State) -> Value {
                 callee_proto := proto_function.impl
 
                 if vm.frame_count >= MAX_CALLFRAMES {
-                    panic("CALL exceeded VM_MAX_CALL_FRAMES")
+                    panic("CALL exceeded MAX_CALLFRAMES")
                 }
 
                 callee_slot_base := args_base
                 callee_slot_top := callee_slot_base + callee_proto.frame_slot_count
                 if callee_slot_top > MAX_VM_SLOTS {
-                    panic("CALL exceeded VM_MAX_SLOTS")
+                    panic("CALL exceeded MAX_VM_SLOTS")
                 }
 
                 caller_slot_count := vm.slot_count

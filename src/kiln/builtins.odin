@@ -3,6 +3,7 @@ package kiln
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
+import "../compiler"
 import "../vm"
 
 // Internal Helpers ========================================================================================
@@ -94,6 +95,15 @@ value_to_string :: proc(value: vm.Value) -> string {
 
 
 // Core builtins ==================================================================================
+
+bind_default_globals :: proc() {
+    compiler.bind_native_global("print", native_print)
+    compiler.bind_native_global("type", native_type)
+    compiler.bind_native_global("length", native_length)
+    compiler.bind_native_global("assert", native_assert)
+    compiler.bind_native_global("to_string", native_to_string)
+    compiler.bind_native_global("to_number", native_to_number)
+}
 
 print_value :: proc(value: vm.Value) {
     if value == nil {
