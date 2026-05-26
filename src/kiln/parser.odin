@@ -1,7 +1,6 @@
-package compiler
+package kiln
 
 import "core:fmt"
-import "../vm"
 
 
 // Parser state ===================================================================================
@@ -14,6 +13,7 @@ Local_Binding :: struct {
 }
 
 Parser := struct {
+	source_name: string,
 	tokens: []Token,
 	index:  int,
 
@@ -22,14 +22,17 @@ Parser := struct {
 	locals:      [MAX_LOCALS]Local_Binding,
 	local_count: int,
 	temp_slot:   int,
+	failed:      bool,
 }{}
 
 
 // Compiler state =================================================================================
 
-reset_state :: proc() {
-	Emitter.entry_function = nil
-	Emitter.global_env = vm.BindingTable{}
+reset_compile_state :: proc(state: ^State) {
+	Active_State = state
+	state.error = Error{}
+
+	Emitter.state = state
 	Emitter.name = ""
 	Emitter.param_count = 0
 	Emitter.bytecode = nil
@@ -37,10 +40,23 @@ reset_state :: proc() {
 	Emitter.child_protos = nil
 	Emitter.frame_slot_count = 0
 
+	Scanner.source = ""
+	Scanner.source_name = ""
+	Scanner.index = 0
+	Scanner.line = 1
+	Scanner.column = 1
+	Scanner.token_start = 0
+	Scanner.token_line = 1
+	Scanner.token_column = 1
+	Scanner.tokens = nil
+	Scanner.failed = false
+
 	Parser.tokens = nil
+	Parser.source_name = ""
 	Parser.index = 0
 	Parser.local_count = 0
 	Parser.temp_slot = 0
+	Parser.failed = false
 }
 
 
@@ -64,19 +80,19 @@ advance_token :: proc() -> Token {
 	return token
 }
 
+parser_error :: proc(token: Token, message: string) {
+	set_error(Parser.source_name, token.line, token.column, message)
+	Parser.failed = true
+}
+
 consume_token :: proc(kind: TokenKind, message: string) -> Token {
 	if at_token(kind) {
 		return advance_token()
 	}
 
 	token := current_token()
-	panic(fmt.tprintf(
-		"parser error at %d:%d offset %d: %s",
-		token.line,
-		token.column,
-		token.offset,
-		message,
-	))
+	parser_error(token, message)
+	return Token{}
 }
 
 
@@ -99,13 +115,8 @@ declare_local :: proc(name_token: Token) -> int {
 	// This first parser has only one flat local scope, so any existing match is an error.
 	for local_index := 0; local_index < Parser.local_count; local_index += 1 {
 		if Parser.locals[local_index].name == name {
-			panic(fmt.tprintf(
-				"parser error at %d:%d offset %d: local already declared: %s",
-				name_token.line,
-				name_token.column,
-				name_token.offset,
-				name,
-			))
+			parser_error(name_token, fmt.tprintf("local already declared: %s", name))
+			return 0
 		}
 	}
 
@@ -163,17 +174,15 @@ parse_primary_into :: proc(dst: int) {
 		}
 
 	case:
-		panic(fmt.tprintf(
-			"parser error at %d:%d offset %d: expected expression",
-			token.line,
-			token.column,
-			token.offset,
-		))
+		parser_error(token, "expected expression")
 	}
 }
 
 parse_call :: proc(callee_slot, requested_results: int) {
 	consume_token(.LEFT_PAREN, "expected '(' to start call arguments")
+	if Parser.failed {
+		return
+	}
 
 	// VM call layout is slot-contiguous:
 	//     callee, arg0, arg1, ...
@@ -183,6 +192,9 @@ parse_call :: proc(callee_slot, requested_results: int) {
 	if !at_token(.RIGHT_PAREN) {
 		for {
 			parse_expression_into(callee_slot + 1 + arg_count, 1)
+			if Parser.failed {
+				return
+			}
 			arg_count += 1
 
 			if !at_token(.COMMA) {
@@ -197,11 +209,17 @@ parse_call :: proc(callee_slot, requested_results: int) {
 	}
 
 	consume_token(.RIGHT_PAREN, "expected ')' after call arguments")
+	if Parser.failed {
+		return
+	}
 	emit_call(callee_slot, arg_count, requested_results)
 }
 
 parse_expression_into :: proc(dst: int, requested_results: int = 1) {
 	parse_primary_into(dst)
+	if Parser.failed {
+		return
+	}
 
 	if at_token(.LEFT_PAREN) {
 		parse_call(dst, requested_results)
@@ -213,28 +231,39 @@ parse_expression_into :: proc(dst: int, requested_results: int = 1) {
 
 parse_local_declaration :: proc() {
 	name_token := consume_token(.IDENT, "expected local name")
+	if Parser.failed {
+		return
+	}
 
 	consume_token(.DECL, "expected ':=' after local name")
+	if Parser.failed {
+		return
+	}
 
 	slot := declare_local(name_token)
+	if Parser.failed {
+		return
+	}
 	parse_expression_into(slot)
 }
 
 parse_assignment :: proc() {
 	name_token := consume_token(.IDENT, "expected assignment name")
+	if Parser.failed {
+		return
+	}
 	name, _ := name_token.value.(string)
 
 	slot, is_local := resolve_local(name)
 	if !is_local {
-		panic(fmt.tprintf(
-			"parser error at %d:%d offset %d: assignment target is not a local",
-			name_token.line,
-			name_token.column,
-			name_token.offset,
-		))
+		parser_error(name_token, "assignment target is not a local")
+		return
 	}
 
 	consume_token(.ASSIGN, "expected '=' after assignment name")
+	if Parser.failed {
+		return
+	}
 	parse_expression_into(slot)
 }
 
@@ -258,8 +287,11 @@ parse_statement :: proc() {
 }
 
 parse_top_level_statements :: proc() {
-	for !at_token(.EOF) {
+	for !Parser.failed && !at_token(.EOF) {
 		parse_statement()
+		if Parser.failed {
+			return
+		}
 		reset_temps()
 	}
 }
@@ -267,22 +299,30 @@ parse_top_level_statements :: proc() {
 
 // Source compilation =============================================================================
 
-compile_source :: proc(source: string) -> vm.State {
-	tokens := scan_source(source)
+compile_source :: proc(state: ^State, source, source_name: string) -> ^Error {
+	tokens, scan_error := scan_source(source, source_name)
 	defer delete(tokens)
+	if scan_error != nil {
+		return scan_error
+	}
 
+	Parser.source_name = source_name
 	Parser.tokens = tokens[:]
 	Parser.index = 0
 	Parser.local_count = 0
 	Parser.temp_slot = 0
+	Parser.failed = false
 
 	begin_proto("entry", 0)
 	parse_top_level_statements()
+	if Parser.failed {
+		return &state.error
+	}
 
 	result_slot := alloc_temp()
 	emit_load_nil(result_slot)
 	emit_return(result_slot, 1)
 
 	end_proto()
-	return build_vm_state()
+	return nil
 }

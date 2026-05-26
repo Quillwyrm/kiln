@@ -1,4 +1,4 @@
-package vm
+package kiln
 
 
 // Opcodes ========================================================================================
@@ -150,7 +150,7 @@ Proto :: struct {
 
 // NativeFunction is an Odin-backed function implementation.
 // Args live in vmState.slots starting at args_base.
-// Native functions write produced results into vm.slots starting at return_slot_base.
+// Native functions write produced results into state.slots starting at return_slot_base.
 // requested_results is the number of result slots the caller wants.
 // The returned int is the number of result values the native function produced.
 // CALL shapes produced results to requested results, like proto RETURN does:
@@ -247,6 +247,7 @@ MAX_CALLFRAMES :: 256
 // `global_env` is the active global namespace.
 
 State :: struct {
+    error:            Error,
     entry_function:   ^ProtoFunctionObject,
     slots:            [MAX_VM_SLOTS]Value,
     slot_count:       int,
@@ -562,12 +563,12 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
 
 // VM runner ======================================================================================
 
-run_vm :: proc(vm: ^State) -> Value {
-    entry_proto := vm.entry_function.impl
+run_vm :: proc(state: ^State) -> Value {
+    entry_proto := state.entry_function.impl
 
     // Seed the first frame at slot window base 0.
-    vm.slot_count = entry_proto.frame_slot_count
-    vm.frame_stack[0] = CallFrame {
+    state.slot_count = entry_proto.frame_slot_count
+    state.frame_stack[0] = CallFrame {
         proto                    = entry_proto,
         instruction_index        = 0,
         slot_base                = 0,
@@ -575,11 +576,11 @@ run_vm :: proc(vm: ^State) -> Value {
         requested_results   = 1,
         caller_slot_count = 0,
     }
-    vm.frame_count = 1
+    state.frame_count = 1
 
     for {
         // Current frame is always the last occupied call-frame entry.
-        frame := &vm.frame_stack[vm.frame_count - 1]
+        frame := &state.frame_stack[state.frame_count - 1]
 
         // Fetch then advance instruction_index.
         // Jump offsets are applied relative to this post-fetch index.
@@ -588,7 +589,7 @@ run_vm :: proc(vm: ^State) -> Value {
 
         // Decode/dispatch by opcode, then interpret the matching layout view.
         // All slot operands are frame-relative:
-        // slot[A] == vm.slots[frame.slot_base + A]
+        // slot[A] == state.slots[frame.slot_base + A]
         switch decode_op(word) {
         case .HALT:
             return Value{}
@@ -596,22 +597,22 @@ run_vm :: proc(vm: ^State) -> Value {
         case .LOAD_NIL:
             inst := InstAx(word)
             dst := frame.slot_base + int(inst.a)
-            vm.slots[dst] = Value{}
+            state.slots[dst] = Value{}
 
         case .LOAD_TRUE:
             inst := InstAx(word)
             dst := frame.slot_base + int(inst.a)
-            vm.slots[dst] = Value(bool(true))
+            state.slots[dst] = Value(bool(true))
 
         case .LOAD_FALSE:
             inst := InstAx(word)
             dst := frame.slot_base + int(inst.a)
-            vm.slots[dst] = Value(bool(false))
+            state.slots[dst] = Value(bool(false))
 
         case .LOAD_CONST:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
-            vm.slots[dst] = frame.proto.const_pool[int(inst.b)]
+            state.slots[dst] = frame.proto.const_pool[int(inst.b)]
 
         case .LOAD_FUNC:
             inst := InstABx(word)
@@ -623,13 +624,13 @@ run_vm :: proc(vm: ^State) -> Value {
             function_object.name = child_proto.name
             function_object.impl = child_proto
 
-            vm.slots[dst] = Value(cast(^Object)function_object)
+            state.slots[dst] = Value(cast(^Object)function_object)
 
         case .MOVE:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             src := frame.slot_base + int(inst.b)
-            vm.slots[dst] = vm.slots[src]
+            state.slots[dst] = state.slots[src]
 
         // NEW_ARRAY A, B
         // Creates an empty array in slot A. Length starts at 0.
@@ -641,18 +642,18 @@ run_vm :: proc(vm: ^State) -> Value {
             array_object := new(ArrayObject)
             array_object.header.kind = .ARRAY
             array_object.data = make([dynamic]Value, 0, array_cap)
-            vm.slots[dst] = Value(cast(^Object)array_object)
+            state.slots[dst] = Value(cast(^Object)array_object)
 
         case .ARRAY_LEN:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             src := frame.slot_base + int(inst.b)
-            header, is_object := vm.slots[src].(^Object)
+            header, is_object := state.slots[src].(^Object)
             if !is_object || header.kind != .ARRAY {
                 panic("ARRAY_LEN expected array object")
             }
             array_object := cast(^ArrayObject)header
-            vm.slots[dst] = Value(i64(len(array_object.data)))
+            state.slots[dst] = Value(i64(len(array_object.data)))
 
         // ARRAY_GET A, B, C
         // Reads array[B][index in C] into slot A.
@@ -662,13 +663,13 @@ run_vm :: proc(vm: ^State) -> Value {
             array_slot := frame.slot_base + int(inst.b)
             index_slot := frame.slot_base + int(inst.c)
 
-            array_header, is_object := vm.slots[array_slot].(^Object)
+            array_header, is_object := state.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_GET expected array object")
             }
             array_object := cast(^ArrayObject)array_header
 
-            index_i64, is_i64 := vm.slots[index_slot].(i64)
+            index_i64, is_i64 := state.slots[index_slot].(i64)
             if !is_i64 {
                 panic("ARRAY_GET expected i64 index")
             }
@@ -680,7 +681,7 @@ run_vm :: proc(vm: ^State) -> Value {
             if index >= len(array_object.data) {
                 panic("ARRAY_GET index out of bounds")
             }
-            vm.slots[dst] = array_object.data[index]
+            state.slots[dst] = array_object.data[index]
 
         // ARRAY_SET A, B, C
         // Writes slot B into array A at index in slot C.
@@ -690,15 +691,15 @@ run_vm :: proc(vm: ^State) -> Value {
             value_slot := frame.slot_base + int(inst.b)
             index_slot := frame.slot_base + int(inst.c)
 
-            value := vm.slots[value_slot]
+            value := state.slots[value_slot]
 
-            array_header, is_object := vm.slots[array_slot].(^Object)
+            array_header, is_object := state.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_SET expected array object")
             }
             array_object := cast(^ArrayObject)array_header
 
-            index_i64, is_i64 := vm.slots[index_slot].(i64)
+            index_i64, is_i64 := state.slots[index_slot].(i64)
             if !is_i64 {
                 panic("ARRAY_SET expected i64 index")
             }
@@ -719,9 +720,9 @@ run_vm :: proc(vm: ^State) -> Value {
             array_slot := frame.slot_base + int(inst.a)
             value_slot := frame.slot_base + int(inst.b)
 
-            value := vm.slots[value_slot]
+            value := state.slots[value_slot]
 
-            array_header, is_object := vm.slots[array_slot].(^Object)
+            array_header, is_object := state.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_PUSH expected array object")
             }
@@ -736,7 +737,7 @@ run_vm :: proc(vm: ^State) -> Value {
             dst := frame.slot_base + int(inst.a)
             array_slot := frame.slot_base + int(inst.b)
 
-            array_header, is_object := vm.slots[array_slot].(^Object)
+            array_header, is_object := state.slots[array_slot].(^Object)
             if !is_object || array_header.kind != .ARRAY {
                 panic("ARRAY_POP expected array object")
             }
@@ -744,7 +745,7 @@ run_vm :: proc(vm: ^State) -> Value {
 
             popped_value, ok := pop_safe(&array_object.data)
             if ok {
-                vm.slots[dst] = popped_value
+                state.slots[dst] = popped_value
             } else {
                 panic("ARRAY_POP on empty array")
             }
@@ -755,18 +756,18 @@ run_vm :: proc(vm: ^State) -> Value {
             map_object := new(MapObject)
             map_object.header.kind = .MAP
             map_object.data = make(map[string]Value)
-            vm.slots[dst] = Value(cast(^Object)map_object)
+            state.slots[dst] = Value(cast(^Object)map_object)
 
         case .MAP_LEN:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             map_slot := frame.slot_base + int(inst.b)
-            map_header, is_object := vm.slots[map_slot].(^Object)
+            map_header, is_object := state.slots[map_slot].(^Object)
             if !is_object || map_header.kind != .MAP {
                 panic("MAP_LEN expected map object")
             }
             map_object := cast(^MapObject)map_header
-            vm.slots[dst] = Value(i64(len(map_object.data)))
+            state.slots[dst] = Value(i64(len(map_object.data)))
 
         case .MAP_GET:
             inst := InstABC(word)
@@ -774,13 +775,13 @@ run_vm :: proc(vm: ^State) -> Value {
             map_slot := frame.slot_base + int(inst.b)
             key_slot := frame.slot_base + int(inst.c)
 
-            map_header, is_map_object := vm.slots[map_slot].(^Object)
+            map_header, is_map_object := state.slots[map_slot].(^Object)
             if !is_map_object || map_header.kind != .MAP {
                 panic("MAP_GET expected map object")
             }
             map_object := cast(^MapObject)map_header
 
-            key_header, is_key_object := vm.slots[key_slot].(^Object)
+            key_header, is_key_object := state.slots[key_slot].(^Object)
             if !is_key_object || key_header.kind != .STRING {
                 panic("MAP_GET expected string key")
             }
@@ -788,9 +789,9 @@ run_vm :: proc(vm: ^State) -> Value {
 
             value, exists := map_object.data[key_object.data]
             if exists {
-                vm.slots[dst] = value
+                state.slots[dst] = value
             } else {
-                vm.slots[dst] = Value{}
+                state.slots[dst] = Value{}
             }
 
         case .MAP_SET:
@@ -799,19 +800,19 @@ run_vm :: proc(vm: ^State) -> Value {
             key_slot := frame.slot_base + int(inst.b)
             value_slot := frame.slot_base + int(inst.c)
 
-            map_header, is_map_object := vm.slots[map_slot].(^Object)
+            map_header, is_map_object := state.slots[map_slot].(^Object)
             if !is_map_object || map_header.kind != .MAP {
                 panic("MAP_SET expected map object")
             }
             map_object := cast(^MapObject)map_header
 
-            key_header, is_key_object := vm.slots[key_slot].(^Object)
+            key_header, is_key_object := state.slots[key_slot].(^Object)
             if !is_key_object || key_header.kind != .STRING {
                 panic("MAP_SET expected string key")
             }
             key_object := cast(^StringObject)key_header
 
-            value := vm.slots[value_slot]
+            value := state.slots[value_slot]
             if value == nil {
                 delete_key(&map_object.data, key_object.data)
             } else {
@@ -823,61 +824,61 @@ run_vm :: proc(vm: ^State) -> Value {
             dst := frame.slot_base + int(inst.a)
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
-            vm.slots[dst] = value_add(vm.slots[lhs], vm.slots[rhs])
+            state.slots[dst] = value_add(state.slots[lhs], state.slots[rhs])
 
         case .SUB:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
-            vm.slots[dst] = value_sub(vm.slots[lhs], vm.slots[rhs])
+            state.slots[dst] = value_sub(state.slots[lhs], state.slots[rhs])
 
         case .MUL:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
-            vm.slots[dst] = value_mul(vm.slots[lhs], vm.slots[rhs])
+            state.slots[dst] = value_mul(state.slots[lhs], state.slots[rhs])
 
         case .DIV:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
-            vm.slots[dst] = value_div(vm.slots[lhs], vm.slots[rhs])
+            state.slots[dst] = value_div(state.slots[lhs], state.slots[rhs])
 
         case .NEG:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             src := frame.slot_base + int(inst.b)
-            vm.slots[dst] = value_neg(vm.slots[src])
+            state.slots[dst] = value_neg(state.slots[src])
 
         case .EQUAL:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
-            vm.slots[dst] = Value(value_equal(vm.slots[lhs], vm.slots[rhs]))
+            state.slots[dst] = Value(value_equal(state.slots[lhs], state.slots[rhs]))
 
         case .LESS:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
-            vm.slots[dst] = Value(value_less(vm.slots[lhs], vm.slots[rhs]))
+            state.slots[dst] = Value(value_less(state.slots[lhs], state.slots[rhs]))
 
         case .LESS_OR_EQUAL:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
-            vm.slots[dst] = Value(value_less_or_equal(vm.slots[lhs], vm.slots[rhs]))
+            state.slots[dst] = Value(value_less_or_equal(state.slots[lhs], state.slots[rhs]))
 
         case .NOT:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             src := frame.slot_base + int(inst.b)
-            vm.slots[dst] = Value(value_is_falsey(vm.slots[src]))
+            state.slots[dst] = Value(value_is_falsey(state.slots[src]))
 
         case .JUMP:
             inst := InstJump(word)
@@ -886,7 +887,7 @@ run_vm :: proc(vm: ^State) -> Value {
         case .JUMP_FALSE:
             inst := InstAsBx(word)
             condition := frame.slot_base + int(inst.a)
-            if value_is_falsey(vm.slots[condition]) {
+            if value_is_falsey(state.slots[condition]) {
                 frame.instruction_index += int(inst.sb)
             }
 
@@ -902,7 +903,7 @@ run_vm :: proc(vm: ^State) -> Value {
             arg_count := int(inst.b)
             requested_results := int(inst.c)
 
-            callee_header, is_object := vm.slots[call_base].(^Object)
+            callee_header, is_object := state.slots[call_base].(^Object)
             if !is_object {
                 panic("CALL expected function object")
             }
@@ -912,13 +913,13 @@ run_vm :: proc(vm: ^State) -> Value {
                 // Native calls execute immediately in the caller frame.
                 // Native writes results at return_slot_base and reports produced count.
                 native_function := cast(^NativeFunctionObject)callee_header
-                produced_results := native_function.impl(vm, args_base, arg_count, call_base, requested_results)
+                produced_results := native_function.impl(state, args_base, arg_count, call_base, requested_results)
 
                 if produced_results < requested_results {
                     // Native produced fewer than caller wants.
                     // Fill the missing result slots with nil.
                     for fill_index := produced_results; fill_index < requested_results; fill_index += 1 {
-                        vm.slots[call_base + fill_index] = Value{}
+                        state.slots[call_base + fill_index] = Value{}
                     }
                 }
                 // Extra produced results beyond requested count are ignored by contract.
@@ -928,7 +929,7 @@ run_vm :: proc(vm: ^State) -> Value {
                 proto_function := cast(^ProtoFunctionObject)callee_header
                 callee_proto := proto_function.impl
 
-                if vm.frame_count >= MAX_CALLFRAMES {
+                if state.frame_count >= MAX_CALLFRAMES {
                     panic("CALL exceeded MAX_CALLFRAMES")
                 }
 
@@ -938,12 +939,12 @@ run_vm :: proc(vm: ^State) -> Value {
                     panic("CALL exceeded MAX_VM_SLOTS")
                 }
 
-                caller_slot_count := vm.slot_count
-                if callee_slot_top > vm.slot_count {
-                    vm.slot_count = callee_slot_top
+                caller_slot_count := state.slot_count
+                if callee_slot_top > state.slot_count {
+                    state.slot_count = callee_slot_top
                 }
 
-                vm.frame_stack[vm.frame_count] = CallFrame{
+                state.frame_stack[state.frame_count] = CallFrame{
                     proto                    = callee_proto,
                     instruction_index        = 0,
                     slot_base                = callee_slot_base,
@@ -951,7 +952,7 @@ run_vm :: proc(vm: ^State) -> Value {
                     requested_results   = requested_results,
                     caller_slot_count        = caller_slot_count,
                 }
-                vm.frame_count += 1
+                state.frame_count += 1
 
             case .STRING:
                 panic("CALL expected function object")
@@ -965,24 +966,24 @@ run_vm :: proc(vm: ^State) -> Value {
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             binding_id := int(inst.b)
-            vm.slots[dst] = vm.global_env.values[binding_id]
+            state.slots[dst] = state.global_env.values[binding_id]
 
         case .SET_GLOBAL:
             inst := InstABx(word)
             src := frame.slot_base + int(inst.a)
             binding_id := int(inst.b)
-            vm.global_env.values[binding_id] = vm.slots[src]
+            state.global_env.values[binding_id] = state.slots[src]
 
         case .RETURN:
             inst := InstABx(word)
             produced_slot_base := frame.slot_base + int(inst.a)
             produced_results := int(inst.b)
 
-            if vm.frame_count == 1 {
+            if state.frame_count == 1 {
                 // Top-level RETURN ends execution and returns to the host.
                 // Return first produced value when present, else nil.
                 if produced_results > 0 {
-                    return vm.slots[produced_slot_base]
+                    return state.slots[produced_slot_base]
                 }
                 return Value{}
             }
@@ -1000,11 +1001,11 @@ run_vm :: proc(vm: ^State) -> Value {
             if copied_result_count > 0 {
                 if caller_result_base < produced_slot_base {
                     for value_index := 0; value_index < copied_result_count; value_index += 1 {
-                        vm.slots[caller_result_base + value_index] = vm.slots[produced_slot_base + value_index]
+                        state.slots[caller_result_base + value_index] = state.slots[produced_slot_base + value_index]
                     }
                 } else {
                     for value_index := copied_result_count - 1; value_index >= 0; value_index -= 1 {
-                        vm.slots[caller_result_base + value_index] = vm.slots[produced_slot_base + value_index]
+                        state.slots[caller_result_base + value_index] = state.slots[produced_slot_base + value_index]
                     }
                 }
             }
@@ -1012,13 +1013,13 @@ run_vm :: proc(vm: ^State) -> Value {
             // Fill missing requested results with nil.
             if copied_result_count < requested_results {
                 for fill_index := copied_result_count; fill_index < requested_results; fill_index += 1 {
-                    vm.slots[caller_result_base + fill_index] = Value{}
+                    state.slots[caller_result_base + fill_index] = Value{}
                 }
             }
 
             // Pop current frame and restore caller's used slot range.
-            vm.slot_count = frame.caller_slot_count
-            vm.frame_count -= 1
+            state.slot_count = frame.caller_slot_count
+            state.frame_count -= 1
         }
     }
 }

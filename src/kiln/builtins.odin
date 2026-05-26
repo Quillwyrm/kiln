@@ -3,28 +3,17 @@ package kiln
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
-import "../compiler"
-import "../vm"
 
 // Internal Helpers ========================================================================================
 
-value_is_falsey :: proc(value: vm.Value) -> bool {
-    bool_value, is_bool := value.(bool)
-    if is_bool {
-        return !bool_value
-    }
-
-    return value == nil
-}
-
-new_string_value :: proc(text: string) -> vm.Value {
-    string_object := new(vm.StringObject)
+new_string_value :: proc(text: string) -> Value {
+    string_object := new(StringObject)
     string_object.header.kind = .STRING
     string_object.data = text
-    return vm.Value(cast(^vm.Object)string_object)
+    return Value(cast(^Object)string_object)
 }
 
-value_to_string :: proc(value: vm.Value) -> string {
+value_to_string :: proc(value: Value) -> string {
     if value == nil {
         return "nil"
     }
@@ -44,16 +33,16 @@ value_to_string :: proc(value: vm.Value) -> string {
         return fmt.tprint(bool_value)
     }
 
-    object_header, is_object := value.(^vm.Object)
+    object_header, is_object := value.(^Object)
     if is_object {
         switch object_header.kind {
         case .STRING:
-            string_object := cast(^vm.StringObject)object_header
+            string_object := cast(^StringObject)object_header
             parts := [?]string{"\"", string_object.data, "\""}
             return strings.concatenate(parts[:])
 
         case .ARRAY:
-            array_object := cast(^vm.ArrayObject)object_header
+            array_object := cast(^ArrayObject)object_header
             parts := make([dynamic]string)
             append(&parts, "[")
             for item_index := 0; item_index < len(array_object.data); item_index += 1 {
@@ -66,7 +55,7 @@ value_to_string :: proc(value: vm.Value) -> string {
             return strings.concatenate(parts[:])
 
         case .MAP:
-            map_object := cast(^vm.MapObject)object_header
+            map_object := cast(^MapObject)object_header
             parts := make([dynamic]string)
             append(&parts, "{")
             item_index := 0
@@ -96,16 +85,17 @@ value_to_string :: proc(value: vm.Value) -> string {
 
 // Core builtins ==================================================================================
 
-bind_default_globals :: proc() {
-    compiler.bind_native_global("print", native_print)
-    compiler.bind_native_global("type", native_type)
-    compiler.bind_native_global("length", native_length)
-    compiler.bind_native_global("assert", native_assert)
-    compiler.bind_native_global("to_string", native_to_string)
-    compiler.bind_native_global("to_number", native_to_number)
+bind_global_env :: proc(state: ^State) {
+    Emitter.state = state
+    bind_native_global("print", native_print)
+    bind_native_global("type", native_type)
+    bind_native_global("length", native_length)
+    bind_native_global("assert", native_assert)
+    bind_native_global("to_string", native_to_string)
+    bind_native_global("to_number", native_to_number)
 }
 
-print_value :: proc(value: vm.Value) {
+print_value :: proc(value: Value) {
     if value == nil {
         fmt.print("nil")
         return
@@ -129,18 +119,18 @@ print_value :: proc(value: vm.Value) {
         return
     }
 
-    object_header, is_object := value.(^vm.Object)
+    object_header, is_object := value.(^Object)
     if is_object {
         switch object_header.kind {
         case .STRING:
-            string_object := cast(^vm.StringObject)object_header
+            string_object := cast(^StringObject)object_header
             fmt.print("\"")
             fmt.print(string_object.data)
             fmt.print("\"")
             return
 
         case .ARRAY:
-            array_object := cast(^vm.ArrayObject)object_header
+            array_object := cast(^ArrayObject)object_header
             fmt.print("[")
             for item_index := 0; item_index < len(array_object.data); item_index += 1 {
                 if item_index > 0 {
@@ -152,7 +142,7 @@ print_value :: proc(value: vm.Value) {
             return
 
         case .MAP:
-            map_object := cast(^vm.MapObject)object_header
+            map_object := cast(^MapObject)object_header
             fmt.print("{")
             item_index := 0
             for key, item_value in map_object.data {
@@ -176,7 +166,7 @@ print_value :: proc(value: vm.Value) {
     panic("unreachable: value must match one Value variant")
 }
 
-native_print :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     for arg_index := 0; arg_index < arg_count; arg_index += 1 {
         if arg_index > 0 {
             fmt.print(" ")
@@ -190,7 +180,7 @@ native_print :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, retu
 }
 
 
-native_type :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("type expected 1 argument")
     }
@@ -219,7 +209,7 @@ native_type :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, retur
         return 1
     }
 
-    object_header, is_object := value.(^vm.Object)
+    object_header, is_object := value.(^Object)
     if !is_object {
         panic("unreachable: type expected valid Value")
     }
@@ -238,29 +228,29 @@ native_type :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, retur
 }
 
 
-native_length :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("length expected 1 argument")
     }
 
     value := kiln_state.slots[args_base]
-    object_header, is_object := value.(^vm.Object)
+    object_header, is_object := value.(^Object)
     if !is_object {
         panic("length expected array, map, or string")
     }
 
     switch object_header.kind {
     case .ARRAY:
-        array_object := cast(^vm.ArrayObject)object_header
-        kiln_state.slots[return_slot_base] = vm.Value(i64(len(array_object.data)))
+        array_object := cast(^ArrayObject)object_header
+        kiln_state.slots[return_slot_base] = Value(i64(len(array_object.data)))
         return 1
     case .MAP:
-        map_object := cast(^vm.MapObject)object_header
-        kiln_state.slots[return_slot_base] = vm.Value(i64(len(map_object.data)))
+        map_object := cast(^MapObject)object_header
+        kiln_state.slots[return_slot_base] = Value(i64(len(map_object.data)))
         return 1
     case .STRING:
-        string_object := cast(^vm.StringObject)object_header
-        kiln_state.slots[return_slot_base] = vm.Value(i64(len(string_object.data)))
+        string_object := cast(^StringObject)object_header
+        kiln_state.slots[return_slot_base] = Value(i64(len(string_object.data)))
         return 1
     case .PROTO_FUNCTION, .NATIVE_FUNCTION:
         panic("length expected array, map, or string")
@@ -270,7 +260,7 @@ native_length :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, ret
 }
 
 
-native_assert :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("assert expected at least 1 argument")
     }
@@ -289,7 +279,7 @@ native_assert :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, ret
 }
 
 
-native_to_string :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("to_string expected 1 argument")
     }
@@ -299,7 +289,7 @@ native_to_string :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, 
 }
 
 
-native_to_number :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("to_number expected 1 argument")
     }
@@ -308,36 +298,36 @@ native_to_number :: proc(kiln_state: ^vm.State, args_base: int, arg_count: int, 
 
     int_value, is_int := value.(i64)
     if is_int {
-        kiln_state.slots[return_slot_base] = vm.Value(int_value)
+        kiln_state.slots[return_slot_base] = Value(int_value)
         return 1
     }
 
     float_value, is_float := value.(f64)
     if is_float {
-        kiln_state.slots[return_slot_base] = vm.Value(float_value)
+        kiln_state.slots[return_slot_base] = Value(float_value)
         return 1
     }
 
-    object_header, is_object := value.(^vm.Object)
+    object_header, is_object := value.(^Object)
     if !is_object || object_header.kind != .STRING {
-        kiln_state.slots[return_slot_base] = vm.Value{}
+        kiln_state.slots[return_slot_base] = Value{}
         return 1
     }
 
-    string_object := cast(^vm.StringObject)object_header
+    string_object := cast(^StringObject)object_header
 
     parsed_int, is_int_text := strconv.parse_i64(string_object.data)
     if is_int_text {
-        kiln_state.slots[return_slot_base] = vm.Value(parsed_int)
+        kiln_state.slots[return_slot_base] = Value(parsed_int)
         return 1
     }
 
     parsed_float, is_float_text := strconv.parse_f64(string_object.data)
     if is_float_text {
-        kiln_state.slots[return_slot_base] = vm.Value(parsed_float)
+        kiln_state.slots[return_slot_base] = Value(parsed_float)
         return 1
     }
 
-    kiln_state.slots[return_slot_base] = vm.Value{}
+    kiln_state.slots[return_slot_base] = Value{}
     return 1
 }

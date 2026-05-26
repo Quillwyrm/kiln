@@ -2,33 +2,48 @@ package kiln
 
 import "core:fmt"
 import "core:os"
-import "../compiler"
-import "../vm"
 
 
 // Runtime entry points ===========================================================================
 
-run_source :: proc(source, source_name: string) {
-    compiler.reset_state()
-    bind_default_globals()
-
-    state := compiler.compile_source(source)
-    vm.run_vm(&state)
+new_state :: proc() -> ^State {
+    return new(State)
 }
 
-run_file :: proc(path: string) {
+delete_state :: proc(state: ^State) {
+    free(state)
+}
+
+run_source :: proc(state: ^State, source, source_name: string) -> ^Error {
+    Active_State = state
+    reset_compile_state(state)
+
+    compile_error := compile_source(state, source, source_name)
+    if compile_error != nil {
+        return compile_error
+    }
+
+    run_vm(state)
+    return nil
+}
+
+run_file :: proc(state: ^State, path: string) -> ^Error {
+    Active_State = state
+
     source_bytes, read_error := os.read_entire_file(path, context.allocator)
     if read_error != nil {
-        panic(fmt.tprintf("failed to read %s", path))
+        return set_error(path, 0, 0, fmt.tprintf("failed to read %s", path))
     }
     defer delete(source_bytes)
-    run_source(string(source_bytes), path)
+    return run_source(state, string(source_bytes), path)
 }
 
-debug_run_file :: proc(path: string) {
+debug_run_file :: proc(state: ^State, path: string) -> ^Error {
+    Active_State = state
+
     source_bytes, read_error := os.read_entire_file(path, context.allocator)
     if read_error != nil {
-        panic(fmt.tprintf("failed to read %s", path))
+        return set_error(path, 0, 0, fmt.tprintf("failed to read %s", path))
     }
     defer delete(source_bytes)
 
@@ -36,5 +51,5 @@ debug_run_file :: proc(path: string) {
     fmt.println(string(source_bytes))
 
     fmt.println("kiln out:")
-    run_source(string(source_bytes), path)
+    return run_source(state, string(source_bytes), path)
 }

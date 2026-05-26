@@ -1,4 +1,4 @@
-package compiler
+package kiln
 
 import "core:fmt"
 import "core:strconv"
@@ -87,6 +87,7 @@ Token :: struct {
 
 Scanner := struct {
 	source: string,
+	source_name: string,
 
 	// Moving scanner cursor. `index` is a byte index into `source`.
 	index:  int,
@@ -99,6 +100,7 @@ Scanner := struct {
 	token_column: int,
 
 	tokens: [dynamic]Token,
+	failed: bool,
 }{}
 
 
@@ -140,14 +142,9 @@ match_next :: proc(expected: u8) -> bool {
 
 // Emit ===========================================================================================
 
-scanner_panic :: proc(message: string) {
-	panic(fmt.tprintf(
-		"scanner error at %d:%d offset %d: %s",
-		Scanner.token_line,
-		Scanner.token_column,
-		Scanner.token_start,
-		message,
-	))
+scanner_error :: proc(message: string) {
+	set_error(Scanner.source_name, Scanner.token_line, Scanner.token_column, message)
+	Scanner.failed = true
 }
 
 emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
@@ -237,17 +234,20 @@ scan_number :: proc() {
 		}
 
 		if Scanner.index == hex_start {
-			scanner_panic("expected hex digits after 0x")
+			scanner_error("expected hex digits after 0x")
+			return
 		}
 
 		if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-			scanner_panic("number literal cannot be followed by identifier characters")
+			scanner_error("number literal cannot be followed by identifier characters")
+			return
 		}
 
 		text := Scanner.source[hex_start:Scanner.index]
 		value, ok := strconv.parse_i64_of_base(text, 16)
 		if !ok {
-			scanner_panic(fmt.tprintf("failed to parse hex literal %q", text))
+			scanner_error(fmt.tprintf("failed to parse hex literal %q", text))
+			return
 		}
 		emit_token(.INT, TokenValue(value))
 		return
@@ -285,13 +285,15 @@ scan_number :: proc() {
 
 	text := Scanner.source[Scanner.token_start:Scanner.index]
 	if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-		scanner_panic("number literal cannot be followed by identifier characters")
+		scanner_error("number literal cannot be followed by identifier characters")
+		return
 	}
 
 	if is_float {
 		value, ok := strconv.parse_f64(text)
 		if !ok {
-			scanner_panic(fmt.tprintf("failed to parse float literal %q", text))
+			scanner_error(fmt.tprintf("failed to parse float literal %q", text))
+			return
 		}
 		emit_token(.FLOAT, TokenValue(value))
 		return
@@ -299,7 +301,8 @@ scan_number :: proc() {
 
 	value, ok := strconv.parse_i64(text)
 	if !ok {
-		scanner_panic(fmt.tprintf("failed to parse int literal %q", text))
+		scanner_error(fmt.tprintf("failed to parse int literal %q", text))
+		return
 	}
 	emit_token(.INT, TokenValue(value))
 }
@@ -311,13 +314,15 @@ scan_string :: proc() {
 
 	for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '"' {
 		if Scanner.source[Scanner.index] == '\n' {
-			scanner_panic("unterminated string")
+			scanner_error("unterminated string")
+			return
 		}
 		advance()
 	}
 
 	if Scanner.index >= len(Scanner.source) {
-		scanner_panic("unterminated string")
+		scanner_error("unterminated string")
+		return
 	}
 
 	text := Scanner.source[string_start:Scanner.index]
@@ -407,16 +412,17 @@ scan_symbol :: proc() {
 		emit_token(.SEMICOLON)
 
 	case:
-		scanner_panic(fmt.tprintf("unexpected character %q", rune(ch)))
+		scanner_error(fmt.tprintf("unexpected character %q", rune(ch)))
 	}
 }
 
 
 // Scanner ========================================================================================
 
-scan_source :: proc(source: string) -> [dynamic]Token {
+scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, error: ^Error) {
 	// Each scan call starts from fresh source/cursor state.
 	Scanner.source = source
+	Scanner.source_name = source_name
 	Scanner.index = 0
 	Scanner.line = 1
 	Scanner.column = 1
@@ -424,8 +430,9 @@ scan_source :: proc(source: string) -> [dynamic]Token {
 	Scanner.token_line = 1
 	Scanner.token_column = 1
 	Scanner.tokens = make([dynamic]Token, 0, len(source) / 4)
+	Scanner.failed = false
 
-	for Scanner.index < len(Scanner.source) {
+	for Scanner.index < len(Scanner.source) && !Scanner.failed {
 		ch := Scanner.source[Scanner.index]
 
 		// Whitespace is non-semantic in Kiln source.
@@ -459,8 +466,12 @@ scan_source :: proc(source: string) -> [dynamic]Token {
 		scan_symbol()
 	}
 
+	if Scanner.failed {
+		return Scanner.tokens, &Active_State.error
+	}
+
 	begin_token()
 	emit_token(.EOF)
 
-	return Scanner.tokens
+	return Scanner.tokens, nil
 }
