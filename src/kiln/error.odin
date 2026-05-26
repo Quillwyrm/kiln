@@ -10,7 +10,7 @@ Error :: struct {
 	message:     string,
 }
 
-Active_State: ^State
+
 
 set_error :: proc(source_name: string, line, column: int, message: string) -> ^Error {
 	Active_State.error = Error{

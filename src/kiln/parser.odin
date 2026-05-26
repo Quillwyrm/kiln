@@ -2,24 +2,22 @@ package kiln
 
 import "core:fmt"
 
+// Parser working state =============================================================================
 
-// Proto-local bindings ===========================================================================
-MAX_FRAME_SLOTS :: 256
-
-Local_Binding :: struct {
-	name: string,
-	slot: int,
-}
-
+Parser := struct {
+	tokens: []Token,
+	token_index: int,
+	failed: bool,
+}{}
 
 // Token cursor ===================================================================================
 
 current_token :: proc() -> Token {
-	return Source_State.tokens[Source_State.token_index]
+	return Parser.tokens[Parser.token_index]
 }
 
 peek_token :: proc() -> Token {
-	return Source_State.tokens[Source_State.token_index + 1]
+	return Parser.tokens[Parser.token_index + 1]
 }
 
 at_token :: proc(kind: TokenKind) -> bool {
@@ -28,22 +26,22 @@ at_token :: proc(kind: TokenKind) -> bool {
 
 advance_token :: proc() -> Token {
 	token := current_token()
-	Source_State.token_index += 1
+	Parser.token_index += 1
 	return token
 }
 
-parser_error :: proc(token: Token, message: string) {
-	set_error(Source_State.source_name, token.line, token.column, message)
-	Source_State.failed = true
+parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
+	set_error(proto_state.source_name, token.line, token.column, message)
+	Parser.failed = true
 }
 
-consume_token :: proc(kind: TokenKind, message: string) -> Token {
+consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string) -> Token {
 	if at_token(kind) {
 		return advance_token()
 	}
 
 	token := current_token()
-	parser_error(token, message)
+	parser_error(proto_state, token, message)
 	return Token{}
 }
 
@@ -52,7 +50,7 @@ consume_token :: proc(kind: TokenKind, message: string) -> Token {
 
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 	if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
-		parser_error(current_token(), "too many slots in proto")
+		parser_error(proto_state, current_token(), "too many slots in proto")
 		return 0
 	}
 
@@ -61,32 +59,32 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 	return slot
 }
 
-declare_local :: proc(proto_state: ^ProtoState, name_token: Token) -> int {
-	name := name_token.value.(string)
+declare_local :: proc(proto_state: ^ProtoState, ident_token: Token) -> int {
+	ident_name := ident_token.value.(string)
 
 	for local_index := 0; local_index < proto_state.local_count; local_index += 1 {
-		if proto_state.locals[local_index].name == name {
-			parser_error(name_token, fmt.tprintf("local already declared: %s", name))
+		if proto_state.local_bindings[local_index].name == ident_name {
+			parser_error(proto_state, ident_token, fmt.tprintf("local already declared: %s", ident_name))
 			return 0
 		}
 	}
 
 	if proto_state.local_count >= MAX_FRAME_SLOTS {
-		parser_error(name_token, "too many local bindings")
+		parser_error(proto_state, ident_token, "too many local bindings")
 		return 0
 	}
 
 	slot := proto_state.local_count
-	proto_state.locals[proto_state.local_count] = Local_Binding{name = name, slot = slot}
+	proto_state.local_bindings[proto_state.local_count] = LocalBinding{name = ident_name, frame_slot = slot}
 	proto_state.local_count += 1
 	proto_state.next_temp_slot = proto_state.local_count
 	return slot
 }
 
-resolve_local :: proc(proto_state: ^ProtoState, name: string) -> (slot: int, found: bool) {
+resolve_local :: proc(proto_state: ^ProtoState, ident_name: string) -> (slot: int, found: bool) {
 	for local_index := proto_state.local_count - 1; local_index >= 0; local_index -= 1 {
-		if proto_state.locals[local_index].name == name {
-			return proto_state.locals[local_index].slot, true
+		if proto_state.local_bindings[local_index].name == ident_name {
+			return proto_state.local_bindings[local_index].frame_slot, true
 		}
 	}
 
@@ -125,27 +123,27 @@ parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
 		emit_load_nil(proto_state, dst)
 
 	case .IDENT:
-		name := token.value.(string)
-		local_slot, is_local := resolve_local(proto_state, name)
+		ident_name := token.value.(string)
+		local_slot, is_local := resolve_local(proto_state, ident_name)
 		if is_local {
 			emit_move(proto_state, dst, local_slot)
 		} else {
-			binding_id, found_global := resolve_global(name)
+			binding_id, found_global := resolve_global(ident_name)
 			if !found_global {
-				parser_error(token, fmt.tprintf("unknown name: %s", name))
+				parser_error(proto_state, token, fmt.tprintf("unknown name: %s", ident_name))
 				return
 			}
 			emit_get_global(proto_state, dst, binding_id)
 		}
 
 	case:
-		parser_error(token, "expected expression")
+		parser_error(proto_state, token, "expected expression")
 	}
 }
 
 parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int) {
-	consume_token(.LEFT_PAREN, "expected '(' to start call arguments")
-	if Source_State.failed {
+	consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
+	if Parser.failed {
 		return
 	}
 
@@ -154,12 +152,12 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
 		for {
 			arg_slot := callee_slot + 1 + arg_count
 			if arg_slot >= MAX_FRAME_SLOTS {
-				parser_error(current_token(), "too many call arguments or temporary slots")
+				parser_error(proto_state, current_token(), "too many call arguments or temporary slots")
 				return
 			}
 
 			parse_expression(proto_state, arg_slot)
-			if Source_State.failed {
+			if Parser.failed {
 				return
 			}
 			arg_count += 1
@@ -175,8 +173,8 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
 		}
 	}
 
-	consume_token(.RIGHT_PAREN, "expected ')' after call arguments")
-	if Source_State.failed {
+	consume_token(proto_state, .RIGHT_PAREN, "expected ')' after call arguments")
+	if Parser.failed {
 		return
 	}
 	emit_call(proto_state, callee_slot, arg_count, requested_results)
@@ -184,7 +182,7 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
 
 parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
 	parse_primary(proto_state, dst)
-	if Source_State.failed {
+	if Parser.failed {
 		return
 	}
 
@@ -198,19 +196,19 @@ parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
 
 parse_statement :: proc(proto_state: ^ProtoState) {
 	if !at_token(.IDENT) {
-		parser_error(current_token(), "expected statement")
+		parser_error(proto_state, current_token(), "expected statement")
 		return
 	}
 
 	next_kind := peek_token().kind
 	if next_kind == .LEFT_PAREN {
 		callee_slot := claim_temp_slot(proto_state)
-		if Source_State.failed {
+		if Parser.failed {
 			return
 		}
 
 		parse_primary(proto_state, callee_slot)
-		if Source_State.failed {
+		if Parser.failed {
 			return
 		}
 
@@ -225,7 +223,7 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 		advance_token()
 
 		slot := declare_local(proto_state, ident_token)
-		if Source_State.failed {
+		if Parser.failed {
 			return
 		}
 
@@ -236,7 +234,7 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 	if next_kind == .ASSIGN {
 		slot, is_local := resolve_local(proto_state, ident_text)
 		if !is_local {
-			parser_error(ident_token, "assignment target is not a local")
+			parser_error(proto_state, ident_token, "assignment target is not a local")
 			return
 		}
 
@@ -246,15 +244,16 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 	}
 
 	parser_error(
+		proto_state,
 		ident_token,
 		fmt.tprintf("invalid bare expression `%s`; expected declaration, assignment, or call statement", ident_text),
 	)
 }
 
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
-	for !Source_State.failed && !at_token(.EOF) {
+	for !Parser.failed && !at_token(.EOF) {
 		parse_statement(proto_state)
-		if Source_State.failed {
+		if Parser.failed {
 			return
 		}
 		proto_state.next_temp_slot = proto_state.local_count
@@ -264,22 +263,26 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 
 // Source compilation =============================================================================
 
-compile_source :: proc(state: ^State, source, source_name: string) -> ^Error {
+compile_source :: proc(source, source_name: string) -> ^Error {
 	tokens, scan_error := scan_source(source, source_name)
 	defer delete(tokens)
 	if scan_error != nil {
 		return scan_error
 	}
 
-	entry_proto_state := begin_proto("entry", 0)
+	Parser.tokens = tokens[:]
+	Parser.token_index = 0
+	Parser.failed = false
+
+	entry_proto_state := begin_proto(source_name, "entry", 0)
 	parse_top_level_statements(&entry_proto_state)
-	if Source_State.failed {
-		return &state.error
+	if Parser.failed {
+		return &Active_State.error
 	}
 
 	return_slot := claim_temp_slot(&entry_proto_state)
-	if Source_State.failed {
-		return &state.error
+	if Parser.failed {
+		return &Active_State.error
 	}
 
 	emit_load_nil(&entry_proto_state, return_slot)
@@ -292,6 +295,6 @@ compile_source :: proc(state: ^State, source, source_name: string) -> ^Error {
 		name   = entry_proto.name,
 		impl   = entry_proto,
 	}
-	state.entry_function = entry_function
+	Active_State.entry_function = entry_function
 	return nil
 }

@@ -1,17 +1,29 @@
 package kiln
 
+// Proto-local bindings ===========================================================================
+
+MAX_FRAME_SLOTS :: 256
+
+LocalBinding :: struct {
+	name: string,
+	frame_slot: int,
+}
+
 // Proto state ====================================================================================
 
 ProtoState :: struct {
-    name:             string,
-    param_count:      int,
-    bytecode:         [dynamic]u32,
-    const_pool:       [dynamic]Value,
-    child_protos:     [dynamic]^Proto,
-    frame_slot_count: int,
-    locals:           [MAX_FRAME_SLOTS]Local_Binding,
-    local_count:      int,
-    next_temp_slot:   int,
+	source_name: string,
+	name:        string,
+	param_count: int,
+
+	bytecode:     [dynamic]u32,
+	const_pool:   [dynamic]Value,
+	child_protos: [dynamic]^Proto,
+
+	frame_slot_count: int,
+	local_bindings:   [MAX_FRAME_SLOTS]LocalBinding,
+	local_count:      int,
+	next_temp_slot:   int,
 }
 
 // Internals ======================================================================================
@@ -25,23 +37,23 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
     }
 }
 
-declare_global :: proc(name: string) -> BindingId {
+declare_global :: proc(binding_name: string) -> BindingId {
     for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
-        if Active_State.global_env.names[binding_index] == name {
+        if Active_State.global_env.names[binding_index] == binding_name {
             return BindingId(binding_index)
         }
     }
 
     binding_id := BindingId(Active_State.global_env.count)
-    Active_State.global_env.names[Active_State.global_env.count] = name
+    Active_State.global_env.names[Active_State.global_env.count] = binding_name
     Active_State.global_env.count += 1
 
     return binding_id
 }
 
-resolve_global :: proc(name: string) -> (binding_id: BindingId, found: bool) {
+resolve_global :: proc(binding_name: string) -> (binding_id: BindingId, found: bool) {
     for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
-        if Active_State.global_env.names[binding_index] == name {
+        if Active_State.global_env.names[binding_index] == binding_name {
             return BindingId(binding_index), true
         }
     }
@@ -62,8 +74,9 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
 // Proto construction =============================================================================
 
-begin_proto :: proc(name: string, param_count: int) -> ProtoState {
+begin_proto :: proc(source_name, name: string, param_count: int) -> ProtoState {
     return ProtoState{
+        source_name      = source_name,
         name             = name,
         param_count      = param_count,
         bytecode         = make([dynamic]u32),
@@ -74,12 +87,26 @@ begin_proto :: proc(name: string, param_count: int) -> ProtoState {
 }
 
 end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
+    bytecode := make([]u32, len(proto_state.bytecode))
+    copy(bytecode, proto_state.bytecode[:])
+
+    const_pool := make([]Value, len(proto_state.const_pool))
+    copy(const_pool, proto_state.const_pool[:])
+
+    child_protos := make([]^Proto, len(proto_state.child_protos))
+    copy(child_protos, proto_state.child_protos[:])
+
+    delete(proto_state.bytecode)
+    delete(proto_state.const_pool)
+    delete(proto_state.child_protos)
+
     proto := new(Proto)
     proto^ = Proto{
+        source_name      = proto_state.source_name,
         name             = proto_state.name,
-        bytecode         = proto_state.bytecode[:],
-        const_pool       = proto_state.const_pool[:],
-        child_protos     = proto_state.child_protos[:],
+        bytecode         = bytecode,
+        const_pool       = const_pool,
+        child_protos     = child_protos,
         frame_slot_count = proto_state.frame_slot_count,
         param_count      = proto_state.param_count,
     }

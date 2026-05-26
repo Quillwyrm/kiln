@@ -82,57 +82,52 @@ Token :: struct {
 	column: int, // 1-based source column where this token begins
 }
 
+// Scanner working state =========================================================================
 
-// Source state ===================================================================================
-
-Source_State := struct {
+Scanner := struct {
 	source: string,
 	source_name: string,
 
-	// Moving scanner cursor. `index` is a byte index into `source`.
 	index:  int,
 	line:   int,
 	column: int,
 
-	// Start position of the token currently being scanned.
 	token_start:  int,
 	token_line:   int,
 	token_column: int,
 
 	tokens: [dynamic]Token,
-	token_index: int,
 	failed: bool,
 }{}
-
 
 // Cursor =========================================================================================
 
 advance :: proc() -> u8 {
-	ch := Source_State.source[Source_State.index]
-	Source_State.index += 1
+	ch := Scanner.source[Scanner.index]
+	Scanner.index += 1
 
 	if ch == '\n' {
-		Source_State.line += 1
-		Source_State.column = 1
+		Scanner.line += 1
+		Scanner.column = 1
 	} else {
-		Source_State.column += 1
+		Scanner.column += 1
 	}
 
 	return ch
 }
 
 begin_token :: proc() {
-	Source_State.token_start = Source_State.index
-	Source_State.token_line = Source_State.line
-	Source_State.token_column = Source_State.column
+	Scanner.token_start = Scanner.index
+	Scanner.token_line = Scanner.line
+	Scanner.token_column = Scanner.column
 }
 
 match_next :: proc(expected: u8) -> bool {
-	if Source_State.index >= len(Source_State.source) {
+	if Scanner.index >= len(Scanner.source) {
 		return false
 	}
 
-	if Source_State.source[Source_State.index] != expected {
+	if Scanner.source[Scanner.index] != expected {
 		return false
 	}
 
@@ -144,17 +139,17 @@ match_next :: proc(expected: u8) -> bool {
 // Emit ===========================================================================================
 
 scanner_error :: proc(message: string) {
-	set_error(Source_State.source_name, Source_State.token_line, Source_State.token_column, message)
-	Source_State.failed = true
+	set_error(Scanner.source_name, Scanner.token_line, Scanner.token_column, message)
+	Scanner.failed = true
 }
 
 emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
-	append(&Source_State.tokens, Token {
+	append(&Scanner.tokens, Token {
 		kind   = kind,
 		value  = value,
-		offset = Source_State.token_start,
-		line   = Source_State.token_line,
-		column = Source_State.token_column,
+		offset = Scanner.token_start,
+		line   = Scanner.token_line,
+		column = Scanner.token_column,
 	})
 }
 
@@ -178,15 +173,15 @@ is_ident_char :: proc(ch: u8) -> bool {
 
 scan_ident_or_keyword :: proc() {
 	// Identifiers and keywords share the same character rule.
-	for Source_State.index < len(Source_State.source) {
-		ch := Source_State.source[Source_State.index]
+	for Scanner.index < len(Scanner.source) {
+		ch := Scanner.source[Scanner.index]
 		if !is_ident_char(ch) {
 			break
 		}
 		advance()
 	}
 
-	text := Source_State.source[Source_State.token_start:Source_State.index]
+	text := Scanner.source[Scanner.token_start:Scanner.index]
 
 	switch text {
 	case "true":
@@ -216,15 +211,15 @@ scan_ident_or_keyword :: proc() {
 
 scan_number :: proc() {
 	// First pass numbers are decimal integers, hex integers, or decimal floats. No octal or exponent form yet.
-	if Source_State.index + 1 < len(Source_State.source) &&
-	   Source_State.source[Source_State.index] == '0' &&
-	   Source_State.source[Source_State.index + 1] == 'x' {
+	if Scanner.index + 1 < len(Scanner.source) &&
+	   Scanner.source[Scanner.index] == '0' &&
+	   Scanner.source[Scanner.index + 1] == 'x' {
 		advance()
 		advance()
 
-		hex_start := Source_State.index
-		for Source_State.index < len(Source_State.source) {
-			ch := Source_State.source[Source_State.index]
+		hex_start := Scanner.index
+		for Scanner.index < len(Scanner.source) {
+			ch := Scanner.source[Scanner.index]
 			is_hex_digit := ('0' <= ch && ch <= '9') ||
 			                ('a' <= ch && ch <= 'f') ||
 			                ('A' <= ch && ch <= 'F')
@@ -234,17 +229,17 @@ scan_number :: proc() {
 			advance()
 		}
 
-		if Source_State.index == hex_start {
+		if Scanner.index == hex_start {
 			scanner_error("expected hex digits after 0x")
 			return
 		}
 
-		if Source_State.index < len(Source_State.source) && is_ident_char(Source_State.source[Source_State.index]) {
+		if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
 			scanner_error("number literal cannot be followed by identifier characters")
 			return
 		}
 
-		text := Source_State.source[hex_start:Source_State.index]
+		text := Scanner.source[hex_start:Scanner.index]
 		value, ok := strconv.parse_i64_of_base(text, 16)
 		if !ok {
 			scanner_error(fmt.tprintf("failed to parse hex literal %q", text))
@@ -255,13 +250,13 @@ scan_number :: proc() {
 	}
 
 	is_float := false
-	if Source_State.source[Source_State.index] == '.' {
+	if Scanner.source[Scanner.index] == '.' {
 		is_float = true
 		advance()
 	}
 
-	for Source_State.index < len(Source_State.source) {
-		ch := Source_State.source[Source_State.index]
+	for Scanner.index < len(Scanner.source) {
+		ch := Scanner.source[Scanner.index]
 		if !is_digit(ch) {
 			break
 		}
@@ -269,14 +264,14 @@ scan_number :: proc() {
 	}
 
 	// Treat `123.foo` as INT DOT IDENT, not a malformed float.
-	if Source_State.index + 1 < len(Source_State.source) &&
-	   Source_State.source[Source_State.index] == '.' &&
-	   is_digit(Source_State.source[Source_State.index + 1]) {
+	if Scanner.index + 1 < len(Scanner.source) &&
+	   Scanner.source[Scanner.index] == '.' &&
+	   is_digit(Scanner.source[Scanner.index + 1]) {
 		is_float = true
 		advance()
 
-		for Source_State.index < len(Source_State.source) {
-			ch := Source_State.source[Source_State.index]
+		for Scanner.index < len(Scanner.source) {
+			ch := Scanner.source[Scanner.index]
 			if !is_digit(ch) {
 				break
 			}
@@ -284,8 +279,8 @@ scan_number :: proc() {
 		}
 	}
 
-	text := Source_State.source[Source_State.token_start:Source_State.index]
-	if Source_State.index < len(Source_State.source) && is_ident_char(Source_State.source[Source_State.index]) {
+	text := Scanner.source[Scanner.token_start:Scanner.index]
+	if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
 		scanner_error("number literal cannot be followed by identifier characters")
 		return
 	}
@@ -311,29 +306,29 @@ scan_number :: proc() {
 scan_string :: proc() {
 	// First pass strings are plain quoted source slices. Escapes are not interpreted yet.
 	advance()
-	string_start := Source_State.index
+	string_start := Scanner.index
 
-	for Source_State.index < len(Source_State.source) && Source_State.source[Source_State.index] != '"' {
-		if Source_State.source[Source_State.index] == '\n' {
+	for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '"' {
+		if Scanner.source[Scanner.index] == '\n' {
 			scanner_error("unterminated string")
 			return
 		}
 		advance()
 	}
 
-	if Source_State.index >= len(Source_State.source) {
+	if Scanner.index >= len(Scanner.source) {
 		scanner_error("unterminated string")
 		return
 	}
 
-	text := Source_State.source[string_start:Source_State.index]
+	text := Scanner.source[string_start:Scanner.index]
 	advance()
 	emit_token(.STRING, TokenValue(text))
 }
 
 skip_line_comment :: proc() {
 	// Comments are source trivia for the compiler path, so they emit no token.
-	for Source_State.index < len(Source_State.source) && Source_State.source[Source_State.index] != '\n' {
+	for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '\n' {
 		advance()
 	}
 }
@@ -422,20 +417,19 @@ scan_symbol :: proc() {
 
 scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, error: ^Error) {
 	// Each scan call starts from fresh source/cursor state.
-	Source_State.source = source
-	Source_State.source_name = source_name
-	Source_State.index = 0
-	Source_State.line = 1
-	Source_State.column = 1
-	Source_State.token_start = 0
-	Source_State.token_line = 1
-	Source_State.token_column = 1
-	Source_State.tokens = make([dynamic]Token, 0, len(source) / 4)
-	Source_State.token_index = 0
-	Source_State.failed = false
+	Scanner.source = source
+	Scanner.source_name = source_name
+	Scanner.index = 0
+	Scanner.line = 1
+	Scanner.column = 1
+	Scanner.token_start = 0
+	Scanner.token_line = 1
+	Scanner.token_column = 1
+	Scanner.tokens = make([dynamic]Token, 0, len(source) / 4)
+	Scanner.failed = false
 
-	for Source_State.index < len(Source_State.source) && !Source_State.failed {
-		ch := Source_State.source[Source_State.index]
+	for Scanner.index < len(Scanner.source) && !Scanner.failed {
+		ch := Scanner.source[Scanner.index]
 
 		// Whitespace is non-semantic in Kiln source.
 		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
@@ -455,7 +449,7 @@ scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, err
 			continue
 		}
 
-		if ch == '.' && Source_State.index + 1 < len(Source_State.source) && is_digit(Source_State.source[Source_State.index + 1]) {
+		if ch == '.' && Scanner.index + 1 < len(Scanner.source) && is_digit(Scanner.source[Scanner.index + 1]) {
 			scan_number()
 			continue
 		}
@@ -468,12 +462,13 @@ scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, err
 		scan_symbol()
 	}
 
-	if Source_State.failed {
-		return Source_State.tokens, &Active_State.error
+	if Scanner.failed {
+		return Scanner.tokens, &Active_State.error
 	}
 
 	begin_token()
 	emit_token(.EOF)
 
-	return Source_State.tokens, nil
+	return Scanner.tokens, nil
 }
+

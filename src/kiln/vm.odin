@@ -140,6 +140,7 @@ MapObject :: struct {
 // `frame_slot_count` is the size of the function's slot window.
 
 Proto :: struct {
+    source_name: string,
     name:        string,
     bytecode:    []u32,
     const_pool:  []Value,
@@ -256,6 +257,8 @@ State :: struct {
     frame_count:      int,
     global_env:       BindingTable,
 }
+
+Active_State: ^State
 
 
 // Execution ======================================================================================

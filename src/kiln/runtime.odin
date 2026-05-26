@@ -18,7 +18,7 @@ run_source :: proc(state: ^State, source, source_name: string) -> ^Error {
     Active_State = state
     state.error = Error{}
 
-    compile_error := compile_source(state, source, source_name)
+    compile_error := compile_source(source, source_name)
     if compile_error != nil {
         return compile_error
     }
