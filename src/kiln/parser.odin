@@ -3,71 +3,23 @@ package kiln
 import "core:fmt"
 
 
-// Parser state ===================================================================================
-
-MAX_LOCALS :: 256
+// Proto-local bindings ===========================================================================
+MAX_FRAME_SLOTS :: 256
 
 Local_Binding :: struct {
 	name: string,
 	slot: int,
 }
 
-Parser := struct {
-	source_name: string,
-	tokens: []Token,
-	index:  int,
-
-	// First-pass locals live in stable frame slots starting at 0.
-	// Temporary expression/call slots are reused after each statement.
-	locals:      [MAX_LOCALS]Local_Binding,
-	local_count: int,
-	temp_slot:   int,
-	failed:      bool,
-}{}
-
-
-// Compiler state =================================================================================
-
-reset_compile_state :: proc(state: ^State) {
-	Active_State = state
-	state.error = Error{}
-
-	Emitter.state = state
-	Emitter.name = ""
-	Emitter.param_count = 0
-	Emitter.bytecode = nil
-	Emitter.const_pool = nil
-	Emitter.child_protos = nil
-	Emitter.frame_slot_count = 0
-
-	Scanner.source = ""
-	Scanner.source_name = ""
-	Scanner.index = 0
-	Scanner.line = 1
-	Scanner.column = 1
-	Scanner.token_start = 0
-	Scanner.token_line = 1
-	Scanner.token_column = 1
-	Scanner.tokens = nil
-	Scanner.failed = false
-
-	Parser.tokens = nil
-	Parser.source_name = ""
-	Parser.index = 0
-	Parser.local_count = 0
-	Parser.temp_slot = 0
-	Parser.failed = false
-}
-
 
 // Token cursor ===================================================================================
 
 current_token :: proc() -> Token {
-	return Parser.tokens[Parser.index]
+	return Source_State.tokens[Source_State.token_index]
 }
 
 peek_token :: proc() -> Token {
-	return Parser.tokens[Parser.index + 1]
+	return Source_State.tokens[Source_State.token_index + 1]
 }
 
 at_token :: proc(kind: TokenKind) -> bool {
@@ -76,13 +28,13 @@ at_token :: proc(kind: TokenKind) -> bool {
 
 advance_token :: proc() -> Token {
 	token := current_token()
-	Parser.index += 1
+	Source_State.token_index += 1
 	return token
 }
 
 parser_error :: proc(token: Token, message: string) {
-	set_error(Parser.source_name, token.line, token.column, message)
-	Parser.failed = true
+	set_error(Source_State.source_name, token.line, token.column, message)
+	Source_State.failed = true
 }
 
 consume_token :: proc(kind: TokenKind, message: string) -> Token {
@@ -98,39 +50,43 @@ consume_token :: proc(kind: TokenKind, message: string) -> Token {
 
 // Slots and locals ===============================================================================
 
-alloc_temp :: proc() -> int {
-	slot := Parser.temp_slot
-	Parser.temp_slot += 1
+claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
+	if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
+		parser_error(current_token(), "too many slots in proto")
+		return 0
+	}
+
+	slot := proto_state.next_temp_slot
+	proto_state.next_temp_slot += 1
 	return slot
 }
 
-reset_temps :: proc() {
-	Parser.temp_slot = Parser.local_count
-}
+declare_local :: proc(proto_state: ^ProtoState, name_token: Token) -> int {
+	name := name_token.value.(string)
 
-declare_local :: proc(name_token: Token) -> int {
-	name, _ := name_token.value.(string)
-
-	// Kiln does not allow redeclaring a visible local name.
-	// This first parser has only one flat local scope, so any existing match is an error.
-	for local_index := 0; local_index < Parser.local_count; local_index += 1 {
-		if Parser.locals[local_index].name == name {
+	for local_index := 0; local_index < proto_state.local_count; local_index += 1 {
+		if proto_state.locals[local_index].name == name {
 			parser_error(name_token, fmt.tprintf("local already declared: %s", name))
 			return 0
 		}
 	}
 
-	slot := Parser.local_count
-	Parser.locals[Parser.local_count] = Local_Binding{name = name, slot = slot}
-	Parser.local_count += 1
-	Parser.temp_slot = Parser.local_count
+	if proto_state.local_count >= MAX_FRAME_SLOTS {
+		parser_error(name_token, "too many local bindings")
+		return 0
+	}
+
+	slot := proto_state.local_count
+	proto_state.locals[proto_state.local_count] = Local_Binding{name = name, slot = slot}
+	proto_state.local_count += 1
+	proto_state.next_temp_slot = proto_state.local_count
 	return slot
 }
 
-resolve_local :: proc(name: string) -> (slot: int, ok: bool) {
-	for local_index := Parser.local_count - 1; local_index >= 0; local_index -= 1 {
-		if Parser.locals[local_index].name == name {
-			return Parser.locals[local_index].slot, true
+resolve_local :: proc(proto_state: ^ProtoState, name: string) -> (slot: int, found: bool) {
+	for local_index := proto_state.local_count - 1; local_index >= 0; local_index -= 1 {
+		if proto_state.locals[local_index].name == name {
+			return proto_state.locals[local_index].slot, true
 		}
 	}
 
@@ -140,37 +96,46 @@ resolve_local :: proc(name: string) -> (slot: int, ok: bool) {
 
 // Expressions ====================================================================================
 
-parse_primary_into :: proc(dst: int) {
+parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
 	token := advance_token()
 
 	#partial switch token.kind {
 	case .INT:
-		value, _ := token.value.(i64)
-		const_index := const_int(value)
-		emit_load_const(dst, const_index)
+		value := token.value.(i64)
+		const_index := const_int(proto_state, value)
+		emit_load_const(proto_state, dst, const_index)
+
+	case .FLOAT:
+		value := token.value.(f64)
+		const_index := const_float(proto_state, value)
+		emit_load_const(proto_state, dst, const_index)
 
 	case .STRING:
-		value, _ := token.value.(string)
-		const_index := const_string(value)
-		emit_load_const(dst, const_index)
+		text := token.value.(string)
+		const_index := const_string(proto_state, text)
+		emit_load_const(proto_state, dst, const_index)
 
 	case .TRUE:
-		emit_load_true(dst)
+		emit_load_true(proto_state, dst)
 
 	case .FALSE:
-		emit_load_false(dst)
+		emit_load_false(proto_state, dst)
 
 	case .NIL:
-		emit_load_nil(dst)
+		emit_load_nil(proto_state, dst)
 
 	case .IDENT:
-		name, _ := token.value.(string)
-		local_slot, is_local := resolve_local(name)
+		name := token.value.(string)
+		local_slot, is_local := resolve_local(proto_state, name)
 		if is_local {
-			emit_move(dst, local_slot)
+			emit_move(proto_state, dst, local_slot)
 		} else {
-			binding_id := bind_global(name)
-			emit_get_global(dst, binding_id)
+			binding_id, found_global := resolve_global(name)
+			if !found_global {
+				parser_error(token, fmt.tprintf("unknown name: %s", name))
+				return
+			}
+			emit_get_global(proto_state, dst, binding_id)
 		}
 
 	case:
@@ -178,21 +143,23 @@ parse_primary_into :: proc(dst: int) {
 	}
 }
 
-parse_call :: proc(callee_slot, requested_results: int) {
+parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int) {
 	consume_token(.LEFT_PAREN, "expected '(' to start call arguments")
-	if Parser.failed {
+	if Source_State.failed {
 		return
 	}
 
-	// VM call layout is slot-contiguous:
-	//     callee, arg0, arg1, ...
-	// The parser emits each argument directly into the slot after the previous one.
-	// Commas are the required argument separators. A trailing comma before `)` is accepted.
 	arg_count := 0
 	if !at_token(.RIGHT_PAREN) {
 		for {
-			parse_expression_into(callee_slot + 1 + arg_count, 1)
-			if Parser.failed {
+			arg_slot := callee_slot + 1 + arg_count
+			if arg_slot >= MAX_FRAME_SLOTS {
+				parser_error(current_token(), "too many call arguments or temporary slots")
+				return
+			}
+
+			parse_expression(proto_state, arg_slot)
+			if Source_State.failed {
 				return
 			}
 			arg_count += 1
@@ -209,90 +176,88 @@ parse_call :: proc(callee_slot, requested_results: int) {
 	}
 
 	consume_token(.RIGHT_PAREN, "expected ')' after call arguments")
-	if Parser.failed {
+	if Source_State.failed {
 		return
 	}
-	emit_call(callee_slot, arg_count, requested_results)
+	emit_call(proto_state, callee_slot, arg_count, requested_results)
 }
 
-parse_expression_into :: proc(dst: int, requested_results: int = 1) {
-	parse_primary_into(dst)
-	if Parser.failed {
+parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
+	parse_primary(proto_state, dst)
+	if Source_State.failed {
 		return
 	}
 
 	if at_token(.LEFT_PAREN) {
-		parse_call(dst, requested_results)
+		parse_call(proto_state, dst, 1)
 	}
 }
 
 
 // Statements =====================================================================================
 
-parse_local_declaration :: proc() {
-	name_token := consume_token(.IDENT, "expected local name")
-	if Parser.failed {
+parse_statement :: proc(proto_state: ^ProtoState) {
+	if !at_token(.IDENT) {
+		parser_error(current_token(), "expected statement")
 		return
 	}
 
-	consume_token(.DECL, "expected ':=' after local name")
-	if Parser.failed {
-		return
-	}
-
-	slot := declare_local(name_token)
-	if Parser.failed {
-		return
-	}
-	parse_expression_into(slot)
-}
-
-parse_assignment :: proc() {
-	name_token := consume_token(.IDENT, "expected assignment name")
-	if Parser.failed {
-		return
-	}
-	name, _ := name_token.value.(string)
-
-	slot, is_local := resolve_local(name)
-	if !is_local {
-		parser_error(name_token, "assignment target is not a local")
-		return
-	}
-
-	consume_token(.ASSIGN, "expected '=' after assignment name")
-	if Parser.failed {
-		return
-	}
-	parse_expression_into(slot)
-}
-
-parse_expression_statement :: proc() {
-	slot := alloc_temp()
-	parse_expression_into(slot, 0)
-}
-
-parse_statement :: proc() {
-	if at_token(.IDENT) && peek_token().kind == .DECL {
-		parse_local_declaration()
-		return
-	}
-
-	if at_token(.IDENT) && peek_token().kind == .ASSIGN {
-		parse_assignment()
-		return
-	}
-
-	parse_expression_statement()
-}
-
-parse_top_level_statements :: proc() {
-	for !Parser.failed && !at_token(.EOF) {
-		parse_statement()
-		if Parser.failed {
+	next_kind := peek_token().kind
+	if next_kind == .LEFT_PAREN {
+		callee_slot := claim_temp_slot(proto_state)
+		if Source_State.failed {
 			return
 		}
-		reset_temps()
+
+		parse_primary(proto_state, callee_slot)
+		if Source_State.failed {
+			return
+		}
+
+		parse_call(proto_state, callee_slot, 0)
+		return
+	}
+
+	ident_token := advance_token()
+	ident_text := ident_token.value.(string)
+
+	if next_kind == .DECL {
+		advance_token()
+
+		slot := declare_local(proto_state, ident_token)
+		if Source_State.failed {
+			return
+		}
+
+		parse_expression(proto_state, slot)
+		return
+	}
+
+	if next_kind == .ASSIGN {
+		slot, is_local := resolve_local(proto_state, ident_text)
+		if !is_local {
+			parser_error(ident_token, "assignment target is not a local")
+			return
+		}
+
+		advance_token()
+		parse_expression(proto_state, slot)
+		return
+	}
+
+	parser_error(
+		ident_token,
+		fmt.tprintf("invalid bare expression `%s`; expected declaration, assignment, or call statement", ident_text),
+	)
+}
+
+parse_top_level_statements :: proc(proto_state: ^ProtoState) {
+	for !Source_State.failed && !at_token(.EOF) {
+		parse_statement(proto_state)
+		if Source_State.failed {
+			return
+		}
+		proto_state.next_temp_slot = proto_state.local_count
 	}
 }
 
@@ -306,23 +271,27 @@ compile_source :: proc(state: ^State, source, source_name: string) -> ^Error {
 		return scan_error
 	}
 
-	Parser.source_name = source_name
-	Parser.tokens = tokens[:]
-	Parser.index = 0
-	Parser.local_count = 0
-	Parser.temp_slot = 0
-	Parser.failed = false
-
-	begin_proto("entry", 0)
-	parse_top_level_statements()
-	if Parser.failed {
+	entry_proto_state := begin_proto("entry", 0)
+	parse_top_level_statements(&entry_proto_state)
+	if Source_State.failed {
 		return &state.error
 	}
 
-	result_slot := alloc_temp()
-	emit_load_nil(result_slot)
-	emit_return(result_slot, 1)
+	return_slot := claim_temp_slot(&entry_proto_state)
+	if Source_State.failed {
+		return &state.error
+	}
 
-	end_proto()
+	emit_load_nil(&entry_proto_state, return_slot)
+	emit_return(&entry_proto_state, return_slot, 1)
+
+	entry_proto := end_proto(&entry_proto_state)
+	entry_function := new(ProtoFunctionObject)
+	entry_function^ = ProtoFunctionObject{
+		header = Object{kind = .PROTO_FUNCTION},
+		name   = entry_proto.name,
+		impl   = entry_proto,
+	}
+	state.entry_function = entry_function
 	return nil
 }

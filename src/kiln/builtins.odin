@@ -86,7 +86,7 @@ value_to_string :: proc(value: Value) -> string {
 // Core builtins ==================================================================================
 
 bind_global_env :: proc(state: ^State) {
-    Emitter.state = state
+    Active_State = state
     bind_native_global("print", native_print)
     bind_native_global("type", native_type)
     bind_native_global("length", native_length)

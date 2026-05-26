@@ -16,7 +16,7 @@ delete_state :: proc(state: ^State) {
 
 run_source :: proc(state: ^State, source, source_name: string) -> ^Error {
     Active_State = state
-    reset_compile_state(state)
+    state.error = Error{}
 
     compile_error := compile_source(state, source, source_name)
     if compile_error != nil {
