@@ -3,6 +3,7 @@ package kiln
 
 // Error state ====================================================================================
 
+// Error is the current compile/load error payload surfaced to the host.
 Error :: struct {
 	source_name: string,
 	line:        int,
@@ -12,6 +13,8 @@ Error :: struct {
 
 
 
+// set_error overwrites Active_State.error and returns its address.
+// This runtime keeps one active error slot per state.
 set_error :: proc(source_name: string, line, column: int, message: string) -> ^Error {
 	Active_State.error = Error{
 		source_name = source_name,

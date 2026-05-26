@@ -6,6 +6,7 @@ import "core:os"
 
 // Runtime entry points ===========================================================================
 
+// Runtime state lifecycle for host embedding.
 new_state :: proc() -> ^State {
     return new(State)
 }
@@ -14,6 +15,8 @@ delete_state :: proc(state: ^State) {
     free(state)
 }
 
+// run_source is the main host entry for source execution on one state.
+// It selects Active_State, clears previous error, compiles, then executes VM.
 run_source :: proc(state: ^State, source, source_name: string) -> ^Error {
     Active_State = state
     state.error = Error{}
@@ -27,6 +30,8 @@ run_source :: proc(state: ^State, source, source_name: string) -> ^Error {
     return nil
 }
 
+// run_file loads source text from disk and forwards to run_source.
+// File read errors use line=0, column=0 because no source location exists yet.
 run_file :: proc(state: ^State, path: string) -> ^Error {
     Active_State = state
 
@@ -38,6 +43,7 @@ run_file :: proc(state: ^State, path: string) -> ^Error {
     return run_source(state, string(source_bytes), path)
 }
 
+// debug_run_file is a host-facing debug path that prints source and output.
 debug_run_file :: proc(state: ^State, path: string) -> ^Error {
     Active_State = state
 

@@ -2,8 +2,10 @@ package kiln
 
 import "core:fmt"
 
-// Parser working state =============================================================================
+// Parser state ===================================================================================
 
+// Parser is the working state for token-stream parsing.
+// It tracks parse position and parse failure state for one compile operation.
 Parser := struct {
 	tokens: []Token,
 	token_index: int,
@@ -12,6 +14,8 @@ Parser := struct {
 
 // Token cursor ===================================================================================
 
+// Token cursor helpers over Parser.tokens.
+// Parser.token_index points to the current token being parsed.
 current_token :: proc() -> Token {
 	return Parser.tokens[Parser.token_index]
 }
@@ -30,11 +34,15 @@ advance_token :: proc() -> Token {
 	return token
 }
 
+// parser_error records a source-positioned compile error and stops parse flow.
+// source_name comes from the current ProtoState being compiled.
 parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
 	set_error(proto_state.source_name, token.line, token.column, message)
 	Parser.failed = true
 }
 
+// consume_token enforces required grammar tokens.
+// On mismatch it records an error and returns zero token value.
 consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string) -> Token {
 	if at_token(kind) {
 		return advance_token()
@@ -48,6 +56,8 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
 
 // Slots and locals ===============================================================================
 
+// claim_temp_slot reserves one temporary frame slot for expression/call work.
+// Temp slots are bounded by MAX_FRAME_SLOTS due to u8 slot encoding.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 	if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
 		parser_error(proto_state, current_token(), "too many slots in proto")
@@ -59,6 +69,8 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 	return slot
 }
 
+// declare_local binds one identifier to the next local frame slot.
+// Current parser stage is flat-scope: duplicate local names are rejected.
 declare_local :: proc(proto_state: ^ProtoState, ident_token: Token) -> int {
 	ident_name := ident_token.value.(string)
 
@@ -81,6 +93,8 @@ declare_local :: proc(proto_state: ^ProtoState, ident_token: Token) -> int {
 	return slot
 }
 
+// resolve_local finds the nearest local binding by identifier name.
+// Reverse scan returns the most recently declared matching local.
 resolve_local :: proc(proto_state: ^ProtoState, ident_name: string) -> (slot: int, found: bool) {
 	for local_index := proto_state.local_count - 1; local_index >= 0; local_index -= 1 {
 		if proto_state.local_bindings[local_index].name == ident_name {
@@ -94,6 +108,8 @@ resolve_local :: proc(proto_state: ^ProtoState, ident_name: string) -> (slot: in
 
 // Expressions ====================================================================================
 
+// parse_primary emits one primary expression value into dst.
+// IDENT resolves local first, then global binding table by name.
 parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
 	token := advance_token()
 
@@ -141,6 +157,9 @@ parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
 	}
 }
 
+// parse_call lowers callee(args...) using contiguous call slots:
+// callee_slot, arg0, arg1, ...
+// requested_results controls VM CALL result shaping (0 for statements, 1 for expressions).
 parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int) {
 	consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
 	if Parser.failed {
@@ -180,6 +199,8 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
 	emit_call(proto_state, callee_slot, arg_count, requested_results)
 }
 
+// parse_expression currently supports primary expressions plus call suffix.
+// Operator precedence parsing is not in this stage yet.
 parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
 	parse_primary(proto_state, dst)
 	if Parser.failed {
@@ -194,6 +215,10 @@ parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
 
 // Statements =====================================================================================
 
+// parse_statement supports three top-level statement forms:
+// - ident := expression
+// - ident = expression (local-only assignment)
+// - call statement
 parse_statement :: proc(proto_state: ^ProtoState) {
 	if !at_token(.IDENT) {
 		parser_error(proto_state, current_token(), "expected statement")
@@ -250,6 +275,8 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 	)
 }
 
+// parse_top_level_statements parses until EOF or first parse failure.
+// After each statement, next_temp_slot resets to local_count so temporary slots are reused.
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 	for !Parser.failed && !at_token(.EOF) {
 		parse_statement(proto_state)
@@ -263,6 +290,8 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 
 // Source compilation =============================================================================
 
+// compile_source scans source, parses top-level forms, and builds entry proto.
+// On success it installs Active_State.entry_function for VM execution.
 compile_source :: proc(source, source_name: string) -> ^Error {
 	tokens, scan_error := scan_source(source, source_name)
 	defer delete(tokens)

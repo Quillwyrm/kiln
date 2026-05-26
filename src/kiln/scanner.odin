@@ -4,8 +4,10 @@ import "core:fmt"
 import "core:strconv"
 
 
-// Tokens =========================================================================================
+// Token model ====================================================================================
 
+// TokenKind is the set of token types emitted by the scanner.
+// The parser reads this token stream directly.
 TokenKind :: enum {
 	// Stream markers
 	EOF,
@@ -67,12 +69,17 @@ TokenKind :: enum {
 	SEMICOLON,
 }
 
+// TokenValue stores payload data for IDENT/INT/FLOAT/STRING tokens.
+// Other token kinds leave Token.value empty.
 TokenValue :: union {
 	i64,
 	f64,
 	string,
 }
 
+// Token is one scanned unit plus its source location.
+// offset is a byte index in source text.
+// line and column start at 1 to match printed error locations.
 Token :: struct {
 	kind:  TokenKind,
 	value: TokenValue,
@@ -82,8 +89,11 @@ Token :: struct {
 	column: int, // 1-based source column where this token begins
 }
 
-// Scanner working state =========================================================================
+// Scanner state ==================================================================================
 
+// Scanner is the working state used while scanning one source string.
+// It stores source text, position, and emitted tokens.
+// Current design runs one active scan at a time.
 Scanner := struct {
 	source: string,
 	source_name: string,
@@ -100,8 +110,10 @@ Scanner := struct {
 	failed: bool,
 }{}
 
-// Cursor =========================================================================================
+// Cursor helpers =================================================================================
 
+// advance consumes one source byte and updates line/column.
+// Newline increments line and resets column to 1.
 advance :: proc() -> u8 {
 	ch := Scanner.source[Scanner.index]
 	Scanner.index += 1
@@ -116,12 +128,14 @@ advance :: proc() -> u8 {
 	return ch
 }
 
+// begin_token snapshots the source position where the next token starts.
 begin_token :: proc() {
 	Scanner.token_start = Scanner.index
 	Scanner.token_line = Scanner.line
 	Scanner.token_column = Scanner.column
 }
 
+// match_next conditionally consumes one exact following byte.
 match_next :: proc(expected: u8) -> bool {
 	if Scanner.index >= len(Scanner.source) {
 		return false
@@ -136,13 +150,16 @@ match_next :: proc(expected: u8) -> bool {
 }
 
 
-// Emit ===========================================================================================
+// Token emission =================================================================================
 
+// scanner_error records a compile error at the current token start location.
+// Scanner.failed stops scanning after the current step.
 scanner_error :: proc(message: string) {
 	set_error(Scanner.source_name, Scanner.token_line, Scanner.token_column, message)
 	Scanner.failed = true
 }
 
+// emit_token appends one token using the current token-start snapshot.
 emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
 	append(&Scanner.tokens, Token {
 		kind   = kind,
@@ -154,8 +171,9 @@ emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
 }
 
 
-// Character classes =============================================================================
+// Character classes ==============================================================================
 
+// Character classifiers for first-pass ASCII identifier/number rules.
 is_alpha :: proc(ch: u8) -> bool {
 	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
 }
@@ -171,8 +189,8 @@ is_ident_char :: proc(ch: u8) -> bool {
 
 // Token scans ====================================================================================
 
+// scan_ident_or_keyword consumes [A-Za-z_][A-Za-z0-9_]* and maps keywords.
 scan_ident_or_keyword :: proc() {
-	// Identifiers and keywords share the same character rule.
 	for Scanner.index < len(Scanner.source) {
 		ch := Scanner.source[Scanner.index]
 		if !is_ident_char(ch) {
@@ -209,8 +227,12 @@ scan_ident_or_keyword :: proc() {
 	}
 }
 
+// scan_number supports:
+// - decimal ints
+// - hex ints with 0x prefix
+// - decimal floats with optional leading dot (.5)
+// Rejected here: exponent forms (1e3), octal, and identifier-suffixed numerics.
 scan_number :: proc() {
-	// First pass numbers are decimal integers, hex integers, or decimal floats. No octal or exponent form yet.
 	if Scanner.index + 1 < len(Scanner.source) &&
 	   Scanner.source[Scanner.index] == '0' &&
 	   Scanner.source[Scanner.index + 1] == 'x' {
@@ -263,7 +285,7 @@ scan_number :: proc() {
 		advance()
 	}
 
-	// Treat `123.foo` as INT DOT IDENT, not a malformed float.
+	// Keep 123.foo tokenized as INT DOT IDENT.
 	if Scanner.index + 1 < len(Scanner.source) &&
 	   Scanner.source[Scanner.index] == '.' &&
 	   is_digit(Scanner.source[Scanner.index + 1]) {
@@ -303,8 +325,8 @@ scan_number :: proc() {
 	emit_token(.INT, TokenValue(value))
 }
 
+// scan_string consumes a single-line quoted string with no escape decoding.
 scan_string :: proc() {
-	// First pass strings are plain quoted source slices. Escapes are not interpreted yet.
 	advance()
 	string_start := Scanner.index
 
@@ -326,13 +348,14 @@ scan_string :: proc() {
 	emit_token(.STRING, TokenValue(text))
 }
 
+// skip_line_comment consumes //... until newline and emits no token.
 skip_line_comment :: proc() {
-	// Comments are source trivia for the compiler path, so they emit no token.
 	for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '\n' {
 		advance()
 	}
 }
 
+// scan_symbol emits punctuation/operators and handles two-character forms.
 scan_symbol :: proc() {
 	ch := advance()
 
@@ -413,10 +436,11 @@ scan_symbol :: proc() {
 }
 
 
-// Source scanning =================================================================================
+// Source scanning ================================================================================
 
+// scan_source resets Scanner state, emits a full token stream, then EOF.
+// Caller owns the returned [dynamic]Token and must delete it.
 scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, error: ^Error) {
-	// Each scan call starts from fresh source/cursor state.
 	Scanner.source = source
 	Scanner.source_name = source_name
 	Scanner.index = 0
@@ -431,7 +455,7 @@ scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, err
 	for Scanner.index < len(Scanner.source) && !Scanner.failed {
 		ch := Scanner.source[Scanner.index]
 
-		// Whitespace is non-semantic in Kiln source.
+		// Whitespace does not emit tokens.
 		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
 			advance()
 			continue

@@ -2,8 +2,11 @@ package kiln
 
 // Proto-local bindings ===========================================================================
 
+// MAX_FRAME_SLOTS is the per-proto frame slot ceiling.
+// It must stay compatible with u8 slot operands in emitted bytecode layouts.
 MAX_FRAME_SLOTS :: 256
 
+// LocalBinding maps an identifier name to a frame slot index.
 LocalBinding :: struct {
 	name: string,
 	frame_slot: int,
@@ -11,6 +14,8 @@ LocalBinding :: struct {
 
 // Proto state ====================================================================================
 
+// ProtoState is the mutable compile target for one proto/chunk.
+// Parser and codegen both mutate this state while lowering source to bytecode.
 ProtoState :: struct {
 	source_name: string,
 	name:        string,
@@ -28,6 +33,7 @@ ProtoState :: struct {
 
 // Internals ======================================================================================
 
+// record_slots maintains frame_slot_count as max-touched-slot + 1.
 record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
     for slot in slots {
         required_slots := slot + 1
@@ -37,6 +43,9 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
     }
 }
 
+// declare_global returns a BindingId for binding_name.
+// If the name exists, it returns the existing id.
+// Otherwise it appends a new binding and returns its id.
 declare_global :: proc(binding_name: string) -> BindingId {
     for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
         if Active_State.global_env.names[binding_index] == binding_name {
@@ -51,6 +60,7 @@ declare_global :: proc(binding_name: string) -> BindingId {
     return binding_id
 }
 
+// resolve_global looks up an existing binding name without creating one.
 resolve_global :: proc(binding_name: string) -> (binding_id: BindingId, found: bool) {
     for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
         if Active_State.global_env.names[binding_index] == binding_name {
@@ -61,6 +71,7 @@ resolve_global :: proc(binding_name: string) -> (binding_id: BindingId, found: b
     return {}, false
 }
 
+// bind_native_global installs one native callable into global_env by binding name.
 bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION
@@ -74,6 +85,8 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
 // Proto construction =============================================================================
 
+// begin_proto initializes mutable proto construction state.
+// source_name identifies where this proto originated for diagnostics.
 begin_proto :: proc(source_name, name: string, param_count: int) -> ProtoState {
     return ProtoState{
         source_name      = source_name,
@@ -86,6 +99,8 @@ begin_proto :: proc(source_name, name: string, param_count: int) -> ProtoState {
     }
 }
 
+// end_proto finalizes ProtoState into an owned Proto heap object.
+// Dynamic buffers are copied to owned slices, then the dynamic buffers are deleted.
 end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
     bytecode := make([]u32, len(proto_state.bytecode))
     copy(bytecode, proto_state.bytecode[:])
@@ -116,6 +131,7 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
 
 // Constants ======================================================================================
 
+// Constant helpers append values to proto const_pool and return const indexes.
 const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
     const_index := len(proto_state.const_pool)
     append(&proto_state.const_pool, Value(value))
@@ -143,6 +159,8 @@ const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
 
 // Instruction emitters ===========================================================================
 
+// Emitters encode VM instructions directly into proto_state.bytecode.
+// All slot operands are frame-local slot indexes for the current proto.
 // Loads ==========================================================================================
 
 emit_load_nil :: proc(proto_state: ^ProtoState, dst: int) {
@@ -330,8 +348,7 @@ emit_not :: proc(proto_state: ^ProtoState, dst, src: int) {
 
 // Jumps and patching =============================================================================
 
-// Jump offsets are relative to the instruction after the jump.
-// Current code assumes generated offsets fit the VM instruction layouts.
+// Jump offsets are relative to the instruction after the jump fetch.
 
 next_inst_index :: proc(proto_state: ^ProtoState) -> int {
     return len(proto_state.bytecode)
@@ -365,6 +382,8 @@ emit_jump_false :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: 
     return jump_index
 }
 
+// patch_jump rewrites a previously emitted jump to target current bytecode end.
+// Offsets are relative to instruction index after jump fetch.
 patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
     word := proto_state.bytecode[jump_index]
     target_index := next_inst_index(proto_state)
@@ -389,6 +408,7 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
 
 // Calls and returns ==============================================================================
 
+// emit_call records the highest slot touched by this call layout, including requested result slots.
 emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_results: int) {
     occupied_call_slots := arg_count + 1
     if requested_results > occupied_call_slots {

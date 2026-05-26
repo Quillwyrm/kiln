@@ -4,8 +4,9 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 
-// Internal Helpers ========================================================================================
+// Internal helpers ===============================================================================
 
+// new_string_value allocates a VM string object and wraps it as Value.
 new_string_value :: proc(text: string) -> Value {
     string_object := new(StringObject)
     string_object.header.kind = .STRING
@@ -13,6 +14,7 @@ new_string_value :: proc(text: string) -> Value {
     return Value(cast(^Object)string_object)
 }
 
+// value_to_string returns text conversion used by to_string and assert message formatting.
 value_to_string :: proc(value: Value) -> string {
     if value == nil {
         return "nil"
@@ -85,6 +87,7 @@ value_to_string :: proc(value: Value) -> string {
 
 // Core builtins ==================================================================================
 
+// bind_global_env installs the core native builtin set into global_env.
 bind_global_env :: proc(state: ^State) {
     Active_State = state
     bind_native_global("print", native_print)
@@ -95,6 +98,8 @@ bind_global_env :: proc(state: ^State) {
     bind_native_global("to_number", native_to_number)
 }
 
+// print_value is display formatting for builtin print output.
+// Formatting is human-facing and may differ from value_to_string representation.
 print_value :: proc(value: Value) {
     if value == nil {
         fmt.print("nil")
@@ -166,6 +171,11 @@ print_value :: proc(value: Value) {
     panic("unreachable: value must match one Value variant")
 }
 
+// Native builtin call contract:
+// - args are read from slots starting at args_base
+// - results are written starting at return_slot_base
+// - returned int is produced result count
+// VM CALL shapes produced results to requested_results.
 native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     for arg_index := 0; arg_index < arg_count; arg_index += 1 {
         if arg_index > 0 {
@@ -180,6 +190,8 @@ native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_
 }
 
 
+// native_type returns one of:
+// "nil", "bool", "int", "float", "string", "array", "map", "function".
 native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("type expected 1 argument")
@@ -228,6 +240,7 @@ native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_s
 }
 
 
+// native_length supports array/map/string only.
 native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("length expected 1 argument")
@@ -260,6 +273,7 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 }
 
 
+// native_assert errors when first arg is falsey (nil or false).
 native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("assert expected at least 1 argument")
@@ -279,6 +293,7 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 }
 
 
+// native_to_string converts one value to a string object.
 native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("to_string expected 1 argument")
@@ -289,6 +304,7 @@ native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 }
 
 
+// native_to_number parses int/float/string numeric forms and returns nil on failure.
 native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     if arg_count < 1 {
         panic("to_number expected 1 argument")
