@@ -1,3 +1,5 @@
+// Test host for development. Creates a state, binds builtins, runs test.kiln, prints errors or results.
+// Not the general embedding API — see runtime.odin for the host-facing entry points.
 package main
 
 import "core:fmt"

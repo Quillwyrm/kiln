@@ -3,8 +3,7 @@ package kiln
 import "core:fmt"
 
 // Parser state ===================================================================================
-// working state for token-stream parsing.
-// It tracks parse position and parse failure state for one compile operation.
+// Token cursor and failure latch for one compile operation.
 
 Parser := struct {
     tokens: []Token,
@@ -13,8 +12,6 @@ Parser := struct {
 }{}
 
 // Token cursor ===================================================================================
-// helpers over Parser.tokens.
-// Parser.token_index points to the current token being parsed.
 
 current_token :: proc() -> Token {
     return Parser.tokens[Parser.token_index]
@@ -37,7 +34,6 @@ advance_token :: proc() -> Token {
 
 // Parser errors ==================================================================================
 
-// token_text_for_error returns source-shaped text for parser error messages.
 token_text_for_error :: proc(token: Token) -> string {
 	#partial switch token.kind {
 	case .EOF:
@@ -134,8 +130,7 @@ token_text_for_error :: proc(token: Token) -> string {
 	return fmt.tprint(token.kind)
 }
 
-// parser_error records a source compile error at a token location.
-// This covers grammar errors and codegen limits found while the parser drives bytecode generation.
+// Covers grammar errors and codegen limits found while the parser drives bytecode generation.
 parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
     set_error(SourceLocation{
         source_name = proto_state.origin.source_name,
@@ -145,8 +140,7 @@ parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
     Parser.failed = true
 }
 
-// consume_token enforces required grammar tokens.
-// On mismatch it records an error and returns zero token value.
+// On mismatch records an error and returns zero token value.
 consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string) -> Token {
     if at_token(kind) {
         return advance_token()
@@ -160,7 +154,6 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
 
 // Slots and locals ===============================================================================
 
-// claim_temp_slot reserves one temporary frame slot for expression/call work.
 // Temp slots are bounded by MAX_FRAME_SLOTS due to u8 slot encoding.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
@@ -173,8 +166,7 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     return slot
 }
 
-// begin_scope starts one lexical block scope in the current proto.
-// It records the local-count mark used when this scope exits.
+// Records the local-count mark so end_scope can discard this scope's locals.
 begin_scope :: proc(proto_state: ^ProtoState) {
 	if proto_state.scope_depth >= MAX_FRAME_SLOTS {
 		parser_error(proto_state, current_token(), "too many nested scopes")
@@ -185,15 +177,13 @@ begin_scope :: proc(proto_state: ^ProtoState) {
 	proto_state.scope_depth += 1
 }
 
-// end_scope exits one lexical block scope in the current proto.
-// Locals declared in this scope are discarded by restoring the saved local-count mark.
+// Restores the saved local-count mark, discarding locals declared in this scope.
 end_scope :: proc(proto_state: ^ProtoState) {
     proto_state.scope_depth -= 1
     proto_state.local_count = proto_state.scope_local_counts[proto_state.scope_depth]
     proto_state.next_temp_slot = proto_state.local_count
 }
 
-// declare_local binds one identifier to the next local frame slot.
 // Duplicate names are rejected within the current lexical scope only.
 declare_local :: proc(proto_state: ^ProtoState, ident_token: Token) -> int {
     ident_name := ident_token.value.(string)
@@ -226,7 +216,6 @@ declare_local :: proc(proto_state: ^ProtoState, ident_token: Token) -> int {
     return slot
 }
 
-// resolve_local finds the nearest local binding by identifier name.
 // Reverse scan returns the most recently declared matching local.
 resolve_local :: proc(proto_state: ^ProtoState, ident_name: string) -> (slot: int, found: bool) {
     for local_index := proto_state.local_count - 1; local_index >= 0; local_index -= 1 {
@@ -266,8 +255,7 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close function body")
 }
 
-// parse_function_literal parses function(params...) { body } as a value expression.
-// The compiled child proto is stored on the parent proto and loaded by LOAD_FUNC.
+// The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
 parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
 	consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
     if Parser.failed {
@@ -363,7 +351,6 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
 // Expressions ====================================================================================
 
-// parse_primary emits one primary expression value into dst.
 // IDENT resolves local first, then global binding table by name.
 parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
 	if at_token(.FUNCTION) {
@@ -432,7 +419,6 @@ parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
 	}
 }
 
-// parse_unary parses prefix unary operators and primary expressions.
 // Prefix NOT lowers by evaluating the operand first, then emitting NOT into dst.
 parse_unary :: proc(proto_state: ^ProtoState, dst: int) {
     if at_token(.NOT) {
@@ -462,9 +448,8 @@ parse_unary :: proc(proto_state: ^ProtoState, dst: int) {
     }
 }
 
-// parse_call lowers callee(args...) using contiguous call slots:
-// callee_slot, arg0, arg1, ...
-// requested_results controls VM CALL result shaping (0 for statements, 1 for expressions).
+// Layout: callee_slot, arg0, arg1, ...
+// requested_results controls CALL result shaping (0 for statements, 1 for expressions).
 parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int) {
     consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
     if Parser.failed {
@@ -513,8 +498,7 @@ parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
 
 // Statements =====================================================================================
 
-// parse_block parses one braced statement block.
-// Blocks create a new lexical local scope.
+// Creates a new lexical local scope.
 parse_block :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' to start block")
     if Parser.failed {
@@ -547,8 +531,7 @@ parse_block :: proc(proto_state: ^ProtoState) {
     end_scope(proto_state)
 }
 
-// parse_if_statement parses:
-// if <expression> { <statements> } [else { <statements> }]
+// if <expression> { <statements> } [else if ...] [else { <statements> }]
 parse_if_statement :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .IF, "expected 'if'")
     if Parser.failed {
@@ -602,9 +585,6 @@ parse_if_statement :: proc(proto_state: ^ProtoState) {
     }
 }
 
-// parse_for_statement parses:
-// for <expression> { <statements> }
-// for { <statements> }
 // Condition form evaluates each iteration.
 // Braced form is infinite-loop sugar with no condition-exit jump.
 parse_for_statement :: proc(proto_state: ^ProtoState) {
@@ -669,9 +649,7 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
     proto_state.break_fixup_count = break_fixup_base
 }
 
-// parse_break_statement parses:
-// break
-// break is only valid inside loop bodies.
+// Only valid inside loop bodies.
 parse_break_statement :: proc(proto_state: ^ProtoState) {
     break_token := consume_token(proto_state, .BREAK, "expected 'break'")
     if Parser.failed {
@@ -693,10 +671,6 @@ parse_break_statement :: proc(proto_state: ^ProtoState) {
     proto_state.break_fixup_count += 1
 }
 
-// parse_return_statement parses:
-// - return
-// - return expr
-// - return expr, expr, ...
 // Each return expression is lowered as a single-result expression.
 parse_return_statement :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RETURN, "expected 'return'")
@@ -739,14 +713,7 @@ parse_return_statement :: proc(proto_state: ^ProtoState) {
     emit_return(proto_state, first_result_slot, result_count)
 }
 
-// parse_statement supports:
-// - if expression block [else block]
-// - for expression block
-// - break
-// - return [expr [, expr ...]]
-// - ident := expression
-// - ident = expression (local-only assignment)
-// - call statement
+// Supported forms: if/for/break/return, decl, local assign, call.
 parse_statement :: proc(proto_state: ^ProtoState) {
     if at_token(.RETURN) {
         parse_return_statement(proto_state)
@@ -830,7 +797,6 @@ parse_statement :: proc(proto_state: ^ProtoState) {
     )
 }
 
-// parse_top_level_statements parses until EOF or first parse failure.
 // After each statement, next_temp_slot resets to local_count so temporary slots are reused.
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
     for !Parser.failed && !at_token(.EOF) {
@@ -845,8 +811,7 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 
 // Source compilation =============================================================================
 
-// compile_source scans source, parses top-level forms, and builds entry proto.
-// On success it installs Active_State.entry_function for VM execution.
+// On success installs Active_State.entry_function for VM execution.
 compile_source :: proc(source, source_name: string) -> ^Error {
     tokens, scan_error := scan_source(source, source_name)
     defer delete(tokens)

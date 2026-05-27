@@ -9,12 +9,12 @@ import "core:strings"
 MAX_FRAME_SLOTS :: 256
 MAX_LOOP_DEPTH :: 64
 MAX_BREAK_FIXUPS :: 1024
-MAX_CONST_POOL_ENTRIES :: 65536 // LOAD_CONST uses a u16 const index.
-MAX_CHILD_PROTOS :: 65536      // LOAD_FUNC uses a u16 child proto index.
+MAX_CONST_POOL_ENTRIES :: 65536 // u16 const index in LOAD_CONST
+MAX_CHILD_PROTOS :: 65536      // u16 child proto index in LOAD_FUNC
 
-MIN_JUMP_FALSE_OFFSET :: -32768 // JUMP_FALSE stores its offset in an i16 operand.
+MIN_JUMP_FALSE_OFFSET :: -32768 // i16 operand
 MAX_JUMP_FALSE_OFFSET :: 32767
-MIN_JUMP_OFFSET :: -8388608     // JUMP stores its offset in a signed 24-bit operand.
+MIN_JUMP_OFFSET :: -8388608     // signed 24-bit operand
 MAX_JUMP_OFFSET :: 8388607
 
 
@@ -69,7 +69,6 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
 
 // Proto construction =============================================================================
 
-// begin_proto initializes mutable proto construction state.
 // origin identifies where this proto originated for diagnostics.
 // name is cloned because it can come from source token text.
 begin_proto :: proc(origin: SourceLocation, name: string, param_count: int) -> ProtoState {
@@ -84,8 +83,6 @@ begin_proto :: proc(origin: SourceLocation, name: string, param_count: int) -> P
     }
 }
 
-// end_proto finalizes ProtoState into an owned Proto heap object.
-// Dynamic buffers are copied to owned slices, then the dynamic buffers are deleted.
 end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
     bytecode := make([]u32, len(proto_state.bytecode))
     copy(bytecode, proto_state.bytecode[:])
@@ -114,8 +111,7 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
     return proto
 }
 
-// delete_proto_state frees allocations owned by an unfinished ProtoState.
-// Successful proto builds use end_proto instead, which moves data into a finished Proto.
+// Only call this on an unfinished ProtoState. end_proto moves data into a finished Proto instead.
 delete_proto_state :: proc(proto_state: ^ProtoState) {
     delete(proto_state.name)
     delete(proto_state.bytecode)
@@ -124,8 +120,6 @@ delete_proto_state :: proc(proto_state: ^ProtoState) {
 }
 
 // Constants ======================================================================================
-
-// Constant helpers append values to proto const_pool and return const indexes.
 const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
     const_index := len(proto_state.const_pool)
     append(&proto_state.const_pool, Value(value))
@@ -148,8 +142,7 @@ const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
 }
 
 // Instruction emitters ===========================================================================
-// Emitters encode VM instructions directly into proto_state.bytecode.
-// All slot operands are frame-local slot indexes for the current proto.
+// All slot operands are frame-local indexes for the current proto.
 
 // Loads ==========================================================================================
 
@@ -381,7 +374,6 @@ emit_jump_false :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: 
     return jump_index
 }
 
-// patch_jump rewrites a previously emitted jump to target current bytecode end.
 // Offsets are relative to instruction index after jump fetch.
 patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
     word := proto_state.bytecode[jump_index]
@@ -419,7 +411,7 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
 
 // Calls and returns ==============================================================================
 
-// emit_call records the highest slot touched by this call layout, including requested result slots.
+// Records the highest slot touched by this call layout, including requested result slots.
 emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_results: int) {
     occupied_call_slots := arg_count + 1
     if requested_results > occupied_call_slots {

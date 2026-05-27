@@ -6,20 +6,17 @@ import "core:os"
 
 // Runtime entry points ===========================================================================
 
-// Runtime state lifecycle for host embedding.
 new_state :: proc() -> ^State {
     return new(State)
 }
 
-// delete_state currently frees the State shell only.
-// Heap-backed runtime objects are not walked until Kiln has heap tracking or GC.
+// Heap-backed runtime objects are not walked — deleted state leaks them until heap tracking exists.
 delete_state :: proc(state: ^State) {
     free(state)
 }
 
-// run_source is the main host entry for source execution on one state.
-// It selects Active_State, clears previous error, compiles, then executes VM.
-// When err != nil, result is undefined and should be ignored.
+// run_source selects Active_State, clears previous error, compiles, then executes VM.
+// When err != nil, result is undefined.
 run_source :: proc(state: ^State, source, source_name: string) -> (result: Value, err: ^Error) {
     Active_State = state
     state.has_error = false
@@ -41,7 +38,6 @@ run_source :: proc(state: ^State, source, source_name: string) -> (result: Value
 
 // run_file loads source text from disk and forwards to run_source.
 // File read errors use line=0, column=0 because no source location exists yet.
-// When err != nil, result is undefined and should be ignored.
 run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
     Active_State = state
 
@@ -55,8 +51,7 @@ run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
     return run_source(state, string(source_bytes), path)
 }
 
-// debug_run_file is a host-facing debug path that prints source and output.
-// When err != nil, result is undefined and should be ignored.
+// debug path that prints source and output before execution.
 debug_run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
     Active_State = state
 

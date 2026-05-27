@@ -4,8 +4,7 @@ import "core:fmt"
 
 
 // Opcodes ========================================================================================
-// the VM's executable instruction set.
-// Comments on each opcode name document the instruction layout and operand meaning.
+// Instruction layout and operand meaning is documented inline on each opcode name.
 
 Opcode :: enum u8 {
     // Immediate, Constant, and Function Loads
@@ -59,8 +58,7 @@ Opcode :: enum u8 {
 
 
 // Instruction layout types =======================================================================
-// The real bytecode stream stays `[]u32`.
-// These types are used to pack and decode instruction words.
+// Types used to pack and decode instruction words.
 // The opcode decides which layout applies to a given instruction word.
 
 InstABC :: bit_field u32 {
@@ -94,9 +92,8 @@ InstJump :: bit_field u32 {
 
 
 // Values and heap objects ========================================================================
-// The runtime value container used by slots, constants, arrays, maps, and returns.
 // Heap-backed values store ^Object. Object must be the first field of every heap object.
-// The VM reads Object.kind before casting the pointer to a concrete object struct.
+// The VM reads Object.kind before casting to the concrete struct.
 
 // ObjectKind tags the concrete struct behind a heap-backed Value.
 ObjectKind :: enum u8 {
@@ -112,9 +109,7 @@ Object :: struct {
 }
 
 
-// Nil is the zero value of the union.
-// Immediates live inline. Heap-backed values are stored as ^Object.
-// Value{} represents language-level nil.
+// Nil is the zero value. Immediates (bool, i64, f64) live inline. ^Object for heap values.
 Value :: union {
     bool,
     i64,
@@ -123,34 +118,25 @@ Value :: union {
 }
 
 StringObject :: struct {
-    header: Object, // must be first
+    header: Object,
     data:   string,
 }
 
 ArrayObject :: struct {
-    header: Object, // must be first
+    header: Object,
     data:  [dynamic]Value,
 }
 
 MapObject :: struct {
-    header: Object, // must be first
+    header: Object,
     data:  map[string]Value,
 }
 
 
 // Functions ======================================================================================
-// Kiln separates compiled function data from runtime callable function values.
-// Proto stores bytecode and child protos; function objects are heap values CALL can dispatch.
+// Proto stores compiled bytecode data. Function objects (ProtoFunctionObject,
+// NativeFunctionObject) are the runtime callable values that CALL dispatches.
 
-// Proto is compiled bytecode function data.
-// It is not itself the runtime function value.
-// `origin` is used for proto-level runtime and codegen errors.
-// `name` is used in runtime error context.
-// `bytecode` is the fixed instruction stream for the function.
-// `const_pool` is the fixed constant table used by that bytecode.
-// `child_protos` is the fixed table of function bodies declared inside this proto.
-// `frame_slot_count` is the size of the function's slot window.
-// `param_count` is the fixed parameter count for proto calls.
 Proto :: struct {
     origin: SourceLocation,
     name:        string,
@@ -161,13 +147,7 @@ Proto :: struct {
     param_count: int,
 }
 
-// NativeFunction is an Odin-backed function implementation.
-// Args live in vmState.slots starting at args_base.
-// Native functions write produced results into state.slots starting at return_slot_base.
-// requested_results is the number of result slots the caller wants.
-// The returned int is the number of result values the native function produced.
-// CALL shapes produced results to requested results, like proto RETURN does:
-// missing requested results become nil, and extra produced results are ignored.
+// Odin-backed function impl. CALL shapes produced results to requested: missing = nil, extras ignored.
 NativeFunction :: proc(
     vm: ^State,
     args_base: int,
@@ -176,25 +156,22 @@ NativeFunction :: proc(
     requested_results: int,
 ) -> int
 
-// ProtoFunctionObject is a runtime callable object backed by bytecode.
-// Values point to this through ^Object when header.kind == .PROTO_FUNCTION.
+
 ProtoFunctionObject :: struct {
-    header: Object, // must be first
+    header: Object,
     name:   string,
     impl:  ^Proto,
 }
 
-// NativeFunctionObject is a runtime callable object backed by an Odin NativeFunction.
-// Values point to this through ^Object when header.kind == .NATIVE_FUNCTION.
 NativeFunctionObject :: struct {
-    header:      Object, // must be first
+    header:      Object,
     name:        string,
     impl: NativeFunction,
 }
 
 
-// Binding tables =======================================================================================
-// fixed-size namespaces. Globals use one BindingTable on State; modules can use the same shape later.
+// Binding tables ===============================================================================
+// Fixed-size namespaces. Globals use one BindingTable on State.
 
 MAX_BINDINGS :: 256
 
@@ -211,12 +188,7 @@ BindingTable :: struct {
 
 // Call frames ====================================================================================
 
-// CallFrame records one active proto execution window.
-// `slot_base` is the start of this call's slot window inside vmState.slots.
-// Logical slots for this frame are addressed relative to that slot base.
-// `return_slot_base` and `requested_results` describe where this frame must place return values
-// in its caller's slot window. The top-level frame has no caller; top-level RETURN ends execution.
-// `caller_slot_count` restores the caller's occupied slot range when this frame returns.
+// One active proto execution window. Slot operands are relative to slot_base.
 CallFrame :: struct {
     proto:                    ^Proto,
     instruction_index:        int,
@@ -230,23 +202,9 @@ CallFrame :: struct {
 
 
 // VM state =======================================================================================
-// State is the host-owned runtime instance.
-// It stores active execution frames, slots, globals, and the current error payload.
-
 MAX_VM_SLOTS :: 4096
 MAX_CALLFRAMES :: 256
-
-// State is the runtime instance selected by host entry points.
-// `has_error` says whether `error` currently contains a host-visible error.
-// `entry_function` is the top-level function object run by `run_vm`.
-// LOAD_FUNC indexes the currently executing proto's child protos.
-// CALL dispatches callable objects by Object.kind.
-// `slots` is fixed runtime storage for all active call-frame windows.
-// `slot_count` is the number of slots claimed by active windows.
-// `frame_stack` is fixed runtime storage for active bytecode calls.
-// `frame_count` is the number of occupied entries in frame_stack.
-// The current frame is frame_stack[frame_count - 1].
-// `global_env` is the active global namespace.
+// Host-owned runtime instance. Stores active frames, slots, globals, and error state.
 State :: struct {
     has_error:        bool,
     error:            Error,
@@ -317,8 +275,7 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
 
 // Execution primitives ===========================================================================
-// These helpers implement primitive VM value operations used by bytecode execution.
-// Type failures here are VM bugs until they are converted to user-facing runtime errors.
+// Type failures in these helpers are VM bugs until converted to user-facing runtime errors.
 
 
 decode_op :: proc(word: u32) -> Opcode {
@@ -479,8 +436,6 @@ value_neg :: proc(value: Value) -> Value {
 
 // Comparison/truthiness helpers ==================================================================
 
-// falsey = nil or false
-// truthy = everything else
 value_is_falsey :: proc(value: Value) -> bool {
     bool_value, is_bool := value.(bool)
     if is_bool {
@@ -622,14 +577,11 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
 
 // Runtime errors =================================================================================
 
-// runtime_error reports a user-facing runtime failure at the current call frame's proto origin.
-// Proto-origin location identifies the function being run, not the exact bytecode instruction yet.
 runtime_error :: proc(state: ^State, message: string) -> ^Error {
     frame := &state.frame_stack[state.frame_count - 1]
     proto := frame.proto
 
-    // Runtime errors use the currently executing frame.
-    // frame_count == 1 is the entry file. Deeper frames are user function calls.
+    // frame_count == 1 is the entry file; deeper frames are user function calls.
     context_text := "in entry file"
     if state.frame_count > 1 {
         if proto.name == "<function>" {
@@ -697,8 +649,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             state.slots[dst] = frame.proto.const_pool[int(inst.b)]
 
         case .LOAD_FUNC:
-            // LOAD_FUNC materializes a runtime function object from this proto's child proto table.
-            // The child proto is compiled data; the function object is the callable runtime value.
+            // Materializes a ProtoFunctionObject from this proto's child proto table.
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             child_proto := frame.proto.child_protos[int(inst.b)]
@@ -716,9 +667,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             src := frame.slot_base + int(inst.b)
             state.slots[dst] = state.slots[src]
 
-        // NEW_ARRAY A, B
-        // Creates an empty array in slot A. Length starts at 0.
-        // B reserves backing capacity for future pushes (B elements).
+        // B = initial backing capacity for future pushes.
         case .NEW_ARRAY:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
@@ -739,8 +688,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             array_object := cast(^ArrayObject)header
             state.slots[dst] = Value(i64(len(array_object.data)))
 
-        // ARRAY_GET A, B, C
-        // Reads array[B][index in C] into slot A.
+        // Reads array[B][index C] into slot A.
         case .ARRAY_GET:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
@@ -767,8 +715,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             }
             state.slots[dst] = array_object.data[index]
 
-        // ARRAY_SET A, B, C
-        // Writes slot B into array A at index in slot C.
+        // Writes slot B into array A at index C.
         case .ARRAY_SET:
             inst := InstABC(word)
             array_slot := frame.slot_base + int(inst.a)
@@ -797,7 +744,6 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             }
             array_object.data[index] = value
 
-        // ARRAY_PUSH A, B
         // Appends slot B to array in slot A.
         case .ARRAY_PUSH:
             inst := InstABx(word)
@@ -814,8 +760,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             append(&array_object.data, value)
 
-        // ARRAY_POP A, B
-        // Pops tail of array in slot B into slot A. Empty pop is an error.
+        // Pops tail of array B into slot A. Empty pop is an error.
         case .ARRAY_POP:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
@@ -978,10 +923,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
         case .CALL:
             inst := InstABC(word)
 
-            // CALL A, B, C
-            // A = callee/result base slot
-            // B = argument count
-            // C = requested result count
+            // A = callee/result base, B = arg count, C = requested result count
             call_base := frame.slot_base + int(inst.a)
             args_base := call_base + 1
             arg_count := int(inst.b)
@@ -998,8 +940,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             switch callee_header.kind {
             case .NATIVE_FUNCTION:
-                // Native calls execute immediately in the caller frame.
-                // Native writes results at return_slot_base and reports produced count.
+                // Executes immediately in the caller frame. Writes results then shapes to requested.
                 native_function := cast(^NativeFunctionObject)callee_header
                 produced_results := native_function.impl(state, args_base, arg_count, call_base, requested_results)
                 if state.has_error {
@@ -1016,7 +957,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 // Extra produced results beyond requested count are ignored by contract.
 
             case .PROTO_FUNCTION:
-                // Proto calls push a new frame and continue the VM loop.
+                // Pushes a new frame and continues the VM loop.
                 proto_function := cast(^ProtoFunctionObject)callee_header
                 callee_proto := proto_function.impl
 
@@ -1030,9 +971,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                     return Value{}, runtime_error(state, "runtime slot limit exceeded")
                 }
 
-                // Proto calls use a register-window layout.
-                // Caller args begin at args_base, and the callee frame also starts at args_base,
-                // so callee slot 0 already contains arg 0.
+                // Register-window: callee frame starts at args_base, so callee slot 0 gets arg 0.
                 caller_slot_count := state.slot_count
                 if callee_slot_top > state.slot_count {
                     state.slot_count = callee_slot_top

@@ -9,7 +9,7 @@ import "core:strconv"
 // TokenKind is the set of token types emitted by the scanner.
 // The parser reads this token stream directly.
 TokenKind :: enum {
-    // Stream markers
+    // Stream Markers
     EOF,
 
     // Literals
@@ -18,12 +18,12 @@ TokenKind :: enum {
     FLOAT,
     STRING,
 
-    // Literal keywords
+    // Literal Keywords
     TRUE,
     FALSE,
     NIL,
 
-    // Control flow
+    // Control Flow
     IF,
     ELSE,
     FOR,
@@ -31,22 +31,22 @@ TokenKind :: enum {
     FUNCTION,
     RETURN,
 
-    // Binding / construction keywords
+    // Binding / Construction Keywords
     GLOBAL,
     MAP,
 
-    // Binding operators
+    // Binding Operators
     DECL,       // :=
     CONST_DECL, // ::
     ASSIGN,     // =
 
-    // Arithmetic operators
+    // Arithmetic Operators
     PLUS,
     MINUS,
     STAR,
     SLASH,
 
-    // Comparison / logical operators
+    // Comparison / Logical Operators
     EQUAL,
     NOT,
     NOT_EQUAL,
@@ -63,7 +63,7 @@ TokenKind :: enum {
     LEFT_BRACKET,
     RIGHT_BRACKET,
 
-    // Separators / access
+    // Separators / Access
     COMMA,
     DOT,
     COLON,
@@ -85,16 +85,14 @@ Token :: struct {
     kind:  TokenKind,
     value: TokenValue,
 
-    offset: int, // byte index where this token begins in source
     line:   int, // 1-based source line where this token begins
     column: int, // 1-based source column where this token begins
 }
 
 // Scanner state ==================================================================================
 
-// Scanner is the working state used while scanning one source string.
-// It stores source text, position, and emitted tokens.
-// Current design runs one active scan at a time.
+// Scanner runs one active scan at a time — it is a package-level singleton.
+// The = {} on the struct value instantiates it as the package singleton immediately.
 Scanner := struct {
     source: string,
     source_name: string,
@@ -113,8 +111,7 @@ Scanner := struct {
 
 // Cursor helpers =================================================================================
 
-// advance_char consumes one source byte and updates line/column.
-// Newline increments line and resets column to 1.
+// Also updates line/column tracking. Newline resets column to 1.
 advance_char :: proc() -> u8 {
     ch := Scanner.source[Scanner.index]
     Scanner.index += 1
@@ -129,7 +126,6 @@ advance_char :: proc() -> u8 {
     return ch
 }
 
-// begin_token snapshots the source position where the next token starts.
 begin_token :: proc() {
     Scanner.token_start = Scanner.index
     Scanner.token_line = Scanner.line
@@ -153,8 +149,7 @@ match_next :: proc(expected: u8) -> bool {
 
 // Scanner errors =================================================================================
 
-// scanner_error records a compile error at the current token start location.
-// Scanner.failed stops scanning after the current step.
+// Latch Scanner.failed so scanning stops after the current step.
 scanner_error :: proc(message: string) {
     location := SourceLocation{
         source_name = Scanner.source_name,
@@ -168,12 +163,11 @@ scanner_error :: proc(message: string) {
 
 // Token emission =================================================================================
 
-// emit_token appends one token using the current token-start snapshot.
+// Uses the current token-start snapshot for position data.
 emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
     append(&Scanner.tokens, Token {
         kind   = kind,
         value  = value,
-        offset = Scanner.token_start,
         line   = Scanner.token_line,
         column = Scanner.token_column,
     })
@@ -181,8 +175,6 @@ emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
 
 
 // Character classes ==============================================================================
-
-// Character classifiers for first-pass ASCII identifier/number rules.
 is_alpha :: proc(ch: u8) -> bool {
     return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
 }
@@ -336,7 +328,7 @@ scan_number :: proc() {
     emit_token(.INT, TokenValue(value))
 }
 
-// scan_string consumes a single-line quoted string with no escape decoding.
+// No escape decoding — backslash sequences are literal.
 scan_string :: proc() {
     advance_char()
     string_start := Scanner.index
@@ -359,14 +351,14 @@ scan_string :: proc() {
     emit_token(.STRING, TokenValue(text))
 }
 
-// skip_line_comment consumes //... until newline and emits no token.
+// Emits no token — comments are not preserved in the token stream.
 skip_line_comment :: proc() {
     for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '\n' {
         advance_char()
     }
 }
 
-// scan_symbol emits punctuation/operators and handles two-character forms.
+// Handles both single-character and two-character punctuation/operator forms.
 scan_symbol :: proc() {
     ch := advance_char()
 
@@ -449,7 +441,6 @@ scan_symbol :: proc() {
 
 // Source scanning ================================================================================
 
-// scan_source resets Scanner state, emits a full token stream, then EOF.
 // Caller owns the returned [dynamic]Token and must delete it.
 scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, error: ^Error) {
     Scanner.source = source

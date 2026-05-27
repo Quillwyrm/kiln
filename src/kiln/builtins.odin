@@ -6,7 +6,6 @@ import "core:strings"
 
 // Value helpers ==================================================================================
 
-// new_string_value allocates a VM string object and wraps it as Value.
 // StringObject owns stable text; callers may pass slices from source or temp strings.
 new_string_value :: proc(text: string) -> Value {
     string_object := new(StringObject)
@@ -15,45 +14,26 @@ new_string_value :: proc(text: string) -> Value {
     return Value(cast(^Object)string_object)
 }
 
-// value_type_name returns the user-facing type name for one Kiln value.
 value_type_name :: proc(value: Value) -> string {
     if value == nil {
         return "nil"
     }
-
-    _, is_bool := value.(bool)
-    if is_bool {
-        return "bool"
-    }
-
-    _, is_int := value.(i64)
-    if is_int {
-        return "int"
-    }
-
-    _, is_float := value.(f64)
-    if is_float {
-        return "float"
-    }
-
-    object_header, is_object := value.(^Object)
-    if is_object {
-        switch object_header.kind {
-        case .STRING:
-            return "string"
-        case .ARRAY:
-            return "array"
-        case .MAP:
-            return "map"
-        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-            return "function"
+    switch v in value {
+    case bool:    return "bool"
+    case i64:     return "int"
+    case f64:     return "float"
+    case ^Object:
+        switch v.kind {
+        case .STRING:  return "string"
+        case .ARRAY:   return "array"
+        case .MAP:     return "map"
+        case .PROTO_FUNCTION, .NATIVE_FUNCTION: return "function"
         }
     }
-
-    panic("unreachable: value must match one Value variant")
+    panic("unreachable")
 }
 
-// value_to_string returns text conversion used by to_string and assert message formatting.
+// Text conversion for to_string() and assert messages.
 value_to_string :: proc(value: Value) -> string {
     if value == nil {
         return "nil"
@@ -130,8 +110,9 @@ value_to_string :: proc(value: Value) -> string {
 
 // Print formatting ===============================================================================
 
-// print_value is display formatting for builtin print output.
-// Formatting is human-facing and may differ from value_to_string representation.
+// Display formatting for builtin print() output.
+// Human-facing — quotes strings differently than value_to_string.
+// Same recursive shape as value_to_string; both exist because their display contracts differ.
 print_value :: proc(value: Value) {
     if value == nil {
         fmt.print("nil")
@@ -206,11 +187,7 @@ print_value :: proc(value: Value) {
 
 // Native builtin implementations =================================================================
 
-// Native builtin call contract:
-// - args are read from slots starting at args_base
-// - results are written starting at return_slot_base
-// - returned int is produced result count
-// VM CALL shapes produced results to requested_results.
+// Native ABI: args at slots[args_base], results at slots[return_slot_base], return int is produced count.
 native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     for arg_index := 0; arg_index < arg_count; arg_index += 1 {
         if arg_index > 0 {
@@ -225,8 +202,6 @@ native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_
 }
 
 
-// native_type returns one of:
-// "nil", "bool", "int", "float", "string", "array", "map", "function".
 native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     value := Value{}
     if arg_count >= 1 {
@@ -238,7 +213,6 @@ native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_s
 }
 
 
-// native_length supports array/map/string only.
 native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     value := Value{}
     if arg_count >= 1 {
@@ -273,7 +247,6 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 }
 
 
-// native_assert errors when first arg is falsey (nil or false).
 native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     condition := Value{}
     if arg_count >= 1 {
@@ -306,7 +279,6 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 }
 
 
-// native_to_string converts one value to a string object.
 native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     value := Value{}
     if arg_count >= 1 {
@@ -318,7 +290,7 @@ native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 }
 
 
-// native_to_number parses int/float/string numeric forms and returns nil on failure.
+// Returns nil on failure instead of erroring.
 native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
     value := Value{}
     if arg_count >= 1 {
@@ -364,7 +336,6 @@ native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 
 // Builtin binding ================================================================================
 
-// bind_global_env installs the core native builtin set into global_env.
 bind_global_env :: proc(state: ^State) {
     Active_State = state
     bind_native_global("print", native_print)
