@@ -13,7 +13,7 @@ number := to_number("42")
 decimal := to_number("4.5")
 bad := to_number("wat")
 print(number, decimal, bad)
-
+length(10)
 decimal = 0xFF
 print(decimal)
 
@@ -71,9 +71,9 @@ shadow := function(a) {
 }
 shadow("outer")
 
+print(type(), to_string(), to_number())
 ret_a := 7
 ret_b := 9
 return ret_a, ret_b
 print(ret_a, ret_b)
 print("after return")
-assert(alive, "alive should be true")

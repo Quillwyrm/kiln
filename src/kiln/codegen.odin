@@ -1,12 +1,24 @@
 package kiln
 
-// Proto-local bindings ===========================================================================
+import "core:strings"
+
+// Codegen limits =================================================================================
 
 // MAX_FRAME_SLOTS is the per-proto frame slot ceiling.
 // It must stay compatible with u8 slot operands in emitted bytecode layouts.
 MAX_FRAME_SLOTS :: 256
 MAX_LOOP_DEPTH :: 64
 MAX_BREAK_FIXUPS :: 1024
+MAX_CONST_POOL_ENTRIES :: 65536 // LOAD_CONST uses a u16 const index.
+MAX_CHILD_PROTOS :: 65536      // LOAD_FUNC uses a u16 child proto index.
+
+MIN_JUMP_FALSE_OFFSET :: -32768 // JUMP_FALSE stores its offset in an i16 operand.
+MAX_JUMP_FALSE_OFFSET :: 32767
+MIN_JUMP_OFFSET :: -8388608     // JUMP stores its offset in a signed 24-bit operand.
+MAX_JUMP_OFFSET :: 8388607
+
+
+// Proto-local bindings ===========================================================================
 
 // LocalBinding maps an identifier name to a frame slot index.
 LocalBinding :: struct {
@@ -19,9 +31,9 @@ LocalBinding :: struct {
 // ProtoState is the mutable compile target for one proto/chunk.
 // Parser and codegen both mutate this state while lowering source to bytecode.
 ProtoState :: struct {
-    source_name: string,
-    name:        string,
-    param_count: int,
+	origin: SourceLocation,
+	name:        string,
+	param_count: int,
 
     bytecode:     [dynamic]u32,
     const_pool:   [dynamic]Value,
@@ -43,7 +55,7 @@ ProtoState :: struct {
     loop_depth: int,
 }
 
-// Internals ======================================================================================
+// Frame slots ====================================================================================
 
 // record_slots maintains frame_slot_count as max-touched-slot + 1.
 record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
@@ -55,54 +67,15 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
     }
 }
 
-// declare_global returns a BindingId for binding_name.
-// If the name exists, it returns the existing id.
-// Otherwise it appends a new binding and returns its id.
-declare_global :: proc(binding_name: string) -> BindingId {
-    for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
-        if Active_State.global_env.names[binding_index] == binding_name {
-            return BindingId(binding_index)
-        }
-    }
-
-    binding_id := BindingId(Active_State.global_env.count)
-    Active_State.global_env.names[Active_State.global_env.count] = binding_name
-    Active_State.global_env.count += 1
-
-    return binding_id
-}
-
-// resolve_global looks up an existing binding name without creating one.
-resolve_global :: proc(binding_name: string) -> (binding_id: BindingId, found: bool) {
-    for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
-        if Active_State.global_env.names[binding_index] == binding_name {
-            return BindingId(binding_index), true
-        }
-    }
-
-    return {}, false
-}
-
-// bind_native_global installs one native callable into global_env by binding name.
-bind_native_global :: proc(name: string, native_proc: NativeFunction) {
-    native_function := new(NativeFunctionObject)
-    native_function.header.kind = .NATIVE_FUNCTION
-    native_function.name = name
-    native_function.impl = native_proc
-
-    binding_id := declare_global(name)
-    Active_State.global_env.values[int(binding_id)] = Value(cast(^Object)native_function)
-}
-
-
 // Proto construction =============================================================================
 
 // begin_proto initializes mutable proto construction state.
-// source_name identifies where this proto originated for diagnostics.
-begin_proto :: proc(source_name, name: string, param_count: int) -> ProtoState {
+// origin identifies where this proto originated for diagnostics.
+// name is cloned because it can come from source token text.
+begin_proto :: proc(origin: SourceLocation, name: string, param_count: int) -> ProtoState {
     return ProtoState{
-        source_name      = source_name,
-        name             = name,
+        origin           = origin,
+        name             = strings.clone(name),
         param_count      = param_count,
         bytecode         = make([dynamic]u32),
         const_pool       = make([dynamic]Value),
@@ -129,7 +102,7 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
 
     proto := new(Proto)
     proto^ = Proto{
-        source_name      = proto_state.source_name,
+        origin           = proto_state.origin,
         name             = proto_state.name,
         bytecode         = bytecode,
         const_pool       = const_pool,
@@ -139,6 +112,15 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
     }
 
     return proto
+}
+
+// delete_proto_state frees allocations owned by an unfinished ProtoState.
+// Successful proto builds use end_proto instead, which moves data into a finished Proto.
+delete_proto_state :: proc(proto_state: ^ProtoState) {
+    delete(proto_state.name)
+    delete(proto_state.bytecode)
+    delete(proto_state.const_pool)
+    delete(proto_state.child_protos)
 }
 
 // Constants ======================================================================================
@@ -159,20 +141,16 @@ const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
 }
 
 const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
-    string_object := new(StringObject)
-    string_object.header.kind = .STRING
-    string_object.data = text
-
     const_index := len(proto_state.const_pool)
-    append(&proto_state.const_pool, Value(cast(^Object)string_object))
+    append(&proto_state.const_pool, new_string_value(text))
 
     return const_index
 }
 
 // Instruction emitters ===========================================================================
-
 // Emitters encode VM instructions directly into proto_state.bytecode.
 // All slot operands are frame-local slot indexes for the current proto.
+
 // Loads ==========================================================================================
 
 emit_load_nil :: proc(proto_state: ^ProtoState, dst: int) {
@@ -359,7 +337,6 @@ emit_not :: proc(proto_state: ^ProtoState, dst, src: int) {
 }
 
 // Jumps and patching =============================================================================
-
 // Jump offsets are relative to the instruction after the jump fetch.
 
 next_inst_index :: proc(proto_state: ^ProtoState) -> int {
@@ -371,6 +348,11 @@ emit_jump :: proc(proto_state: ^ProtoState, target_index: int = -1) -> int {
     offset := 0
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
+        if offset < MIN_JUMP_OFFSET || offset > MAX_JUMP_OFFSET {
+            set_error(proto_state.origin, "jump is too far")
+            Parser.failed = true
+            return jump_index
+        }
     }
 
     inst := u32(InstJump{ op= .JUMP, offset= i32(offset) })
@@ -386,6 +368,11 @@ emit_jump_false :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: 
     offset := 0
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
+        if offset < MIN_JUMP_FALSE_OFFSET || offset > MAX_JUMP_FALSE_OFFSET {
+            set_error(proto_state.origin, "conditional jump is too far")
+            Parser.failed = true
+            return jump_index
+        }
     }
 
     inst := u32(InstAsBx{ op= .JUMP_FALSE, a= u8(cond_slot), sb= i16(offset) })
@@ -403,12 +390,24 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
 
     op := decode_op(word)
     if op == .JUMP {
+        if offset < MIN_JUMP_OFFSET || offset > MAX_JUMP_OFFSET {
+            set_error(proto_state.origin, "jump is too far")
+            Parser.failed = true
+            return
+        }
+
         inst := u32(InstJump{ op= .JUMP, offset= i32(offset) })
         proto_state.bytecode[jump_index] = inst
         return
     }
 
     if op == .JUMP_FALSE {
+        if offset < MIN_JUMP_FALSE_OFFSET || offset > MAX_JUMP_FALSE_OFFSET {
+            set_error(proto_state.origin, "conditional jump is too far")
+            Parser.failed = true
+            return
+        }
+
         old_inst := InstAsBx(word)
         inst := u32(InstAsBx{ op= .JUMP_FALSE, a= old_inst.a, sb= i16(offset) })
         proto_state.bytecode[jump_index] = inst
@@ -451,7 +450,7 @@ emit_halt :: proc(proto_state: ^ProtoState) {
     append(&proto_state.bytecode, inst)
 }
 
-// Global bindings ================================================================================
+// Global binding instructions ====================================================================
 
 emit_get_global :: proc(proto_state: ^ProtoState, dst: int, binding_id: BindingId) {
     record_slots(proto_state, dst)

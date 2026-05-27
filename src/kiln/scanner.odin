@@ -113,9 +113,9 @@ Scanner := struct {
 
 // Cursor helpers =================================================================================
 
-// advance consumes one source byte and updates line/column.
+// advance_char consumes one source byte and updates line/column.
 // Newline increments line and resets column to 1.
-advance :: proc() -> u8 {
+advance_char :: proc() -> u8 {
     ch := Scanner.source[Scanner.index]
     Scanner.index += 1
 
@@ -146,19 +146,27 @@ match_next :: proc(expected: u8) -> bool {
         return false
     }
 
-    advance()
+    advance_char()
     return true
 }
 
 
-// Token emission =================================================================================
+// Scanner errors =================================================================================
 
 // scanner_error records a compile error at the current token start location.
 // Scanner.failed stops scanning after the current step.
 scanner_error :: proc(message: string) {
-    set_error(Scanner.source_name, Scanner.token_line, Scanner.token_column, message)
+    location := SourceLocation{
+        source_name = Scanner.source_name,
+        line        = Scanner.token_line,
+        column      = Scanner.token_column,
+    }
+    set_error(location, message)
     Scanner.failed = true
 }
+
+
+// Token emission =================================================================================
 
 // emit_token appends one token using the current token-start snapshot.
 emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
@@ -197,7 +205,7 @@ scan_ident_or_keyword :: proc() {
         if !is_ident_char(ch) {
             break
         }
-        advance()
+        advance_char()
     }
 
     text := Scanner.source[Scanner.token_start:Scanner.index]
@@ -239,8 +247,8 @@ scan_number :: proc() {
     if Scanner.index + 1 < len(Scanner.source) &&
        Scanner.source[Scanner.index] == '0' &&
        Scanner.source[Scanner.index + 1] == 'x' {
-        advance()
-        advance()
+        advance_char()
+        advance_char()
 
         hex_start := Scanner.index
         for Scanner.index < len(Scanner.source) {
@@ -251,7 +259,7 @@ scan_number :: proc() {
             if !is_hex_digit {
                 break
             }
-            advance()
+            advance_char()
         }
 
         if Scanner.index == hex_start {
@@ -260,7 +268,7 @@ scan_number :: proc() {
         }
 
         if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-            scanner_error("number literal cannot be followed by identifier characters")
+            scanner_error("number literal must be separated from following identifier")
             return
         }
 
@@ -277,7 +285,7 @@ scan_number :: proc() {
     is_float := false
     if Scanner.source[Scanner.index] == '.' {
         is_float = true
-        advance()
+        advance_char()
     }
 
     for Scanner.index < len(Scanner.source) {
@@ -285,7 +293,7 @@ scan_number :: proc() {
         if !is_digit(ch) {
             break
         }
-        advance()
+        advance_char()
     }
 
     // Keep 123.foo tokenized as INT DOT IDENT.
@@ -293,20 +301,20 @@ scan_number :: proc() {
        Scanner.source[Scanner.index] == '.' &&
        is_digit(Scanner.source[Scanner.index + 1]) {
         is_float = true
-        advance()
+        advance_char()
 
         for Scanner.index < len(Scanner.source) {
             ch := Scanner.source[Scanner.index]
             if !is_digit(ch) {
                 break
             }
-            advance()
+            advance_char()
         }
     }
 
     text := Scanner.source[Scanner.token_start:Scanner.index]
     if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-        scanner_error("number literal cannot be followed by identifier characters")
+        scanner_error("number literal must be separated from following identifier")
         return
     }
 
@@ -330,7 +338,7 @@ scan_number :: proc() {
 
 // scan_string consumes a single-line quoted string with no escape decoding.
 scan_string :: proc() {
-    advance()
+    advance_char()
     string_start := Scanner.index
 
     for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '"' {
@@ -338,7 +346,7 @@ scan_string :: proc() {
             scanner_error("unterminated string")
             return
         }
-        advance()
+        advance_char()
     }
 
     if Scanner.index >= len(Scanner.source) {
@@ -347,20 +355,20 @@ scan_string :: proc() {
     }
 
     text := Scanner.source[string_start:Scanner.index]
-    advance()
+    advance_char()
     emit_token(.STRING, TokenValue(text))
 }
 
 // skip_line_comment consumes //... until newline and emits no token.
 skip_line_comment :: proc() {
     for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '\n' {
-        advance()
+        advance_char()
     }
 }
 
 // scan_symbol emits punctuation/operators and handles two-character forms.
 scan_symbol :: proc() {
-    ch := advance()
+    ch := advance_char()
 
     switch ch {
     case ':':
@@ -460,7 +468,7 @@ scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, err
 
         // Whitespace does not emit tokens.
         if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
-            advance()
+            advance_char()
             continue
         }
 

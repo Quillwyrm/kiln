@@ -3,9 +3,9 @@ package kiln
 import "core:fmt"
 
 // Parser state ===================================================================================
-
-// Parser is the working state for token-stream parsing.
+// working state for token-stream parsing.
 // It tracks parse position and parse failure state for one compile operation.
+
 Parser := struct {
     tokens: []Token,
     token_index: int,
@@ -13,9 +13,9 @@ Parser := struct {
 }{}
 
 // Token cursor ===================================================================================
-
-// Token cursor helpers over Parser.tokens.
+// helpers over Parser.tokens.
 // Parser.token_index points to the current token being parsed.
+
 current_token :: proc() -> Token {
     return Parser.tokens[Parser.token_index]
 }
@@ -29,15 +29,119 @@ at_token :: proc(kind: TokenKind) -> bool {
 }
 
 advance_token :: proc() -> Token {
-    token := current_token()
-    Parser.token_index += 1
-    return token
+	token := current_token()
+	Parser.token_index += 1
+	return token
 }
 
-// parser_error records a source-positioned compile error and stops parse flow.
-// source_name comes from the current ProtoState being compiled.
+
+// Parser errors ==================================================================================
+
+// token_text_for_error returns source-shaped text for parser error messages.
+token_text_for_error :: proc(token: Token) -> string {
+	#partial switch token.kind {
+	case .EOF:
+		return "end of file"
+
+	case .IDENT:
+		return token.value.(string)
+	case .INT:
+		return fmt.tprint(token.value.(i64))
+	case .FLOAT:
+		return fmt.tprint(token.value.(f64))
+	case .STRING:
+		return fmt.tprintf("\"%s\"", token.value.(string))
+
+	case .TRUE:
+		return "true"
+	case .FALSE:
+		return "false"
+	case .NIL:
+		return "nil"
+
+	case .IF:
+		return "if"
+	case .ELSE:
+		return "else"
+	case .FOR:
+		return "for"
+	case .BREAK:
+		return "break"
+	case .FUNCTION:
+		return "function"
+	case .RETURN:
+		return "return"
+
+	case .GLOBAL:
+		return "global"
+	case .MAP:
+		return "map"
+
+	case .DECL:
+		return ":="
+	case .CONST_DECL:
+		return "::"
+	case .ASSIGN:
+		return "="
+
+	case .PLUS:
+		return "+"
+	case .MINUS:
+		return "-"
+	case .STAR:
+		return "*"
+	case .SLASH:
+		return "/"
+
+	case .EQUAL:
+		return "=="
+	case .NOT:
+		return "!"
+	case .NOT_EQUAL:
+		return "!="
+	case .LESS:
+		return "<"
+	case .LESS_OR_EQUAL:
+		return "<="
+	case .GREATER:
+		return ">"
+	case .GREATER_OR_EQUAL:
+		return ">="
+
+	case .LEFT_PAREN:
+		return "("
+	case .RIGHT_PAREN:
+		return ")"
+	case .LEFT_BRACE:
+		return "{"
+	case .RIGHT_BRACE:
+		return "}"
+	case .LEFT_BRACKET:
+		return "["
+	case .RIGHT_BRACKET:
+		return "]"
+
+	case .COMMA:
+		return ","
+	case .DOT:
+		return "."
+	case .COLON:
+		return ":"
+	case .SEMICOLON:
+		return ";"
+	}
+
+	return fmt.tprint(token.kind)
+}
+
+// parser_error records a source compile error at a token location.
+// This covers grammar errors and codegen limits found while the parser drives bytecode generation.
 parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
-    set_error(proto_state.source_name, token.line, token.column, message)
+    set_error(SourceLocation{
+        source_name = proto_state.origin.source_name,
+        line        = token.line,
+        column      = token.column,
+    }, message)
     Parser.failed = true
 }
 
@@ -60,7 +164,7 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
 // Temp slots are bounded by MAX_FRAME_SLOTS due to u8 slot encoding.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, current_token(), "too many slots in proto")
+        parser_error(proto_state, current_token(), "function uses too many values")
         return 0
     }
 
@@ -72,8 +176,13 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 // begin_scope starts one lexical block scope in the current proto.
 // It records the local-count mark used when this scope exits.
 begin_scope :: proc(proto_state: ^ProtoState) {
-    proto_state.scope_local_counts[proto_state.scope_depth] = proto_state.local_count
-    proto_state.scope_depth += 1
+	if proto_state.scope_depth >= MAX_FRAME_SLOTS {
+		parser_error(proto_state, current_token(), "too many nested scopes")
+		return
+	}
+
+	proto_state.scope_local_counts[proto_state.scope_depth] = proto_state.local_count
+	proto_state.scope_depth += 1
 }
 
 // end_scope exits one lexical block scope in the current proto.
@@ -96,13 +205,17 @@ declare_local :: proc(proto_state: ^ProtoState, ident_token: Token) -> int {
 
     for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
         if proto_state.local_bindings[local_index].name == ident_name {
-            parser_error(proto_state, ident_token, fmt.tprintf("local already declared: %s", ident_name))
+            parser_error(
+                proto_state,
+                ident_token,
+                fmt.tprintf("local variable `%s` is already declared in this scope", ident_name),
+            )
             return 0
         }
     }
 
     if proto_state.local_count >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, ident_token, "too many local bindings")
+        parser_error(proto_state, ident_token, "too many local variables in function")
         return 0
     }
 
@@ -126,13 +239,13 @@ resolve_local :: proc(proto_state: ^ProtoState, ident_name: string) -> (slot: in
 }
 
 
-// Expressions ====================================================================================
+// Function literals ==============================================================================
 
-// parse_function_body parses the braced body of a function literal.
-// Function parameters and top-level body locals share the function root scope.
-// Nested blocks inside the body still create normal block scopes through parse_statement.
+// Function bodies consume braces but do not create an extra root scope.
+// Parameters and top-level body locals live together in the function's root scope.
+// Blocks inside the body still create scopes through normal statement parsing.
 parse_function_body :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
+	consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
     if Parser.failed {
         return
     }
@@ -155,20 +268,22 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
 
 // parse_function_literal parses function(params...) { body } as a value expression.
 // The compiled child proto is stored on the parent proto and loaded by LOAD_FUNC.
-parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string) {
-    consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
+parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
+	consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
     if Parser.failed {
         return
     }
 
-    consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
-    if Parser.failed {
-        return
-    }
+	consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
+	if Parser.failed {
+		return
+	}
 
-    param_tokens: [MAX_FRAME_SLOTS]Token
-    param_count := 0
-    if !at_token(.RIGHT_PAREN) {
+	// Parse parameters first while still compiling the parent.
+	// The child proto is not created until the function signature is known.
+	param_tokens: [MAX_FRAME_SLOTS]Token
+	param_count := 0
+	if !at_token(.RIGHT_PAREN) {
         for {
             if param_count >= MAX_FRAME_SLOTS {
                 parser_error(parent_proto_state, current_token(), "too many function parameters")
@@ -193,59 +308,98 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     }
 
     consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
-    if Parser.failed {
-        return
-    }
+	if Parser.failed {
+		return
+	}
 
-    child_proto_state := begin_proto(parent_proto_state.source_name, function_name, param_count)
-    for param_index := 0; param_index < param_count; param_index += 1 {
-        declare_local(&child_proto_state, param_tokens[param_index])
-        if Parser.failed {
+	// Build a fresh proto state for the function body.
+	// Parent proto state stays alive so the finished child can be appended to it.
+	child_origin := SourceLocation{
+		source_name = parent_proto_state.origin.source_name,
+		line        = origin_token.line,
+		column      = origin_token.column,
+	}
+	child_proto_state := begin_proto(child_origin, function_name, param_count)
+
+	// Parameters are local slots starting at slot 0.
+	// The VM call path places arguments directly into those slots.
+	for param_index := 0; param_index < param_count; param_index += 1 {
+		declare_local(&child_proto_state, param_tokens[param_index])
+		if Parser.failed {
+			delete_proto_state(&child_proto_state)
             return
         }
     }
 
     parse_function_body(&child_proto_state)
     if Parser.failed {
+		delete_proto_state(&child_proto_state)
+		return
+	}
+
+	// A function that reaches the closing brace returns nil.
+	return_slot := claim_temp_slot(&child_proto_state)
+	if Parser.failed {
+		delete_proto_state(&child_proto_state)
+		return
+    }
+	emit_load_nil(&child_proto_state, return_slot)
+	emit_return(&child_proto_state, return_slot, 1)
+
+	// Store the compiled child proto on the parent, then emit LOAD_FUNC.
+	// LOAD_FUNC creates the runtime function object when the parent executes.
+    if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
+        delete_proto_state(&child_proto_state)
+        parser_error(parent_proto_state, origin_token, "too many functions in function")
         return
     }
 
-    // Function fallthrough is implicit `return nil`, matching entry proto fallthrough.
-    return_slot := claim_temp_slot(&child_proto_state)
-    if Parser.failed {
-        return
-    }
-    emit_load_nil(&child_proto_state, return_slot)
-    emit_return(&child_proto_state, return_slot, 1)
-
-    child_proto := end_proto(&child_proto_state)
-    child_proto_index := len(parent_proto_state.child_protos)
-    append(&parent_proto_state.child_protos, child_proto)
+	child_proto := end_proto(&child_proto_state)
+	child_proto_index := len(parent_proto_state.child_protos)
+	append(&parent_proto_state.child_protos, child_proto)
     emit_load_func(parent_proto_state, dst, child_proto_index)
 }
+
+
+// Expressions ====================================================================================
 
 // parse_primary emits one primary expression value into dst.
 // IDENT resolves local first, then global binding table by name.
 parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
-    if at_token(.FUNCTION) {
-        parse_function_literal(proto_state, dst, "<function>")
-        return
-    }
+	if at_token(.FUNCTION) {
+		parse_function_literal(proto_state, dst, "<function>", current_token())
+		return
+	}
 
     token := advance_token()
 
     #partial switch token.kind {
     case .INT:
+        if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
+            parser_error(proto_state, token, "too many constants in function")
+            return
+        }
+
         value := token.value.(i64)
         const_index := const_int(proto_state, value)
         emit_load_const(proto_state, dst, const_index)
 
     case .FLOAT:
+        if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
+            parser_error(proto_state, token, "too many constants in function")
+            return
+        }
+
         value := token.value.(f64)
         const_index := const_float(proto_state, value)
         emit_load_const(proto_state, dst, const_index)
 
     case .STRING:
+        if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
+            parser_error(proto_state, token, "too many constants in function")
+            return
+        }
+
         text := token.value.(string)
         const_index := const_string(proto_state, text)
         emit_load_const(proto_state, dst, const_index)
@@ -267,15 +421,15 @@ parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
         } else {
             binding_id, found_global := resolve_global(ident_name)
             if !found_global {
-                parser_error(proto_state, token, fmt.tprintf("unknown name: %s", ident_name))
+                parser_error(proto_state, token, fmt.tprintf("unknown name `%s`", ident_name))
                 return
             }
             emit_get_global(proto_state, dst, binding_id)
         }
 
-    case:
-        parser_error(proto_state, token, "expected expression")
-    }
+	case:
+		parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", token_text_for_error(token)))
+	}
 }
 
 // parse_unary parses prefix unary operators and primary expressions.
@@ -322,7 +476,7 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
         for {
             arg_slot := callee_slot + 1 + arg_count
             if arg_slot >= MAX_FRAME_SLOTS {
-                parser_error(proto_state, current_token(), "too many call arguments or temporary slots")
+                parser_error(proto_state, current_token(), "call uses too many values")
                 return
             }
 
@@ -365,11 +519,14 @@ parse_block :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' to start block")
     if Parser.failed {
         return
-    }
+	}
 
-    begin_scope(proto_state)
+	begin_scope(proto_state)
+	if Parser.failed {
+		return
+	}
 
-    for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
+	for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
         parse_statement(proto_state)
         if Parser.failed {
             return
@@ -419,6 +576,9 @@ parse_if_statement :: proc(proto_state: ^ProtoState) {
 
         end_jump := emit_jump(proto_state)
         patch_jump(proto_state, false_jump)
+        if Parser.failed {
+            return
+        }
 
         if at_token(.IF) {
             parse_if_statement(proto_state)
@@ -430,10 +590,16 @@ parse_if_statement :: proc(proto_state: ^ProtoState) {
         }
 
         patch_jump(proto_state, end_jump)
+        if Parser.failed {
+            return
+        }
         return
     }
 
     patch_jump(proto_state, false_jump)
+    if Parser.failed {
+        return
+    }
 }
 
 // parse_for_statement parses:
@@ -481,14 +647,24 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
     }
 
     emit_jump(proto_state, loop_start)
+    if Parser.failed {
+        return
+    }
+
     if has_exit_jump {
         patch_jump(proto_state, exit_jump)
+        if Parser.failed {
+            return
+        }
     }
 
     proto_state.loop_depth -= 1
     break_fixup_base := proto_state.loop_break_fixup_base[proto_state.loop_depth]
     for fixup_index := break_fixup_base; fixup_index < proto_state.break_fixup_count; fixup_index += 1 {
         patch_jump(proto_state, proto_state.break_fixups[fixup_index])
+        if Parser.failed {
+            return
+        }
     }
     proto_state.break_fixup_count = break_fixup_base
 }
@@ -508,7 +684,7 @@ parse_break_statement :: proc(proto_state: ^ProtoState) {
     }
 
     if proto_state.break_fixup_count >= MAX_BREAK_FIXUPS {
-        parser_error(proto_state, break_token, "too many break statements in proto")
+        parser_error(proto_state, break_token, "function has too many break statements")
         return
     }
 
@@ -549,7 +725,7 @@ parse_return_statement :: proc(proto_state: ^ProtoState) {
 
         result_slot := first_result_slot + result_count
         if result_slot >= MAX_FRAME_SLOTS {
-            parser_error(proto_state, current_token(), "too many return values")
+            parser_error(proto_state, current_token(), "return has too many values")
             return
         }
 
@@ -592,10 +768,11 @@ parse_statement :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    if !at_token(.IDENT) {
-        parser_error(proto_state, current_token(), "expected statement")
-        return
-    }
+	if !at_token(.IDENT) {
+		token := current_token()
+		parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", token_text_for_error(token)))
+		return
+	}
 
     next_kind := peek_token().kind
     if next_kind == .LEFT_PAREN {
@@ -621,13 +798,14 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 
         slot := declare_local(proto_state, ident_token)
         if Parser.failed {
-            return
-        }
+			return
+		}
 
-        if at_token(.FUNCTION) {
-            parse_function_literal(proto_state, slot, ident_text)
-            return
-        }
+		// Declaration gives the function proto a useful name and origin.
+		if at_token(.FUNCTION) {
+			parse_function_literal(proto_state, slot, ident_text, ident_token)
+			return
+		}
 
         parse_expression(proto_state, slot)
         return
@@ -636,7 +814,7 @@ parse_statement :: proc(proto_state: ^ProtoState) {
     if next_kind == .ASSIGN {
         slot, is_local := resolve_local(proto_state, ident_text)
         if !is_local {
-            parser_error(proto_state, ident_token, "assignment target is not a local")
+            parser_error(proto_state, ident_token, fmt.tprintf("assignment target `%s` is not a local variable", ident_text))
             return
         }
 
@@ -648,7 +826,7 @@ parse_statement :: proc(proto_state: ^ProtoState) {
     parser_error(
         proto_state,
         ident_token,
-        fmt.tprintf("invalid bare expression `%s`; expected declaration, assignment, or call statement", ident_text),
+        fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", ident_text),
     )
 }
 
@@ -680,9 +858,15 @@ compile_source :: proc(source, source_name: string) -> ^Error {
     Parser.token_index = 0
     Parser.failed = false
 
-    entry_proto_state := begin_proto(source_name, "entry", 0)
+	entry_origin := SourceLocation{
+		source_name = source_name,
+		line        = 1,
+		column      = 1,
+	}
+	entry_proto_state := begin_proto(entry_origin, "entry", 0)
     parse_top_level_statements(&entry_proto_state)
     if Parser.failed {
+		delete_proto_state(&entry_proto_state)
         return &Active_State.error
     }
 
@@ -690,6 +874,7 @@ compile_source :: proc(source, source_name: string) -> ^Error {
     // This keeps entry completion on the same RETURN path as explicit source returns.
     return_slot := claim_temp_slot(&entry_proto_state)
     if Parser.failed {
+		delete_proto_state(&entry_proto_state)
         return &Active_State.error
     }
     emit_load_nil(&entry_proto_state, return_slot)

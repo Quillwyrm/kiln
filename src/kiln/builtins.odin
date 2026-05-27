@@ -4,14 +4,53 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 
-// Internal helpers ===============================================================================
+// Value helpers ==================================================================================
 
 // new_string_value allocates a VM string object and wraps it as Value.
+// StringObject owns stable text; callers may pass slices from source or temp strings.
 new_string_value :: proc(text: string) -> Value {
     string_object := new(StringObject)
     string_object.header.kind = .STRING
-    string_object.data = text
+    string_object.data = strings.clone(text)
     return Value(cast(^Object)string_object)
+}
+
+// value_type_name returns the user-facing type name for one Kiln value.
+value_type_name :: proc(value: Value) -> string {
+    if value == nil {
+        return "nil"
+    }
+
+    _, is_bool := value.(bool)
+    if is_bool {
+        return "bool"
+    }
+
+    _, is_int := value.(i64)
+    if is_int {
+        return "int"
+    }
+
+    _, is_float := value.(f64)
+    if is_float {
+        return "float"
+    }
+
+    object_header, is_object := value.(^Object)
+    if is_object {
+        switch object_header.kind {
+        case .STRING:
+            return "string"
+        case .ARRAY:
+            return "array"
+        case .MAP:
+            return "map"
+        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
+            return "function"
+        }
+    }
+
+    panic("unreachable: value must match one Value variant")
 }
 
 // value_to_string returns text conversion used by to_string and assert message formatting.
@@ -54,7 +93,9 @@ value_to_string :: proc(value: Value) -> string {
                 append(&parts, value_to_string(array_object.data[item_index]))
             }
             append(&parts, "]")
-            return strings.concatenate(parts[:])
+            result := strings.concatenate(parts[:])
+            delete(parts)
+            return result
 
         case .MAP:
             map_object := cast(^MapObject)object_header
@@ -71,7 +112,9 @@ value_to_string :: proc(value: Value) -> string {
                 item_index += 1
             }
             append(&parts, "}")
-            return strings.concatenate(parts[:])
+            result := strings.concatenate(parts[:])
+            delete(parts)
+            return result
 
         case .PROTO_FUNCTION:
             return "<object:PROTO_FUNCTION>"
@@ -85,18 +128,7 @@ value_to_string :: proc(value: Value) -> string {
 }
 
 
-// Core builtins ==================================================================================
-
-// bind_global_env installs the core native builtin set into global_env.
-bind_global_env :: proc(state: ^State) {
-    Active_State = state
-    bind_native_global("print", native_print)
-    bind_native_global("type", native_type)
-    bind_native_global("length", native_length)
-    bind_native_global("assert", native_assert)
-    bind_native_global("to_string", native_to_string)
-    bind_native_global("to_number", native_to_number)
-}
+// Print formatting ===============================================================================
 
 // print_value is display formatting for builtin print output.
 // Formatting is human-facing and may differ from value_to_string representation.
@@ -171,6 +203,9 @@ print_value :: proc(value: Value) {
     panic("unreachable: value must match one Value variant")
 }
 
+
+// Native builtin implementations =================================================================
+
 // Native builtin call contract:
 // - args are read from slots starting at args_base
 // - results are written starting at return_slot_base
@@ -193,100 +228,78 @@ native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_
 // native_type returns one of:
 // "nil", "bool", "int", "float", "string", "array", "map", "function".
 native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
-    if arg_count < 1 {
-        panic("type expected 1 argument")
+    value := Value{}
+    if arg_count >= 1 {
+        value = kiln_state.slots[args_base]
     }
 
-    value := kiln_state.slots[args_base]
-    if value == nil {
-        kiln_state.slots[return_slot_base] = new_string_value("nil")
-        return 1
-    }
-
-    _, is_bool := value.(bool)
-    if is_bool {
-        kiln_state.slots[return_slot_base] = new_string_value("bool")
-        return 1
-    }
-
-    _, is_int := value.(i64)
-    if is_int {
-        kiln_state.slots[return_slot_base] = new_string_value("int")
-        return 1
-    }
-
-    _, is_float := value.(f64)
-    if is_float {
-        kiln_state.slots[return_slot_base] = new_string_value("float")
-        return 1
-    }
-
-    object_header, is_object := value.(^Object)
-    if !is_object {
-        panic("unreachable: type expected valid Value")
-    }
-
-    switch object_header.kind {
-    case .STRING:
-        kiln_state.slots[return_slot_base] = new_string_value("string")
-    case .ARRAY:
-        kiln_state.slots[return_slot_base] = new_string_value("array")
-    case .MAP:
-        kiln_state.slots[return_slot_base] = new_string_value("map")
-    case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-        kiln_state.slots[return_slot_base] = new_string_value("function")
-    }
+    kiln_state.slots[return_slot_base] = new_string_value(value_type_name(value))
     return 1
 }
 
 
 // native_length supports array/map/string only.
 native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
-    if arg_count < 1 {
-        panic("length expected 1 argument")
+    value := Value{}
+    if arg_count >= 1 {
+        value = kiln_state.slots[args_base]
     }
 
-    value := kiln_state.slots[args_base]
-    object_header, is_object := value.(^Object)
-    if !is_object {
-        panic("length expected array, map, or string")
-    }
+	object_header, is_object := value.(^Object)
+	if is_object {
+		switch object_header.kind {
+		case .ARRAY:
+			array_object := cast(^ArrayObject)object_header
+			kiln_state.slots[return_slot_base] = Value(i64(len(array_object.data)))
+			return 1
+		case .MAP:
+			map_object := cast(^MapObject)object_header
+			kiln_state.slots[return_slot_base] = Value(i64(len(map_object.data)))
+			return 1
+		case .STRING:
+			string_object := cast(^StringObject)object_header
+			kiln_state.slots[return_slot_base] = Value(i64(len(string_object.data)))
+			return 1
+		case .PROTO_FUNCTION, .NATIVE_FUNCTION:
+		}
+	}
 
-    switch object_header.kind {
-    case .ARRAY:
-        array_object := cast(^ArrayObject)object_header
-        kiln_state.slots[return_slot_base] = Value(i64(len(array_object.data)))
-        return 1
-    case .MAP:
-        map_object := cast(^MapObject)object_header
-        kiln_state.slots[return_slot_base] = Value(i64(len(map_object.data)))
-        return 1
-    case .STRING:
-        string_object := cast(^StringObject)object_header
-        kiln_state.slots[return_slot_base] = Value(i64(len(string_object.data)))
-        return 1
-    case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-        panic("length expected array, map, or string")
-    }
-
-    panic("unreachable: length expected known object kind")
+	message := fmt.tprintf(
+		"`length()` called with invalid argument; expected `array`, `map`, or `string`, got `%s`",
+		value_type_name(value),
+	)
+	runtime_error(kiln_state, message)
+	return 0
 }
 
 
 // native_assert errors when first arg is falsey (nil or false).
 native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
-    if arg_count < 1 {
-        panic("assert expected at least 1 argument")
+    condition := Value{}
+    if arg_count >= 1 {
+        condition = kiln_state.slots[args_base]
     }
 
-    condition := kiln_state.slots[args_base]
     if value_is_falsey(condition) {
         if arg_count >= 2 {
-            message := value_to_string(kiln_state.slots[args_base + 1])
-            panic(message)
+            message_value := kiln_state.slots[args_base + 1]
+            message_object, is_object := message_value.(^Object)
+            if is_object && message_object.kind == .STRING {
+                string_object := cast(^StringObject)message_object
+                runtime_error(kiln_state, string_object.data)
+                return 0
+            }
+
+            runtime_error(kiln_state, value_to_string(message_value))
+            return 0
         }
-        panic("assertion failed")
-    }
+
+		runtime_error(
+			kiln_state,
+			fmt.tprintf("assertion failed; condition was `%s`", value_to_string(condition)),
+		)
+		return 0
+	}
 
     kiln_state.slots[return_slot_base] = condition
     return 1
@@ -295,22 +308,22 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 
 // native_to_string converts one value to a string object.
 native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
-    if arg_count < 1 {
-        panic("to_string expected 1 argument")
+    value := Value{}
+    if arg_count >= 1 {
+        value = kiln_state.slots[args_base]
     }
 
-    kiln_state.slots[return_slot_base] = new_string_value(value_to_string(kiln_state.slots[args_base]))
+    kiln_state.slots[return_slot_base] = new_string_value(value_to_string(value))
     return 1
 }
 
 
 // native_to_number parses int/float/string numeric forms and returns nil on failure.
 native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
-    if arg_count < 1 {
-        panic("to_number expected 1 argument")
+    value := Value{}
+    if arg_count >= 1 {
+        value = kiln_state.slots[args_base]
     }
-
-    value := kiln_state.slots[args_base]
 
     int_value, is_int := value.(i64)
     if is_int {
@@ -346,4 +359,18 @@ native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 
     kiln_state.slots[return_slot_base] = Value{}
     return 1
+}
+
+
+// Builtin binding ================================================================================
+
+// bind_global_env installs the core native builtin set into global_env.
+bind_global_env :: proc(state: ^State) {
+    Active_State = state
+    bind_native_global("print", native_print)
+    bind_native_global("type", native_type)
+    bind_native_global("length", native_length)
+    bind_native_global("assert", native_assert)
+    bind_native_global("to_string", native_to_string)
+    bind_native_global("to_number", native_to_number)
 }

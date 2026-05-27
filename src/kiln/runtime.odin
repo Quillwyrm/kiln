@@ -11,6 +11,8 @@ new_state :: proc() -> ^State {
     return new(State)
 }
 
+// delete_state currently frees the State shell only.
+// Heap-backed runtime objects are not walked until Kiln has heap tracking or GC.
 delete_state :: proc(state: ^State) {
     free(state)
 }
@@ -20,6 +22,7 @@ delete_state :: proc(state: ^State) {
 // When err != nil, result is undefined and should be ignored.
 run_source :: proc(state: ^State, source, source_name: string) -> (result: Value, err: ^Error) {
     Active_State = state
+    state.has_error = false
     state.error = Error{}
 
     compile_error := compile_source(source, source_name)
@@ -28,8 +31,12 @@ run_source :: proc(state: ^State, source, source_name: string) -> (result: Value
         return result, compile_error
     }
 
-    result = run_vm(state)
-    return result, nil
+    vm_result, vm_error := run_vm(state)
+    if vm_error != nil {
+        return vm_result, vm_error
+    }
+
+    return vm_result, nil
 }
 
 // run_file loads source text from disk and forwards to run_source.
@@ -41,7 +48,8 @@ run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
     source_bytes, read_error := os.read_entire_file(path, context.allocator)
     if read_error != nil {
         result := Value{}
-        return result, set_error(path, 0, 0, fmt.tprintf("failed to read %s", path))
+        location := SourceLocation{source_name = path, line = 0, column = 0}
+        return result, set_error(location, fmt.tprintf("failed to read %s", path))
     }
     defer delete(source_bytes)
     return run_source(state, string(source_bytes), path)
@@ -55,7 +63,8 @@ debug_run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Err
     source_bytes, read_error := os.read_entire_file(path, context.allocator)
     if read_error != nil {
         result := Value{}
-        return result, set_error(path, 0, 0, fmt.tprintf("failed to read %s", path))
+        location := SourceLocation{source_name = path, line = 0, column = 0}
+        return result, set_error(location, fmt.tprintf("failed to read %s", path))
     }
     defer delete(source_bytes)
 

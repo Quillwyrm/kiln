@@ -11,7 +11,24 @@ main :: proc() {
 
 	kiln_result, kiln_err := kiln.run_file(kstate, "test.kiln")
 	if kiln_err != nil {
-		fmt.eprintfln("%s[%d:%d] Error: %s", kiln_err.source_name, kiln_err.line, kiln_err.column, kiln_err.message)
+		if kiln_err.context_text != "" {
+			fmt.eprintfln(
+				"%s[%d:%d] Error %s: %s",
+				kiln_err.location.source_name,
+				kiln_err.location.line,
+				kiln_err.location.column,
+				kiln_err.context_text,
+				kiln_err.message,
+			)
+		} else {
+			fmt.eprintfln(
+				"%s[%d:%d] Error: %s",
+				kiln_err.location.source_name,
+				kiln_err.location.line,
+				kiln_err.location.column,
+				kiln_err.message,
+			)
+		}
 		return
 	}
 
