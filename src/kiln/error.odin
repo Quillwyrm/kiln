@@ -13,7 +13,7 @@ SourceLocation :: struct {
 	column:      int,
 }
 
-// Error is the current compile/load error payload surfaced to the host.
+// Error is the current compile or runtime error payload surfaced to the host.
 Error :: struct {
 	location:     SourceLocation,
 	context_text: string, // function context, e.g. "in helper()"

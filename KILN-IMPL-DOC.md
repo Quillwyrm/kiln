@@ -1,4 +1,4 @@
-KILN FOR LLMS
+KILN-IMPL-DOC
 ==============
 no dragon book, no Lex, no Yacc. learning solo from modern first principals. inspired loosley by lua (minus the magic and tables), and informed by personal research, and knowledge gained from respected engineers like; Rob Pike, Jon Blow, Ginger Bill, Casey Muratori. and heavily inspired by the `Handmade` community. 
 
@@ -130,7 +130,7 @@ Scanner source state is package singleton `Scanner`, not a named reusable state 
 Scanner emits `Token` records:
 - `kind: TokenKind`
 - `value: TokenValue`
-- `offset: int`
+- `source_text: string`
 - `line: int`
 - `column: int`
 
@@ -140,7 +140,9 @@ Scanner emits `Token` records:
 - `FLOAT -> f64`
 - `STRING -> string`
 
-Whitespace is skipped. Newlines are not tokens. Line comments `//...` are skipped. Strings are single-line quoted strings with no escape decoding. Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`. Numeric scanning supports decimal ints, hex ints with `0x`, and decimal floats including `.5`. Exponents/octal are not supported.
+Whitespace is skipped. Newlines are not tokens. Line comments `//...` are skipped. Strings are single-line quoted strings with no escape decoding. Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`. Numeric scanning supports decimal ints, hex ints with `0x`, and decimal floats including `.5`. Exponents/octal are not supported. Bare leading zeros on decimal literals (`042`) are rejected at scan time.
+
+Scanner error messages follow the same single-quote convention as the parser: values appear as `'name'`, not `%q`-quoted.
 
 `scan_source(source, source_name)` resets `Scanner`, appends tokens, appends EOF on success, and returns `(tokens: [dynamic]Token, error: ^Error)`. Caller owns and deletes returned token dynamic array.
 
@@ -474,7 +476,7 @@ Proto function calls push a new frame:
 - A is first produced slot in callee frame.
 - B is produced result count.
 - non-top-level return copies up to requested result count into caller result slots.
-- copy handles overlap in shared slot array.
+- forward copy always safe (callee produces above `caller_result_base`).
 - missing requested results are nil-filled.
 - extra produced results are ignored.
 - caller slot count and frame count are restored.
@@ -490,7 +492,7 @@ Contract:
 - native writes produced results starting at `return_slot_base`
 - return int is produced result count
 - VM shapes produced results to requested results after native returns
-- native can call `runtime_error(vm, message)`; VM checks `state.has_error` after native call and returns `&state.error`
+- native can call `runtime_error(message)` (uses `Active_State` internally); VM checks `state.has_error` after native call and returns `&state.error`
 
 Current builtins
 ----------------
@@ -502,11 +504,11 @@ Installed by `bind_global_env`:
 - `to_string(value)` -> string object using `value_to_string`
 - `to_number(value)` -> returns int/float from numeric value or numeric string; nil on failure
 
-`value_to_string` is conversion text for `to_string` and assertions. `print_value` is display formatting for print and may differ.
+`value_to_string` is the single canonical value-to-string conversion used by `print`, `to_string`, and assertions.
 
 Runtime error model
 -------------------
-`runtime_error(state, message)` looks at current call frame, uses current proto origin, and sets context text:
+`runtime_error(message)` looks at current call frame via `Active_State`, uses current proto origin, and sets context text:
 - top-level frame -> `in entry file`
 - named function -> `in name()`
 - anonymous function -> `in anonymous function`

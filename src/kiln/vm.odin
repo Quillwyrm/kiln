@@ -577,13 +577,13 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
 
 // Runtime errors =================================================================================
 
-runtime_error :: proc(state: ^State, message: string) -> ^Error {
-    frame := &state.frame_stack[state.frame_count - 1]
+runtime_error :: proc(message: string) -> ^Error {
+    frame := &Active_State.frame_stack[Active_State.frame_count - 1]
     proto := frame.proto
 
     // frame_count == 1 is the entry file; deeper frames are user function calls.
     context_text := "in entry file"
-    if state.frame_count > 1 {
+    if Active_State.frame_count > 1 {
         if proto.name == "<function>" {
             context_text = "in anonymous function"
         } else {
@@ -935,7 +935,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                     "invalid function call; expected `function`, got `%s`",
                     value_type_name(state.slots[call_base]),
                 )
-                return Value{}, runtime_error(state, message)
+                return Value{}, runtime_error(message)
             }
 
             switch callee_header.kind {
@@ -962,13 +962,13 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 callee_proto := proto_function.impl
 
                 if state.frame_count >= MAX_CALLFRAMES {
-                    return Value{}, runtime_error(state, "call stack limit exceeded")
+                    return Value{}, runtime_error("call stack limit exceeded")
                 }
 
                 callee_slot_base := args_base
                 callee_slot_top := callee_slot_base + callee_proto.frame_slot_count
                 if callee_slot_top > MAX_VM_SLOTS {
-                    return Value{}, runtime_error(state, "runtime slot limit exceeded")
+                    return Value{}, runtime_error("runtime slot limit exceeded")
                 }
 
                 // Register-window: callee frame starts at args_base, so callee slot 0 gets arg 0.
@@ -998,7 +998,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                     "invalid function call; expected `function`, got `%s`",
                     value_type_name(state.slots[call_base]),
                 )
-                return Value{}, runtime_error(state, message)
+                return Value{}, runtime_error(message)
             }
 
         case .GET_GLOBAL:
@@ -1036,17 +1036,10 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             }
 
             // Copy produced values into caller result slots.
-            // Source and destination can overlap in the shared slot array.
-            if copied_result_count > 0 {
-                if caller_result_base < produced_slot_base {
-                    for value_index := 0; value_index < copied_result_count; value_index += 1 {
-                        state.slots[caller_result_base + value_index] = state.slots[produced_slot_base + value_index]
-                    }
-                } else {
-                    for value_index := copied_result_count - 1; value_index >= 0; value_index -= 1 {
-                        state.slots[caller_result_base + value_index] = state.slots[produced_slot_base + value_index]
-                    }
-                }
+            // The callee produces below the caller result base, so forward copy is safe
+            // (no overlap risk between source and destination).
+            for value_index := 0; value_index < copied_result_count; value_index += 1 {
+                state.slots[caller_result_base + value_index] = state.slots[produced_slot_base + value_index]
             }
 
             // Fill missing requested results with nil.

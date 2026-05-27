@@ -8,7 +8,7 @@ import "core:fmt"
 Parser := struct {
     tokens: []Token,
     token_index: int,
-    failed: bool,
+    failed:   bool, // global error latch — every mutating operation sets it, callers check and return immediately
 }{}
 
 // Token cursor ===================================================================================
@@ -35,99 +35,10 @@ advance_token :: proc() -> Token {
 // Parser errors ==================================================================================
 
 token_text_for_error :: proc(token: Token) -> string {
-	#partial switch token.kind {
-	case .EOF:
-		return "end of file"
-
-	case .IDENT:
-		return token.value.(string)
-	case .INT:
-		return fmt.tprint(token.value.(i64))
-	case .FLOAT:
-		return fmt.tprint(token.value.(f64))
-	case .STRING:
-		return fmt.tprintf("\"%s\"", token.value.(string))
-
-	case .TRUE:
-		return "true"
-	case .FALSE:
-		return "false"
-	case .NIL:
-		return "nil"
-
-	case .IF:
-		return "if"
-	case .ELSE:
-		return "else"
-	case .FOR:
-		return "for"
-	case .BREAK:
-		return "break"
-	case .FUNCTION:
-		return "function"
-	case .RETURN:
-		return "return"
-
-	case .GLOBAL:
-		return "global"
-	case .MAP:
-		return "map"
-
-	case .DECL:
-		return ":="
-	case .CONST_DECL:
-		return "::"
-	case .ASSIGN:
-		return "="
-
-	case .PLUS:
-		return "+"
-	case .MINUS:
-		return "-"
-	case .STAR:
-		return "*"
-	case .SLASH:
-		return "/"
-
-	case .EQUAL:
-		return "=="
-	case .NOT:
-		return "!"
-	case .NOT_EQUAL:
-		return "!="
-	case .LESS:
-		return "<"
-	case .LESS_OR_EQUAL:
-		return "<="
-	case .GREATER:
-		return ">"
-	case .GREATER_OR_EQUAL:
-		return ">="
-
-	case .LEFT_PAREN:
-		return "("
-	case .RIGHT_PAREN:
-		return ")"
-	case .LEFT_BRACE:
-		return "{"
-	case .RIGHT_BRACE:
-		return "}"
-	case .LEFT_BRACKET:
-		return "["
-	case .RIGHT_BRACKET:
-		return "]"
-
-	case .COMMA:
-		return ","
-	case .DOT:
-		return "."
-	case .COLON:
-		return ":"
-	case .SEMICOLON:
-		return ";"
-	}
-
-	return fmt.tprint(token.kind)
+    if token.kind == .EOF {
+        return "end of file"
+    }
+    return token.source_text
 }
 
 // Covers grammar errors and codegen limits found while the parser drives bytecode generation.
@@ -155,6 +66,10 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
 // Slots and locals ===============================================================================
 
 // Temp slots are bounded by MAX_FRAME_SLOTS due to u8 slot encoding.
+// next_temp_slot is the allocation cursor. frame_slot_count is the high-water mark
+// (max slot touched + 1), maintained by record_slots. These are separate:
+// next_temp_slot can be saved/restored to free temps (e.g. condition slots),
+// while frame_slot_count only grows.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
         parser_error(proto_state, current_token(), "function uses too many values")
@@ -449,7 +364,9 @@ parse_unary :: proc(proto_state: ^ProtoState, dst: int) {
 }
 
 // Layout: callee_slot, arg0, arg1, ...
-// requested_results controls CALL result shaping (0 for statements, 1 for expressions).
+// requested_results controls CALL's c operand:
+//   0 = statement context — results follow the caller's return convention, not a specific slot
+//   1 = expression context — expect exactly one result in dst
 parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int) {
     consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
     if Parser.failed {
@@ -538,6 +455,7 @@ parse_if_statement :: proc(proto_state: ^ProtoState) {
         return
     }
 
+    temp_save := proto_state.next_temp_slot
     condition_slot := claim_temp_slot(proto_state)
     if Parser.failed {
         return
@@ -549,6 +467,7 @@ parse_if_statement :: proc(proto_state: ^ProtoState) {
     }
 
     false_jump := emit_jump_false(proto_state, condition_slot)
+    proto_state.next_temp_slot = temp_save
     parse_block(proto_state)
     if Parser.failed {
         return
@@ -607,6 +526,7 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
     // `for { ... }` has no condition expression.
     // It loops until `break`, `return`, or runtime termination.
     if !at_token(.LEFT_BRACE) {
+        temp_save := proto_state.next_temp_slot
         condition_slot := claim_temp_slot(proto_state)
         if Parser.failed {
             return
@@ -618,6 +538,7 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
         }
 
         exit_jump = emit_jump_false(proto_state, condition_slot)
+        proto_state.next_temp_slot = temp_save
         has_exit_jump = true
     }
 

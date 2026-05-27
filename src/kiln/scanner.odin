@@ -79,11 +79,11 @@ TokenValue :: union {
 }
 
 // Token is one scanned unit plus its source location.
-// offset is a byte index in source text.
 // line and column start at 1 to match printed error locations.
 Token :: struct {
-    kind:  TokenKind,
-    value: TokenValue,
+    kind:        TokenKind,
+    value:       TokenValue,
+    source_text: string,
 
     line:   int, // 1-based source line where this token begins
     column: int, // 1-based source column where this token begins
@@ -166,10 +166,11 @@ scanner_error :: proc(message: string) {
 // Uses the current token-start snapshot for position data.
 emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
     append(&Scanner.tokens, Token {
-        kind   = kind,
-        value  = value,
-        line   = Scanner.token_line,
-        column = Scanner.token_column,
+        kind        = kind,
+        value       = value,
+        source_text = Scanner.source[Scanner.token_start:Scanner.index],
+        line        = Scanner.token_line,
+        column      = Scanner.token_column,
     })
 }
 
@@ -200,9 +201,9 @@ scan_ident_or_keyword :: proc() {
         advance_char()
     }
 
-    text := Scanner.source[Scanner.token_start:Scanner.index]
+    token_text := Scanner.source[Scanner.token_start:Scanner.index]
 
-    switch text {
+    switch token_text {
     case "true":
         emit_token(.TRUE)
     case "false":
@@ -226,7 +227,7 @@ scan_ident_or_keyword :: proc() {
     case "map":
         emit_token(.MAP)
     case:
-        emit_token(.IDENT, TokenValue(text))
+        emit_token(.IDENT, TokenValue(token_text))
     }
 }
 
@@ -264,10 +265,10 @@ scan_number :: proc() {
             return
         }
 
-        text := Scanner.source[hex_start:Scanner.index]
-        value, ok := strconv.parse_i64_of_base(text, 16)
+        hex_digits := Scanner.source[hex_start:Scanner.index]
+        value, ok := strconv.parse_i64_of_base(hex_digits, 16)
         if !ok {
-            scanner_error(fmt.tprintf("failed to parse hex literal %q", text))
+            scanner_error(fmt.tprintf("failed to parse hex literal '%s'", hex_digits))
             return
         }
         emit_token(.INT, TokenValue(value))
@@ -288,6 +289,13 @@ scan_number :: proc() {
         advance_char()
     }
 
+    // Reject bare leading zeros on decimal literals (e.g. 042).
+    if Scanner.source[Scanner.token_start] == '0' && Scanner.index - Scanner.token_start > 1 {
+        token_text := Scanner.source[Scanner.token_start:Scanner.index]
+        scanner_error(fmt.tprintf("integer literal '%s' has leading zeros", token_text))
+        return
+    }
+
     // Keep 123.foo tokenized as INT DOT IDENT.
     if Scanner.index + 1 < len(Scanner.source) &&
        Scanner.source[Scanner.index] == '.' &&
@@ -304,25 +312,26 @@ scan_number :: proc() {
         }
     }
 
-    text := Scanner.source[Scanner.token_start:Scanner.index]
     if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
         scanner_error("number literal must be separated from following identifier")
         return
     }
 
     if is_float {
-        value, ok := strconv.parse_f64(text)
+        token_text := Scanner.source[Scanner.token_start:Scanner.index]
+        value, ok := strconv.parse_f64(token_text)
         if !ok {
-            scanner_error(fmt.tprintf("failed to parse float literal %q", text))
+            scanner_error(fmt.tprintf("failed to parse float literal '%s'", token_text))
             return
         }
         emit_token(.FLOAT, TokenValue(value))
         return
     }
 
-    value, ok := strconv.parse_i64(text)
+    token_text := Scanner.source[Scanner.token_start:Scanner.index]
+    value, ok := strconv.parse_i64(token_text)
     if !ok {
-        scanner_error(fmt.tprintf("failed to parse int literal %q", text))
+        scanner_error(fmt.tprintf("failed to parse int literal '%s'", token_text))
         return
     }
     emit_token(.INT, TokenValue(value))
@@ -346,9 +355,9 @@ scan_string :: proc() {
         return
     }
 
-    text := Scanner.source[string_start:Scanner.index]
+    str_content := Scanner.source[string_start:Scanner.index]
     advance_char()
-    emit_token(.STRING, TokenValue(text))
+    emit_token(.STRING, TokenValue(str_content))
 }
 
 // Emits no token — comments are not preserved in the token stream.
@@ -434,7 +443,7 @@ scan_symbol :: proc() {
         emit_token(.SEMICOLON)
 
     case:
-        scanner_error(fmt.tprintf("unexpected character %q", rune(ch)))
+        scanner_error(fmt.tprintf("unexpected character '%c'", ch))
     }
 }
 

@@ -35,6 +35,8 @@ if first {
     print("none")
 }
 
+b := 20
+
 print(!alive, !!alive, !missing)
 
 looping := true
