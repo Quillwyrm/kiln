@@ -10,8 +10,8 @@ MAX_BREAK_FIXUPS :: 1024
 
 // LocalBinding maps an identifier name to a frame slot index.
 LocalBinding :: struct {
-	name: string,
-	frame_slot: int,
+    name: string,
+    frame_slot: int,
 }
 
 // Proto state ====================================================================================
@@ -19,28 +19,28 @@ LocalBinding :: struct {
 // ProtoState is the mutable compile target for one proto/chunk.
 // Parser and codegen both mutate this state while lowering source to bytecode.
 ProtoState :: struct {
-	source_name: string,
-	name:        string,
-	param_count: int,
+    source_name: string,
+    name:        string,
+    param_count: int,
 
-	bytecode:     [dynamic]u32,
-	const_pool:   [dynamic]Value,
-	child_protos: [dynamic]^Proto,
+    bytecode:     [dynamic]u32,
+    const_pool:   [dynamic]Value,
+    child_protos: [dynamic]^Proto,
 
-	frame_slot_count: int,
-	local_bindings:   [MAX_FRAME_SLOTS]LocalBinding,
-	local_count:      int,
-	next_temp_slot:   int,
-	scope_depth:      int,
-	scope_local_counts: [MAX_FRAME_SLOTS]int,
+    frame_slot_count: int,
+    local_bindings:   [MAX_FRAME_SLOTS]LocalBinding,
+    local_count:      int,
+    next_temp_slot:   int,
+    scope_depth:      int,
+    scope_local_counts: [MAX_FRAME_SLOTS]int,
 
-	// break_fixups stores instruction indexes for unresolved `break` jumps.
-	break_fixups: [MAX_BREAK_FIXUPS]int,
-	break_fixup_count: int,
+    // break_fixups stores instruction indexes for unresolved `break` jumps.
+    break_fixups: [MAX_BREAK_FIXUPS]int,
+    break_fixup_count: int,
 
-	// loop_break_fixup_base marks, per active loop depth, where that loop's break fixups begin.
-	loop_break_fixup_base: [MAX_LOOP_DEPTH]int,
-	loop_depth: int,
+    // loop_break_fixup_base marks, per active loop depth, where that loop's break fixups begin.
+    loop_break_fixup_base: [MAX_LOOP_DEPTH]int,
+    loop_depth: int,
 }
 
 // Internals ======================================================================================

@@ -948,6 +948,12 @@ run_vm :: proc(state: ^State) -> Value {
                     state.slot_count = callee_slot_top
                 }
 
+                // Caller arguments already start at callee slot 0 because the callee frame
+                // begins at args_base. Missing fixed parameters are explicit Kiln nil.
+                for param_index := arg_count; param_index < callee_proto.param_count; param_index += 1 {
+                    state.slots[callee_slot_base + param_index] = Value{}
+                }
+
                 state.frame_stack[state.frame_count] = CallFrame{
                     proto                    = callee_proto,
                     instruction_index        = 0,

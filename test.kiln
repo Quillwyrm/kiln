@@ -50,6 +50,27 @@ if true {
     }
 }
 
+id := function(value) {
+    return value
+}
+print(id("function value"))
+
+print(type(id))
+
+missing_arg := function(a, b) {
+    print(a, b)
+}
+missing_arg(10)
+
+shadow := function(a) {
+    if true {
+        a := "inner"
+        print(a)
+    }
+    print(a)
+}
+shadow("outer")
+
 ret_a := 7
 ret_b := 9
 return ret_a, ret_b
