@@ -188,6 +188,7 @@ NativeFunctionObject :: struct {
 
 // Nil is the zero value of the union.
 // Immediates live inline. Heap-backed values are stored as ^Object.
+// Value{} represents language-level nil.
 
 Value :: union {
     bool,

@@ -16,4 +16,42 @@ print(number, decimal, bad)
 
 decimal = 0xFF
 print(decimal)
+
+if alive {
+    scoped := "then branch"
+    print(scoped)
+} else {
+    scoped := "else branch"
+    print(scoped)
+}
+
+first := false
+second := true
+if first {
+    print("first")
+} else if second {
+    print("second")
+} else {
+    print("none")
+}
+
+print(!alive, !!alive, !missing)
+
+looping := true
+for looping {
+    print("for cond")
+    looping = false
+}
+
+if true {
+    for {
+        print("for infinite")
+    }
+}
+
+ret_a := 7
+ret_b := 9
+return ret_a, ret_b
+print(ret_a, ret_b)
+print("after return")
 assert(alive, "alive should be true")

@@ -29,6 +29,8 @@ ProtoState :: struct {
 	local_bindings:   [MAX_FRAME_SLOTS]LocalBinding,
 	local_count:      int,
 	next_temp_slot:   int,
+	scope_depth:      int,
+	scope_local_counts: [MAX_FRAME_SLOTS]int,
 }
 
 // Internals ======================================================================================

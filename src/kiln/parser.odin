@@ -69,12 +69,32 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 	return slot
 }
 
+// begin_scope starts one lexical block scope in the current proto.
+// It records the local-count mark used when this scope exits.
+begin_scope :: proc(proto_state: ^ProtoState) {
+	proto_state.scope_local_counts[proto_state.scope_depth] = proto_state.local_count
+	proto_state.scope_depth += 1
+}
+
+// end_scope exits one lexical block scope in the current proto.
+// Locals declared in this scope are discarded by restoring the saved local-count mark.
+end_scope :: proc(proto_state: ^ProtoState) {
+	proto_state.scope_depth -= 1
+	proto_state.local_count = proto_state.scope_local_counts[proto_state.scope_depth]
+	proto_state.next_temp_slot = proto_state.local_count
+}
+
 // declare_local binds one identifier to the next local frame slot.
-// Current parser stage is flat-scope: duplicate local names are rejected.
+// Duplicate names are rejected within the current lexical scope only.
 declare_local :: proc(proto_state: ^ProtoState, ident_token: Token) -> int {
 	ident_name := ident_token.value.(string)
 
-	for local_index := 0; local_index < proto_state.local_count; local_index += 1 {
+	scope_start := 0
+	if proto_state.scope_depth > 0 {
+		scope_start = proto_state.scope_local_counts[proto_state.scope_depth - 1]
+	}
+
+	for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
 		if proto_state.local_bindings[local_index].name == ident_name {
 			parser_error(proto_state, ident_token, fmt.tprintf("local already declared: %s", ident_name))
 			return 0
@@ -157,6 +177,36 @@ parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
 	}
 }
 
+// parse_unary parses prefix unary operators and primary expressions.
+// Prefix NOT lowers by evaluating the operand first, then emitting NOT into dst.
+parse_unary :: proc(proto_state: ^ProtoState, dst: int) {
+	if at_token(.NOT) {
+		advance_token()
+
+		operand_slot := claim_temp_slot(proto_state)
+		if Parser.failed {
+			return
+		}
+
+		parse_unary(proto_state, operand_slot)
+		if Parser.failed {
+			return
+		}
+
+		emit_not(proto_state, dst, operand_slot)
+		return
+	}
+
+	parse_primary(proto_state, dst)
+	if Parser.failed {
+		return
+	}
+
+	if at_token(.LEFT_PAREN) {
+		parse_call(proto_state, dst, 1)
+	}
+}
+
 // parse_call lowers callee(args...) using contiguous call slots:
 // callee_slot, arg0, arg1, ...
 // requested_results controls VM CALL result shaping (0 for statements, 1 for expressions).
@@ -199,27 +249,204 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
 	emit_call(proto_state, callee_slot, arg_count, requested_results)
 }
 
-// parse_expression currently supports primary expressions plus call suffix.
+// parse_expression currently supports unary expressions and call suffix on primaries.
 // Operator precedence parsing is not in this stage yet.
 parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
-	parse_primary(proto_state, dst)
-	if Parser.failed {
-		return
-	}
-
-	if at_token(.LEFT_PAREN) {
-		parse_call(proto_state, dst, 1)
-	}
+	parse_unary(proto_state, dst)
 }
 
 
 // Statements =====================================================================================
 
-// parse_statement supports three top-level statement forms:
+// parse_block parses one braced statement block.
+// Blocks create a new lexical local scope.
+parse_block :: proc(proto_state: ^ProtoState) {
+	consume_token(proto_state, .LEFT_BRACE, "expected '{' to start block")
+	if Parser.failed {
+		return
+	}
+
+	begin_scope(proto_state)
+
+	for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
+		parse_statement(proto_state)
+		if Parser.failed {
+			return
+		}
+		proto_state.next_temp_slot = proto_state.local_count
+	}
+
+	if at_token(.EOF) {
+		parser_error(proto_state, current_token(), "expected '}' to close block")
+		return
+	}
+
+	consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close block")
+	if Parser.failed {
+		return
+	}
+
+	end_scope(proto_state)
+}
+
+// parse_if_statement parses:
+// if <expression> { <statements> } [else { <statements> }]
+parse_if_statement :: proc(proto_state: ^ProtoState) {
+	consume_token(proto_state, .IF, "expected 'if'")
+	if Parser.failed {
+		return
+	}
+
+	condition_slot := claim_temp_slot(proto_state)
+	if Parser.failed {
+		return
+	}
+
+	parse_expression(proto_state, condition_slot)
+	if Parser.failed {
+		return
+	}
+
+	false_jump := emit_jump_false(proto_state, condition_slot)
+	parse_block(proto_state)
+	if Parser.failed {
+		return
+	}
+
+	if at_token(.ELSE) {
+		advance_token()
+
+		end_jump := emit_jump(proto_state)
+		patch_jump(proto_state, false_jump)
+
+		if at_token(.IF) {
+			parse_if_statement(proto_state)
+		} else {
+			parse_block(proto_state)
+		}
+		if Parser.failed {
+			return
+		}
+
+		patch_jump(proto_state, end_jump)
+		return
+	}
+
+	patch_jump(proto_state, false_jump)
+}
+
+// parse_for_statement parses:
+// for <expression> { <statements> }
+// for { <statements> }
+// Condition form evaluates each iteration.
+// Braced form is infinite-loop sugar with no condition-exit jump.
+parse_for_statement :: proc(proto_state: ^ProtoState) {
+	consume_token(proto_state, .FOR, "expected 'for'")
+	if Parser.failed {
+		return
+	}
+
+	loop_start := next_inst_index(proto_state)
+	has_exit_jump := false
+	exit_jump := 0
+
+	// `for { ... }` has no condition expression.
+	// It loops until `break`, `return`, or runtime termination.
+	if !at_token(.LEFT_BRACE) {
+		condition_slot := claim_temp_slot(proto_state)
+		if Parser.failed {
+			return
+		}
+
+		parse_expression(proto_state, condition_slot)
+		if Parser.failed {
+			return
+		}
+
+		exit_jump = emit_jump_false(proto_state, condition_slot)
+		has_exit_jump = true
+	}
+
+	parse_block(proto_state)
+	if Parser.failed {
+		return
+	}
+
+	emit_jump(proto_state, loop_start)
+	if has_exit_jump {
+		patch_jump(proto_state, exit_jump)
+	}
+}
+
+// parse_return_statement parses:
+// - return
+// - return expr
+// - return expr, expr, ...
+// Each return expression is lowered as a single-result expression.
+parse_return_statement :: proc(proto_state: ^ProtoState) {
+	consume_token(proto_state, .RETURN, "expected 'return'")
+	if Parser.failed {
+		return
+	}
+
+	if at_token(.EOF) || at_token(.RIGHT_BRACE) {
+		emit_return(proto_state, 0, 0)
+		return
+	}
+
+	first_result_slot := claim_temp_slot(proto_state)
+	if Parser.failed {
+		return
+	}
+
+	parse_expression(proto_state, first_result_slot)
+	if Parser.failed {
+		return
+	}
+
+	result_count := 1
+	for at_token(.COMMA) {
+		advance_token()
+
+		result_slot := first_result_slot + result_count
+		if result_slot >= MAX_FRAME_SLOTS {
+			parser_error(proto_state, current_token(), "too many return values")
+			return
+		}
+
+		parse_expression(proto_state, result_slot)
+		if Parser.failed {
+			return
+		}
+		result_count += 1
+	}
+
+	emit_return(proto_state, first_result_slot, result_count)
+}
+
+// parse_statement supports:
+// - if expression block [else block]
+// - for expression block
+// - return [expr [, expr ...]]
 // - ident := expression
 // - ident = expression (local-only assignment)
 // - call statement
 parse_statement :: proc(proto_state: ^ProtoState) {
+	if at_token(.RETURN) {
+		parse_return_statement(proto_state)
+		return
+	}
+
+	if at_token(.IF) {
+		parse_if_statement(proto_state)
+		return
+	}
+
+	if at_token(.FOR) {
+		parse_for_statement(proto_state)
+		return
+	}
+
 	if !at_token(.IDENT) {
 		parser_error(proto_state, current_token(), "expected statement")
 		return
@@ -309,11 +536,12 @@ compile_source :: proc(source, source_name: string) -> ^Error {
 		return &Active_State.error
 	}
 
+	// Source fallthrough is defined as implicit `return nil`.
+	// This keeps entry completion on the same RETURN path as explicit source returns.
 	return_slot := claim_temp_slot(&entry_proto_state)
 	if Parser.failed {
 		return &Active_State.error
 	}
-
 	emit_load_nil(&entry_proto_state, return_slot)
 	emit_return(&entry_proto_state, return_slot, 1)
 
