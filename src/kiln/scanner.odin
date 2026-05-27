@@ -27,6 +27,7 @@ TokenKind :: enum {
 	IF,
 	ELSE,
 	FOR,
+	BREAK,
 	FUNCTION,
 	RETURN,
 
@@ -214,6 +215,8 @@ scan_ident_or_keyword :: proc() {
 		emit_token(.ELSE)
 	case "for":
 		emit_token(.FOR)
+	case "break":
+		emit_token(.BREAK)
 	case "function":
 		emit_token(.FUNCTION)
 	case "return":

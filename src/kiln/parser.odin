@@ -346,6 +346,13 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
 		return
 	}
 
+	if proto_state.loop_depth >= MAX_LOOP_DEPTH {
+		parser_error(proto_state, current_token(), "too many nested loops")
+		return
+	}
+	proto_state.loop_break_fixup_base[proto_state.loop_depth] = proto_state.break_fixup_count
+	proto_state.loop_depth += 1
+
 	loop_start := next_inst_index(proto_state)
 	has_exit_jump := false
 	exit_jump := 0
@@ -376,6 +383,37 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
 	if has_exit_jump {
 		patch_jump(proto_state, exit_jump)
 	}
+
+	proto_state.loop_depth -= 1
+	break_fixup_base := proto_state.loop_break_fixup_base[proto_state.loop_depth]
+	for fixup_index := break_fixup_base; fixup_index < proto_state.break_fixup_count; fixup_index += 1 {
+		patch_jump(proto_state, proto_state.break_fixups[fixup_index])
+	}
+	proto_state.break_fixup_count = break_fixup_base
+}
+
+// parse_break_statement parses:
+// break
+// break is only valid inside loop bodies.
+parse_break_statement :: proc(proto_state: ^ProtoState) {
+	break_token := consume_token(proto_state, .BREAK, "expected 'break'")
+	if Parser.failed {
+		return
+	}
+
+	if proto_state.loop_depth == 0 {
+		parser_error(proto_state, break_token, "break is only valid inside loops")
+		return
+	}
+
+	if proto_state.break_fixup_count >= MAX_BREAK_FIXUPS {
+		parser_error(proto_state, break_token, "too many break statements in proto")
+		return
+	}
+
+	break_jump := emit_jump(proto_state)
+	proto_state.break_fixups[proto_state.break_fixup_count] = break_jump
+	proto_state.break_fixup_count += 1
 }
 
 // parse_return_statement parses:
@@ -427,6 +465,7 @@ parse_return_statement :: proc(proto_state: ^ProtoState) {
 // parse_statement supports:
 // - if expression block [else block]
 // - for expression block
+// - break
 // - return [expr [, expr ...]]
 // - ident := expression
 // - ident = expression (local-only assignment)
@@ -444,6 +483,11 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 
 	if at_token(.FOR) {
 		parse_for_statement(proto_state)
+		return
+	}
+
+	if at_token(.BREAK) {
+		parse_break_statement(proto_state)
 		return
 	}
 

@@ -46,6 +46,7 @@ for looping {
 if true {
     for {
         print("for infinite")
+        break
     }
 }
 

@@ -5,6 +5,8 @@ package kiln
 // MAX_FRAME_SLOTS is the per-proto frame slot ceiling.
 // It must stay compatible with u8 slot operands in emitted bytecode layouts.
 MAX_FRAME_SLOTS :: 256
+MAX_LOOP_DEPTH :: 64
+MAX_BREAK_FIXUPS :: 1024
 
 // LocalBinding maps an identifier name to a frame slot index.
 LocalBinding :: struct {
@@ -31,6 +33,14 @@ ProtoState :: struct {
 	next_temp_slot:   int,
 	scope_depth:      int,
 	scope_local_counts: [MAX_FRAME_SLOTS]int,
+
+	// break_fixups stores instruction indexes for unresolved `break` jumps.
+	break_fixups: [MAX_BREAK_FIXUPS]int,
+	break_fixup_count: int,
+
+	// loop_break_fixup_base marks, per active loop depth, where that loop's break fixups begin.
+	loop_break_fixup_base: [MAX_LOOP_DEPTH]int,
+	loop_depth: int,
 }
 
 // Internals ======================================================================================
