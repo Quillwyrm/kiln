@@ -10,6 +10,7 @@ import "core:strconv"
 // The parser reads this token stream directly.
 TokenKind :: enum {
     // Stream Markers
+    ERROR,  // Scanner error; message in TokenValue(string)
     EOF,
 
     // Literals
@@ -105,7 +106,6 @@ Scanner := struct {
     token_line:   int,
     token_column: int,
 
-    tokens: [dynamic]Token,
     failed: bool,
 }{}
 
@@ -149,29 +149,35 @@ match_next :: proc(expected: u8) -> bool {
 
 // Scanner errors =================================================================================
 
-// Latch Scanner.failed so scanning stops after the current step.
-scanner_error :: proc(message: string) {
-    location := SourceLocation{
-        source_name = Scanner.source_name,
-        line        = Scanner.token_line,
-        column      = Scanner.token_column,
-    }
-    set_error(location, message)
+// Latch Scanner.failed and return ERROR token. Does not call set_error — parser handles that.
+scanner_error :: proc(message: string) -> Token {
     Scanner.failed = true
+    return make_error_token(message)
 }
 
 
 // Token emission =================================================================================
 
 // Uses the current token-start snapshot for position data.
-emit_token :: proc(kind: TokenKind, value: TokenValue = {}) {
-    append(&Scanner.tokens, Token {
+make_token :: proc(kind: TokenKind, value: TokenValue = {}) -> Token {
+    return Token {
         kind        = kind,
         value       = value,
         source_text = Scanner.source[Scanner.token_start:Scanner.index],
         line        = Scanner.token_line,
         column      = Scanner.token_column,
-    })
+    }
+}
+
+// Constructs an ERROR token. Does not set Scanner.failed — scanner_error owns that.
+make_error_token :: proc(message: string) -> Token {
+    return Token {
+        kind        = .ERROR,
+        value       = TokenValue(message),
+        source_text = Scanner.source[Scanner.token_start:Scanner.index],
+        line        = Scanner.token_line,
+        column      = Scanner.token_column,
+    }
 }
 
 
@@ -192,7 +198,7 @@ is_ident_char :: proc(ch: u8) -> bool {
 // Token scans ====================================================================================
 
 // scan_ident_or_keyword consumes [A-Za-z_][A-Za-z0-9_]* and maps keywords.
-scan_ident_or_keyword :: proc() {
+scan_ident_or_keyword :: proc() -> Token {
     for Scanner.index < len(Scanner.source) {
         ch := Scanner.source[Scanner.index]
         if !is_ident_char(ch) {
@@ -205,29 +211,29 @@ scan_ident_or_keyword :: proc() {
 
     switch token_text {
     case "true":
-        emit_token(.TRUE)
+        return make_token(.TRUE)
     case "false":
-        emit_token(.FALSE)
+        return make_token(.FALSE)
     case "nil":
-        emit_token(.NIL)
+        return make_token(.NIL)
     case "if":
-        emit_token(.IF)
+        return make_token(.IF)
     case "else":
-        emit_token(.ELSE)
+        return make_token(.ELSE)
     case "for":
-        emit_token(.FOR)
+        return make_token(.FOR)
     case "break":
-        emit_token(.BREAK)
+        return make_token(.BREAK)
     case "function":
-        emit_token(.FUNCTION)
+        return make_token(.FUNCTION)
     case "return":
-        emit_token(.RETURN)
+        return make_token(.RETURN)
     case "global":
-        emit_token(.GLOBAL)
+        return make_token(.GLOBAL)
     case "map":
-        emit_token(.MAP)
+        return make_token(.MAP)
     case:
-        emit_token(.IDENT, TokenValue(token_text))
+        return make_token(.IDENT, TokenValue(token_text))
     }
 }
 
@@ -236,7 +242,7 @@ scan_ident_or_keyword :: proc() {
 // - hex ints with 0x prefix
 // - decimal floats with optional leading dot (.5)
 // Rejected here: exponent forms (1e3), octal, and identifier-suffixed numerics.
-scan_number :: proc() {
+scan_number :: proc() -> Token {
     if Scanner.index + 1 < len(Scanner.source) &&
        Scanner.source[Scanner.index] == '0' &&
        Scanner.source[Scanner.index + 1] == 'x' {
@@ -256,23 +262,19 @@ scan_number :: proc() {
         }
 
         if Scanner.index == hex_start {
-            scanner_error("expected hex digits after 0x")
-            return
+            return scanner_error("expected hex digits after 0x")
         }
 
         if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-            scanner_error("number literal must be separated from following identifier")
-            return
+            return scanner_error("number literal must be separated from following identifier")
         }
 
         hex_digits := Scanner.source[hex_start:Scanner.index]
         value, ok := strconv.parse_i64_of_base(hex_digits, 16)
         if !ok {
-            scanner_error(fmt.tprintf("failed to parse hex literal '%s'", hex_digits))
-            return
+            return scanner_error(fmt.tprintf("failed to parse hex literal '%s'", hex_digits))
         }
-        emit_token(.INT, TokenValue(value))
-        return
+        return make_token(.INT, TokenValue(value))
     }
 
     is_float := false
@@ -292,8 +294,7 @@ scan_number :: proc() {
     // Reject bare leading zeros on decimal literals (e.g. 042).
     if Scanner.source[Scanner.token_start] == '0' && Scanner.index - Scanner.token_start > 1 {
         token_text := Scanner.source[Scanner.token_start:Scanner.index]
-        scanner_error(fmt.tprintf("integer literal '%s' has leading zeros", token_text))
-        return
+        return scanner_error(fmt.tprintf("integer literal '%s' has leading zeros", token_text))
     }
 
     // Keep 123.foo tokenized as INT DOT IDENT.
@@ -313,51 +314,45 @@ scan_number :: proc() {
     }
 
     if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-        scanner_error("number literal must be separated from following identifier")
-        return
+        return scanner_error("number literal must be separated from following identifier")
     }
 
     if is_float {
         token_text := Scanner.source[Scanner.token_start:Scanner.index]
         value, ok := strconv.parse_f64(token_text)
         if !ok {
-            scanner_error(fmt.tprintf("failed to parse float literal '%s'", token_text))
-            return
+            return scanner_error(fmt.tprintf("failed to parse float literal '%s'", token_text))
         }
-        emit_token(.FLOAT, TokenValue(value))
-        return
+        return make_token(.FLOAT, TokenValue(value))
     }
 
     token_text := Scanner.source[Scanner.token_start:Scanner.index]
     value, ok := strconv.parse_i64(token_text)
     if !ok {
-        scanner_error(fmt.tprintf("failed to parse int literal '%s'", token_text))
-        return
+        return scanner_error(fmt.tprintf("failed to parse int literal '%s'", token_text))
     }
-    emit_token(.INT, TokenValue(value))
+    return make_token(.INT, TokenValue(value))
 }
 
 // No escape decoding — backslash sequences are literal.
-scan_string :: proc() {
+scan_string :: proc() -> Token {
     advance_char()
     string_start := Scanner.index
 
     for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '"' {
         if Scanner.source[Scanner.index] == '\n' {
-            scanner_error("unterminated string")
-            return
+            return scanner_error("unterminated string")
         }
         advance_char()
     }
 
     if Scanner.index >= len(Scanner.source) {
-        scanner_error("unterminated string")
-        return
+        return scanner_error("unterminated string")
     }
 
     str_content := Scanner.source[string_start:Scanner.index]
     advance_char()
-    emit_token(.STRING, TokenValue(str_content))
+    return make_token(.STRING, TokenValue(str_content))
 }
 
 // Emits no token — comments are not preserved in the token stream.
@@ -368,90 +363,85 @@ skip_line_comment :: proc() {
 }
 
 // Handles both single-character and two-character punctuation/operator forms.
-scan_symbol :: proc() {
+scan_symbol :: proc() -> Token {
     ch := advance_char()
 
     switch ch {
     case ':':
         if match_next('=') {
-            emit_token(.DECL)
+            return make_token(.DECL)
         } else if match_next(':') {
-            emit_token(.CONST_DECL)
+            return make_token(.CONST_DECL)
         } else {
-            emit_token(.COLON)
+            return make_token(.COLON)
         }
 
     case '=':
         if match_next('=') {
-            emit_token(.EQUAL)
+            return make_token(.EQUAL)
         } else {
-            emit_token(.ASSIGN)
+            return make_token(.ASSIGN)
         }
 
     case '!':
         if match_next('=') {
-            emit_token(.NOT_EQUAL)
+            return make_token(.NOT_EQUAL)
         } else {
-            emit_token(.NOT)
+            return make_token(.NOT)
         }
 
     case '<':
         if match_next('=') {
-            emit_token(.LESS_OR_EQUAL)
+            return make_token(.LESS_OR_EQUAL)
         } else {
-            emit_token(.LESS)
+            return make_token(.LESS)
         }
 
     case '>':
         if match_next('=') {
-            emit_token(.GREATER_OR_EQUAL)
+            return make_token(.GREATER_OR_EQUAL)
         } else {
-            emit_token(.GREATER)
+            return make_token(.GREATER)
         }
 
     case '+':
-        emit_token(.PLUS)
+        return make_token(.PLUS)
     case '-':
-        emit_token(.MINUS)
+        return make_token(.MINUS)
     case '*':
-        emit_token(.STAR)
+        return make_token(.STAR)
     case '/':
-        if match_next('/') {
-            skip_line_comment()
-        } else {
-            emit_token(.SLASH)
-        }
+        return make_token(.SLASH)
 
     case '(':
-        emit_token(.LEFT_PAREN)
+        return make_token(.LEFT_PAREN)
     case ')':
-        emit_token(.RIGHT_PAREN)
+        return make_token(.RIGHT_PAREN)
     case '{':
-        emit_token(.LEFT_BRACE)
+        return make_token(.LEFT_BRACE)
     case '}':
-        emit_token(.RIGHT_BRACE)
+        return make_token(.RIGHT_BRACE)
     case '[':
-        emit_token(.LEFT_BRACKET)
+        return make_token(.LEFT_BRACKET)
     case ']':
-        emit_token(.RIGHT_BRACKET)
+        return make_token(.RIGHT_BRACKET)
 
     case ',':
-        emit_token(.COMMA)
+        return make_token(.COMMA)
     case '.':
-        emit_token(.DOT)
+        return make_token(.DOT)
     case ';':
-        emit_token(.SEMICOLON)
+        return make_token(.SEMICOLON)
 
     case:
-        scanner_error(fmt.tprintf("unexpected character '%c'", ch))
+        return scanner_error(fmt.tprintf("unexpected character '%c'", ch))
     }
 }
 
 
 // Source scanning ================================================================================
 
-// Caller owns the returned [dynamic]Token and must delete it.
-scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, error: ^Error) {
+begin_scan :: proc(source, source_name: string) {
     Scanner.source = source
     Scanner.source_name = source_name
     Scanner.index = 0
@@ -460,49 +450,51 @@ scan_source :: proc(source, source_name: string) -> (tokens: [dynamic]Token, err
     Scanner.token_start = 0
     Scanner.token_line = 1
     Scanner.token_column = 1
-    Scanner.tokens = make([dynamic]Token, 0, len(source) / 4)
     Scanner.failed = false
+}
 
-    for Scanner.index < len(Scanner.source) && !Scanner.failed {
+scan_next_token :: proc() -> Token {
+    if Scanner.failed {
+        begin_token()
+        return make_token(.EOF)
+    }
+
+    for Scanner.index < len(Scanner.source) {
         ch := Scanner.source[Scanner.index]
-
-        // Whitespace does not emit tokens.
         if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
             advance_char()
             continue
         }
-
-        begin_token()
-
-        if is_alpha(ch) || ch == '_' {
-            scan_ident_or_keyword()
+        if ch == '/' && Scanner.index + 1 < len(Scanner.source) && Scanner.source[Scanner.index + 1] == '/' {
+            skip_line_comment()
             continue
         }
-
-        if is_digit(ch) {
-            scan_number()
-            continue
-        }
-
-        if ch == '.' && Scanner.index + 1 < len(Scanner.source) && is_digit(Scanner.source[Scanner.index + 1]) {
-            scan_number()
-            continue
-        }
-
-        if ch == '"' {
-            scan_string()
-            continue
-        }
-
-        scan_symbol()
+        break
     }
 
-    if Scanner.failed {
-        return Scanner.tokens, &Active_State.error
+    if Scanner.index >= len(Scanner.source) {
+        begin_token()
+        return make_token(.EOF)
     }
 
     begin_token()
-    emit_token(.EOF)
+    ch := Scanner.source[Scanner.index]
 
-    return Scanner.tokens, nil
+    if is_alpha(ch) || ch == '_' {
+        return scan_ident_or_keyword()
+    }
+
+    if is_digit(ch) {
+        return scan_number()
+    }
+
+    if ch == '.' && Scanner.index + 1 < len(Scanner.source) && is_digit(Scanner.source[Scanner.index + 1]) {
+        return scan_number()
+    }
+
+    if ch == '"' {
+        return scan_string()
+    }
+
+    return scan_symbol()
 }

@@ -13,13 +13,13 @@ main :: proc() {
 
     kiln_result, kiln_err := kiln.run_file(kstate, "test.kiln")
     if kiln_err != nil {
-        if kiln_err.context_text != "" {
+        if kiln_err.runtime_context != "" {
             fmt.eprintfln(
                 "%s[%d:%d] Error %s: %s",
                 kiln_err.location.source_name,
                 kiln_err.location.line,
                 kiln_err.location.column,
-                kiln_err.context_text,
+                kiln_err.runtime_context,
                 kiln_err.message,
             )
         } else {

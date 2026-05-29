@@ -16,7 +16,7 @@ SourceLocation :: struct {
 // Error is the current compile or runtime error payload surfaced to the host.
 Error :: struct {
     location:     SourceLocation,
-    context_text: string, // function context, e.g. "in helper()"
+    runtime_context: string, // function context, e.g. "in helper()"
     message:      string,
 }
 
@@ -25,7 +25,7 @@ set_error :: proc(location: SourceLocation, message: string, context_text: strin
     Active_State.has_error = true
     Active_State.error = Error{
         location    = location,
-        context_text = context_text,
+        runtime_context = context_text,
         message      = message,
     }
     return &Active_State.error

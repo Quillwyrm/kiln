@@ -6,19 +6,29 @@ import "core:fmt"
 // Token cursor and failure latch for one compile operation.
 
 Parser := struct {
-    tokens: []Token,
-    token_index: int,
-    failed:   bool, // global error latch — every mutating operation sets it, callers check and return immediately
+    current:       Token,
+    lookahead:     Token,
+    has_lookahead: bool,
+    failed:        bool, // global error latch — every mutating operation sets it, callers check and return immediately
 }{}
 
 // Token cursor ===================================================================================
 
 current_token :: proc() -> Token {
-    return Parser.tokens[Parser.token_index]
+    return Parser.current
 }
 
 peek_token :: proc() -> Token {
-    return Parser.tokens[Parser.token_index + 1]
+    if !Parser.has_lookahead {
+        Parser.lookahead = scan_next_token()
+        Parser.has_lookahead = true
+
+        if Parser.lookahead.kind == .ERROR {
+            error_token_to_parser_error(Parser.lookahead)
+        }
+    }
+
+    return Parser.lookahead
 }
 
 at_token :: proc(kind: TokenKind) -> bool {
@@ -26,8 +36,20 @@ at_token :: proc(kind: TokenKind) -> bool {
 }
 
 advance_token :: proc() -> Token {
-    token := current_token()
-    Parser.token_index += 1
+    token := Parser.current
+
+    if Parser.has_lookahead {
+        Parser.current = Parser.lookahead
+        Parser.lookahead = Token{}
+        Parser.has_lookahead = false
+    } else {
+        Parser.current = scan_next_token()
+    }
+
+    if Parser.current.kind == .ERROR {
+        error_token_to_parser_error(Parser.current)
+    }
+
     return token
 }
 
@@ -48,6 +70,23 @@ parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
         line        = token.line,
         column      = token.column,
     }, message)
+    Parser.failed = true
+}
+
+// Converts a scanner ERROR token into a Kiln Error. Owns the full invariant:
+// ERROR token -> host-facing error + Parser.failed. Idempotent.
+error_token_to_parser_error :: proc(token: Token) {
+    if Parser.failed {
+        return
+    }
+
+    message := token.value.(string)
+    set_error(SourceLocation{
+        source_name = Scanner.source_name,
+        line        = token.line,
+        column      = token.column,
+    }, message)
+
     Parser.failed = true
 }
 
@@ -662,7 +701,11 @@ parse_statement :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    next_kind := peek_token().kind
+    next_token := peek_token()
+    if Parser.failed {
+        return
+    }
+    next_kind := next_token.kind
     if next_kind == .LEFT_PAREN {
         callee_slot := claim_temp_slot(proto_state)
         if Parser.failed {
@@ -734,15 +777,17 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 
 // On success installs Active_State.entry_function for VM execution.
 compile_source :: proc(source, source_name: string) -> ^Error {
-    tokens, scan_error := scan_source(source, source_name)
-    defer delete(tokens)
-    if scan_error != nil {
-        return scan_error
-    }
+    begin_scan(source, source_name)
 
-    Parser.tokens = tokens[:]
-    Parser.token_index = 0
+    Parser.current = Token{}
+    Parser.lookahead = Token{}
+    Parser.has_lookahead = false
     Parser.failed = false
+
+    advance_token()
+    if Parser.failed {
+        return &Active_State.error
+    }
 
     entry_origin := SourceLocation{
         source_name = source_name,

@@ -1,4 +1,8 @@
 
+print("before")
+"unterminated
+print("after")
+
 name := "kiln"
 alive := true
 missing := nil
