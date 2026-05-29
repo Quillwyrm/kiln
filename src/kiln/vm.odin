@@ -133,6 +133,7 @@ MapObject :: struct {
 }
 
 
+
 // Functions ======================================================================================
 // Proto stores compiled bytecode data. Function objects (ProtoFunctionObject,
 // NativeFunctionObject) are the runtime callable values that CALL dispatches.
@@ -933,7 +934,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             if !is_object {
                 message := fmt.tprintf(
                     "invalid function call; expected `function`, got `%s`",
-                    value_type_name(state.slots[call_base]),
+                    value_type_to_string(state.slots[call_base]),
                 )
                 return Value{}, runtime_error(message)
             }
@@ -996,7 +997,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             case .STRING, .ARRAY, .MAP:
                 message := fmt.tprintf(
                     "invalid function call; expected `function`, got `%s`",
-                    value_type_name(state.slots[call_base]),
+                    value_type_to_string(state.slots[call_base]),
                 )
                 return Value{}, runtime_error(message)
             }

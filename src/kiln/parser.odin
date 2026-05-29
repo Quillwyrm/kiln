@@ -26,9 +26,9 @@ at_token :: proc(kind: TokenKind) -> bool {
 }
 
 advance_token :: proc() -> Token {
-	token := current_token()
-	Parser.token_index += 1
-	return token
+    token := current_token()
+    Parser.token_index += 1
+    return token
 }
 
 
@@ -83,13 +83,13 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 
 // Records the local-count mark so end_scope can discard this scope's locals.
 begin_scope :: proc(proto_state: ^ProtoState) {
-	if proto_state.scope_depth >= MAX_FRAME_SLOTS {
-		parser_error(proto_state, current_token(), "too many nested scopes")
-		return
-	}
+    if proto_state.scope_depth >= MAX_FRAME_SLOTS {
+        parser_error(proto_state, current_token(), "too many nested scopes")
+        return
+    }
 
-	proto_state.scope_local_counts[proto_state.scope_depth] = proto_state.local_count
-	proto_state.scope_depth += 1
+    proto_state.scope_local_counts[proto_state.scope_depth] = proto_state.local_count
+    proto_state.scope_depth += 1
 }
 
 // Restores the saved local-count mark, discarding locals declared in this scope.
@@ -149,7 +149,7 @@ resolve_local :: proc(proto_state: ^ProtoState, ident_name: string) -> (slot: in
 // Parameters and top-level body locals live together in the function's root scope.
 // Blocks inside the body still create scopes through normal statement parsing.
 parse_function_body :: proc(proto_state: ^ProtoState) {
-	consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
+    consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
     if Parser.failed {
         return
     }
@@ -172,21 +172,21 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
 
 // The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
 parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
-	consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
+    consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
     if Parser.failed {
         return
     }
 
-	consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
-	if Parser.failed {
-		return
-	}
+    consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
+    if Parser.failed {
+        return
+    }
 
-	// Parse parameters first while still compiling the parent.
-	// The child proto is not created until the function signature is known.
-	param_tokens: [MAX_FRAME_SLOTS]Token
-	param_count := 0
-	if !at_token(.RIGHT_PAREN) {
+    // Parse parameters first while still compiling the parent.
+    // The child proto is not created until the function signature is known.
+    param_tokens: [MAX_FRAME_SLOTS]Token
+    param_count := 0
+    if !at_token(.RIGHT_PAREN) {
         for {
             if param_count >= MAX_FRAME_SLOTS {
                 parser_error(parent_proto_state, current_token(), "too many function parameters")
@@ -211,55 +211,55 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     }
 
     consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
-	if Parser.failed {
-		return
-	}
+    if Parser.failed {
+        return
+    }
 
-	// Build a fresh proto state for the function body.
-	// Parent proto state stays alive so the finished child can be appended to it.
-	child_origin := SourceLocation{
-		source_name = parent_proto_state.origin.source_name,
-		line        = origin_token.line,
-		column      = origin_token.column,
-	}
-	child_proto_state := begin_proto(child_origin, function_name, param_count)
+    // Build a fresh proto state for the function body.
+    // Parent proto state stays alive so the finished child can be appended to it.
+    child_origin := SourceLocation{
+        source_name = parent_proto_state.origin.source_name,
+        line        = origin_token.line,
+        column      = origin_token.column,
+    }
+    child_proto_state := begin_proto(child_origin, function_name, param_count)
 
-	// Parameters are local slots starting at slot 0.
-	// The VM call path places arguments directly into those slots.
-	for param_index := 0; param_index < param_count; param_index += 1 {
-		declare_local(&child_proto_state, param_tokens[param_index])
-		if Parser.failed {
-			delete_proto_state(&child_proto_state)
+    // Parameters are local slots starting at slot 0.
+    // The VM call path places arguments directly into those slots.
+    for param_index := 0; param_index < param_count; param_index += 1 {
+        declare_local(&child_proto_state, param_tokens[param_index])
+        if Parser.failed {
+            delete_proto_state(&child_proto_state)
             return
         }
     }
 
     parse_function_body(&child_proto_state)
     if Parser.failed {
-		delete_proto_state(&child_proto_state)
-		return
-	}
-
-	// A function that reaches the closing brace returns nil.
-	return_slot := claim_temp_slot(&child_proto_state)
-	if Parser.failed {
-		delete_proto_state(&child_proto_state)
-		return
+        delete_proto_state(&child_proto_state)
+        return
     }
-	emit_load_nil(&child_proto_state, return_slot)
-	emit_return(&child_proto_state, return_slot, 1)
 
-	// Store the compiled child proto on the parent, then emit LOAD_FUNC.
-	// LOAD_FUNC creates the runtime function object when the parent executes.
+    // A function that reaches the closing brace returns nil.
+    return_slot := claim_temp_slot(&child_proto_state)
+    if Parser.failed {
+        delete_proto_state(&child_proto_state)
+        return
+    }
+    emit_load_nil(&child_proto_state, return_slot)
+    emit_return(&child_proto_state, return_slot, 1)
+
+    // Store the compiled child proto on the parent, then emit LOAD_FUNC.
+    // LOAD_FUNC creates the runtime function object when the parent executes.
     if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
         delete_proto_state(&child_proto_state)
         parser_error(parent_proto_state, origin_token, "too many functions in function")
         return
     }
 
-	child_proto := end_proto(&child_proto_state)
-	child_proto_index := len(parent_proto_state.child_protos)
-	append(&parent_proto_state.child_protos, child_proto)
+    child_proto := end_proto(&child_proto_state)
+    child_proto_index := len(parent_proto_state.child_protos)
+    append(&parent_proto_state.child_protos, child_proto)
     emit_load_func(parent_proto_state, dst, child_proto_index)
 }
 
@@ -268,10 +268,10 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
 // IDENT resolves local first, then global binding table by name.
 parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
-	if at_token(.FUNCTION) {
-		parse_function_literal(proto_state, dst, "<function>", current_token())
-		return
-	}
+    if at_token(.FUNCTION) {
+        parse_function_literal(proto_state, dst, "<function>", current_token())
+        return
+    }
 
     token := advance_token()
 
@@ -329,9 +329,9 @@ parse_primary :: proc(proto_state: ^ProtoState, dst: int) {
             emit_get_global(proto_state, dst, binding_id)
         }
 
-	case:
-		parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", token_text_for_error(token)))
-	}
+    case:
+        parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", token_text_for_error(token)))
+    }
 }
 
 // Prefix NOT lowers by evaluating the operand first, then emitting NOT into dst.
@@ -420,14 +420,14 @@ parse_block :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' to start block")
     if Parser.failed {
         return
-	}
+    }
 
-	begin_scope(proto_state)
-	if Parser.failed {
-		return
-	}
+    begin_scope(proto_state)
+    if Parser.failed {
+        return
+    }
 
-	for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
+    for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
         parse_statement(proto_state)
         if Parser.failed {
             return
@@ -656,11 +656,11 @@ parse_statement :: proc(proto_state: ^ProtoState) {
         return
     }
 
-	if !at_token(.IDENT) {
-		token := current_token()
-		parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", token_text_for_error(token)))
-		return
-	}
+    if !at_token(.IDENT) {
+        token := current_token()
+        parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", token_text_for_error(token)))
+        return
+    }
 
     next_kind := peek_token().kind
     if next_kind == .LEFT_PAREN {
@@ -686,14 +686,14 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 
         slot := declare_local(proto_state, ident_token)
         if Parser.failed {
-			return
-		}
+            return
+        }
 
-		// Declaration gives the function proto a useful name and origin.
-		if at_token(.FUNCTION) {
-			parse_function_literal(proto_state, slot, ident_text, ident_token)
-			return
-		}
+        // Declaration gives the function proto a useful name and origin.
+        if at_token(.FUNCTION) {
+            parse_function_literal(proto_state, slot, ident_text, ident_token)
+            return
+        }
 
         parse_expression(proto_state, slot)
         return
@@ -744,15 +744,15 @@ compile_source :: proc(source, source_name: string) -> ^Error {
     Parser.token_index = 0
     Parser.failed = false
 
-	entry_origin := SourceLocation{
-		source_name = source_name,
-		line        = 1,
-		column      = 1,
-	}
-	entry_proto_state := begin_proto(entry_origin, "entry", 0)
+    entry_origin := SourceLocation{
+        source_name = source_name,
+        line        = 1,
+        column      = 1,
+    }
+    entry_proto_state := begin_proto(entry_origin, "entry", 0)
     parse_top_level_statements(&entry_proto_state)
     if Parser.failed {
-		delete_proto_state(&entry_proto_state)
+        delete_proto_state(&entry_proto_state)
         return &Active_State.error
     }
 
@@ -760,7 +760,7 @@ compile_source :: proc(source, source_name: string) -> ^Error {
     // This keeps entry completion on the same RETURN path as explicit source returns.
     return_slot := claim_temp_slot(&entry_proto_state)
     if Parser.failed {
-		delete_proto_state(&entry_proto_state)
+        delete_proto_state(&entry_proto_state)
         return &Active_State.error
     }
     emit_load_nil(&entry_proto_state, return_slot)

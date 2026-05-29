@@ -31,9 +31,9 @@ LocalBinding :: struct {
 // ProtoState is the mutable compile target for one proto/chunk.
 // Parser and codegen both mutate this state while lowering source to bytecode.
 ProtoState :: struct {
-	origin: SourceLocation,
-	name:        string,
-	param_count: int,
+    origin: SourceLocation,
+    name:        string,
+    param_count: int,
 
     bytecode:     [dynamic]u32,
     const_pool:   [dynamic]Value,
@@ -189,6 +189,7 @@ emit_move :: proc(proto_state: ^ProtoState, dst, src: int) {
 }
 
 // Array operations ===============================================================================
+// Stub — wired when the parser parses corresponding syntax.
 
 emit_new_array :: proc(proto_state: ^ProtoState, dst, array_cap: int) {
     record_slots(proto_state, dst)
@@ -434,11 +435,6 @@ emit_return :: proc(proto_state: ^ProtoState, first_slot, result_count: int) {
     }
 
     inst := u32(InstABx{ op= .RETURN, a= u8(first_slot), b= u16(result_count) })
-    append(&proto_state.bytecode, inst)
-}
-
-emit_halt :: proc(proto_state: ^ProtoState) {
-    inst := u32(InstABC{ op= .HALT })
     append(&proto_state.bytecode, inst)
 }
 

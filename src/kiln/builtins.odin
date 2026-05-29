@@ -14,7 +14,7 @@ new_string_value :: proc(text: string) -> Value {
     return Value(cast(^Object)string_object)
 }
 
-value_type_name :: proc(value: Value) -> string {
+value_type_to_string :: proc(value: Value) -> string {
     if value == nil {
         return "nil"
     }
@@ -59,8 +59,7 @@ value_to_string :: proc(value: Value) -> string {
         switch v.kind {
         case .STRING:
             string_object := cast(^StringObject)v
-            parts := [?]string{"\"", string_object.data, "\""}
-            return strings.concatenate(parts[:])
+            return string_object.data
 
         case .ARRAY:
             array_object := cast(^ArrayObject)v
@@ -71,7 +70,17 @@ value_to_string :: proc(value: Value) -> string {
                 if item_index > 0 {
                     append(&parts, ", ")
                 }
-                append(&parts, value_to_string(array_object.data[item_index]))
+
+                item := array_object.data[item_index]
+                item_object, item_is_object := item.(^Object)
+                if item_is_object && item_object.kind == .STRING {
+                    string_object := cast(^StringObject)item_object
+                    append(&parts, "\"")
+                    append(&parts, string_object.data)
+                    append(&parts, "\"")
+                } else {
+                    append(&parts, value_to_string(item))
+                }
             }
             append(&parts, "]")
 
@@ -89,9 +98,21 @@ value_to_string :: proc(value: Value) -> string {
                 if item_index > 0 {
                     append(&parts, ", ")
                 }
+
+                append(&parts, "\"")
                 append(&parts, key)
-                append(&parts, ": ")
-                append(&parts, value_to_string(item_value))
+                append(&parts, "\": ")
+
+                item_object, item_is_object := item_value.(^Object)
+                if item_is_object && item_object.kind == .STRING {
+                    string_object := cast(^StringObject)item_object
+                    append(&parts, "\"")
+                    append(&parts, string_object.data)
+                    append(&parts, "\"")
+                } else {
+                    append(&parts, value_to_string(item_value))
+                }
+
                 item_index += 1
             }
             append(&parts, "}")
@@ -101,10 +122,10 @@ value_to_string :: proc(value: Value) -> string {
             return result
 
         case .PROTO_FUNCTION:
-            return "<object:PROTO_FUNCTION>"
+            return "function()"
 
         case .NATIVE_FUNCTION:
-            return "<object:NATIVE_FUNCTION>"
+            return "function()"
         }
     }
 
@@ -134,7 +155,7 @@ native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_s
         value = kiln_state.slots[args_base]
     }
 
-    kiln_state.slots[return_slot_base] = new_string_value(value_type_name(value))
+    kiln_state.slots[return_slot_base] = new_string_value(value_type_to_string(value))
     return 1
 }
 
@@ -145,31 +166,31 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
         value = kiln_state.slots[args_base]
     }
 
-	object_header, is_object := value.(^Object)
-	if is_object {
-		switch object_header.kind {
-		case .ARRAY:
-			array_object := cast(^ArrayObject)object_header
-			kiln_state.slots[return_slot_base] = Value(i64(len(array_object.data)))
-			return 1
-		case .MAP:
-			map_object := cast(^MapObject)object_header
-			kiln_state.slots[return_slot_base] = Value(i64(len(map_object.data)))
-			return 1
-		case .STRING:
-			string_object := cast(^StringObject)object_header
-			kiln_state.slots[return_slot_base] = Value(i64(len(string_object.data)))
-			return 1
-		case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-		}
-	}
+    object_header, is_object := value.(^Object)
+    if is_object {
+        switch object_header.kind {
+        case .ARRAY:
+            array_object := cast(^ArrayObject)object_header
+            kiln_state.slots[return_slot_base] = Value(i64(len(array_object.data)))
+            return 1
+        case .MAP:
+            map_object := cast(^MapObject)object_header
+            kiln_state.slots[return_slot_base] = Value(i64(len(map_object.data)))
+            return 1
+        case .STRING:
+            string_object := cast(^StringObject)object_header
+            kiln_state.slots[return_slot_base] = Value(i64(len(string_object.data)))
+            return 1
+        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
+        }
+    }
 
-	message := fmt.tprintf(
-		"`length()` called with invalid argument; expected `array`, `map`, or `string`, got `%s`",
-		value_type_name(value),
-	)
-	runtime_error(message)
-	return 0
+    message := fmt.tprintf(
+        "`length()` called with invalid argument; expected `array`, `map`, or `string`, got `%s`",
+        value_type_to_string(value),
+    )
+    runtime_error(message)
+    return 0
 }
 
 
@@ -193,11 +214,11 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
             return 0
         }
 
-		runtime_error(
-			fmt.tprintf("assertion failed; condition was `%s`", value_to_string(condition)),
-		)
-		return 0
-	}
+        runtime_error(
+            fmt.tprintf("assertion failed; condition was `%s`", value_to_string(condition)),
+        )
+        return 0
+    }
 
     kiln_state.slots[return_slot_base] = condition
     return 1
