@@ -609,6 +609,139 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
     proto_state.break_fixup_count = break_fixup_base
 }
 
+// Switch parsing ==================================================================================
+
+// Subject or subjectless statement switch. Subject evaluated once. No fallthrough.
+parse_switch_statement :: proc(proto_state: ^ProtoState) {
+    consume_token(proto_state, .SWITCH, "expected 'switch'")
+    if Parser.failed { return }
+
+    temp_save := proto_state.next_temp_slot
+    subject_slot := -1
+    subject_live_cursor := temp_save
+
+    // Subject switch: evaluate subject expression into a temp slot.
+    if !at_token(.LEFT_BRACE) {
+        subject_slot = claim_temp_slot(proto_state)
+        if Parser.failed { return }
+        parse_expression(proto_state, subject_slot)
+        if Parser.failed { return }
+        subject_live_cursor = subject_slot + 1
+        proto_state.next_temp_slot = subject_live_cursor
+    }
+
+    consume_token(proto_state, .LEFT_BRACE, "expected '{' after switch subject")
+    if Parser.failed { return }
+
+    // Reject empty switch body and unexpected tokens.
+    if !at_token(.CASE) && !at_token(.ELSE) && !at_token(.RIGHT_BRACE) {
+        parser_error(proto_state, current_token(), "expected 'case', 'else', or '}' in switch")
+        return
+    }
+    if at_token(.RIGHT_BRACE) {
+        parser_error(proto_state, current_token(), "switch body must have at least one arm")
+        return
+    }
+
+    end_jumps: [256]int
+    end_jump_count := 0
+
+    for at_token(.CASE) {
+        advance_token()
+
+        // Compile the case expression.
+        case_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return }
+        parse_expression(proto_state, case_slot)
+        if Parser.failed { return }
+        consume_token(proto_state, .COLON, "expected ':' after switch case")
+        if Parser.failed { return }
+
+        cond_slot := case_slot
+
+        if subject_slot >= 0 {
+            cond_slot = claim_temp_slot(proto_state)
+            if Parser.failed { return }
+            emit_equal(proto_state, cond_slot, subject_slot, case_slot)
+            if Parser.failed { return }
+            // Reclaim case/cond temps; subject must stay alive.
+            proto_state.next_temp_slot = subject_live_cursor
+        } else {
+            proto_state.next_temp_slot = temp_save
+        }
+
+        false_jump := emit_jump_false(proto_state, cond_slot)
+        if Parser.failed { return }
+
+        parse_switch_arm_body(proto_state)
+        if Parser.failed { return }
+
+        if end_jump_count >= len(end_jumps) {
+            parser_error(proto_state, current_token(), "switch has too many arms")
+            return
+        }
+        end_jumps[end_jump_count] = emit_jump(proto_state)
+        end_jump_count += 1
+        if Parser.failed { return }
+
+        patch_jump(proto_state, false_jump)
+        if Parser.failed { return }
+
+        // Ensure subject slot survives arm body scoping.
+        if subject_slot >= 0 {
+            if proto_state.next_temp_slot < subject_live_cursor {
+                proto_state.next_temp_slot = subject_live_cursor
+            }
+        } else {
+            proto_state.next_temp_slot = temp_save
+        }
+    }
+
+    if at_token(.ELSE) {
+        advance_token()
+        consume_token(proto_state, .COLON, "expected ':' after switch else")
+        if Parser.failed { return }
+        parse_switch_arm_body(proto_state)
+        if Parser.failed { return }
+        if at_token(.CASE) {
+            parser_error(proto_state, current_token(), "case cannot appear after else")
+            return
+        }
+    }
+
+    consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close switch")
+    if Parser.failed { return }
+
+    for i in 0 ..< end_jump_count {
+        patch_jump(proto_state, end_jumps[i])
+        if Parser.failed { return }
+    }
+
+    proto_state.next_temp_slot = temp_save
+}
+
+// Parses a switch arm body as a scoped statement list terminated by case/else/}/EOF.
+parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
+    begin_scope(proto_state)
+    if Parser.failed { return }
+
+    statement_count := 0
+    for !at_token(.CASE) && !at_token(.ELSE) && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
+        parse_statement(proto_state)
+        if Parser.failed { return }
+        proto_state.next_temp_slot = proto_state.local_count
+        statement_count += 1
+    }
+
+    if statement_count == 0 {
+        end_scope(proto_state)
+        parser_error(proto_state, current_token(), "switch arm must have at least one statement")
+        return
+    }
+
+    end_scope(proto_state)
+}
+
 // Only valid inside loop bodies.
 parse_break_statement :: proc(proto_state: ^ProtoState) {
     break_token := consume_token(proto_state, .BREAK, "expected 'break'")
@@ -692,6 +825,20 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 
     if at_token(.BREAK) {
         parse_break_statement(proto_state)
+        return
+    }
+
+    if at_token(.SWITCH) {
+        parse_switch_statement(proto_state)
+        return
+    }
+
+    if at_token(.CASE) {
+        parser_error(proto_state, current_token(), "case is only valid inside switch")
+        return
+    }
+    if at_token(.ELSE) {
+        parser_error(proto_state, current_token(), "else is only valid after if or inside switch")
         return
     }
 

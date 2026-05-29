@@ -1,73 +1,54 @@
+// Kiln surface test
+// Every feature wired end-to-end (scanner → parser → codegen → VM).
+// No binary operators yet, so no a+b, a<b, etc.
 
-print("before")
-"unterminated
-print("after")
+// ── Literals ──────────────────────────────────────────────────────────────────────────────────────
 
-name := "kiln"
-alive := true
-missing := nil
-count := length(name)
-print(name, alive, missing, count)
-print(type(name), type(alive), type(missing), type(count), type(print))
+print("--- literals ---")
 
-text := to_string(count)
-print(text, type(text))
+print(nil)
+print(true)
+print(false)
+print(0)
+print(42)
+print(0xFF)
+print(3.14)
+print(.5)
+print("hello")
 
-number := to_number("42")
-decimal := to_number("4.5")
-bad := to_number("wat")
-print(number, decimal, bad)
-length(10)
-decimal = 0xFF
-print(decimal)
+// ── Variables ────────────────────────────────────────────────────────────────────────────────────
 
-if alive {
-    scoped := "then branch"
-    print(scoped)
-} else {
-    scoped := "else branch"
-    print(scoped)
-}
+print("--- variables ---")
 
-first := false
-second := true
-if first {
-    print("first")
-} else if second {
-    print("second")
-} else {
-    print("none")
-}
+x := 10
+print(x)
 
-b := 20
+x = 20
+print(x)
 
-print(!alive, !!alive, !missing)
-
-looping := true
-for looping {
-    print("for cond")
-    looping = false
-}
+y := "hi"
+print(y)
 
 if true {
-    for {
-        print("for infinite")
-        break
-    }
+    inner := "scoped"
+    print(inner)
 }
 
-id := function(value) {
-    return value
+// ── Functions ────────────────────────────────────────────────────────────────────────────────────
+
+print("--- functions ---")
+
+// Identity function.
+id := function(v) {
+    return v
 }
-print(id("function value"))
+print(id("identity"))
 
-print(type(id))
+// No-op.
+noop := function() {}
+print(noop())
 
-missing_arg := function(a, b) {
-    print(a, b)
-}
-missing_arg(10)
-
+// Parameter shadowing.
 shadow := function(a) {
     if true {
         a := "inner"
@@ -77,9 +58,125 @@ shadow := function(a) {
 }
 shadow("outer")
 
-print(type(), to_string(), to_number())
-ret_a := 7
-ret_b := 9
-return ret_a, ret_b
-print(ret_a, ret_b)
-print("after return")
+// Missing args filled with nil.
+partial := function(a, b, c) {
+    print(a, b, c)
+}
+partial(1)
+
+// Multi-value return.
+two_vals := function() {
+    return 7, 9
+}
+print(two_vals())
+
+// Call in statement position.
+print("statement call")
+
+// ── Control Flow ─────────────────────────────────────────────────────────────────────────────────
+
+print("--- if/else ---")
+
+cond := true
+if cond {
+    print("if taken")
+} else {
+    print("if not taken")
+}
+
+if false {
+    print("first")
+} else if true {
+    print("else if taken")
+} else {
+    print("else not taken")
+}
+
+print("--- for/break ---")
+
+for true {
+    print("for cond")
+    break
+}
+
+for {
+    print("for infinite")
+    break
+}
+
+print("--- switch ---")
+
+status := 200
+switch status {
+case 200:
+    print("ok")
+case 404:
+    print("not found")
+else:
+    print("unknown")
+}
+
+switch {
+case true:
+    print("subjectless")
+else:
+    print("not taken")
+}
+
+// Nested switch.
+outer := 1
+inner := 2
+switch outer {
+case 1:
+    switch inner {
+    case 2:
+        print("nested switch")
+    else:
+        print("inner else")
+    }
+else:
+    print("outer else")
+}
+
+// ── Unary ─────────────────────────────────────────────────────────────────────────────────────────
+
+print("--- unary not ---")
+
+print(!false)
+print(!true)
+print(!nil)
+print(!0)
+print(!!"nested")
+
+// ── Builtins ─────────────────────────────────────────────────────────────────────────────────────
+
+print("--- builtins ---")
+
+print("variadic", 1, 2, 3)
+
+print(type(nil))
+print(type(true))
+print(type(42))
+print(type(3.14))
+print(type("s"))
+print(type(print))
+
+print(length("hello"))
+
+assert(true)
+assert(1, "truthy asserts ok")
+assert("hi")
+
+print(to_string(42))
+print(to_string(true))
+print(to_string(nil))
+
+print(to_number("42"))
+print(to_number("3.14"))
+print(to_number("bad"))
+
+// ── Top-level return ──────────────────────────────────────────────────────────────────────────────
+
+print("--- return ---")
+return "done"
+print("never reached")

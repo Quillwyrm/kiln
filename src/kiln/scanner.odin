@@ -31,6 +31,8 @@ TokenKind :: enum {
     BREAK,
     FUNCTION,
     RETURN,
+    SWITCH,
+    CASE,
 
     // Binding / Construction Keywords
     GLOBAL,
@@ -228,6 +230,10 @@ scan_ident_or_keyword :: proc() -> Token {
         return make_token(.FUNCTION)
     case "return":
         return make_token(.RETURN)
+    case "switch":
+        return make_token(.SWITCH)
+    case "case":
+        return make_token(.CASE)
     case "global":
         return make_token(.GLOBAL)
     case "map":
