@@ -978,8 +978,15 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                     state.slot_count = callee_slot_top
                 }
 
-                // Missing fixed params are filled with explicit Kiln nil.
-                // Extra args remain in slots above the callee's fixed params and are ignored for now.
+                // Extra fixed args are rejected; missing params filled with nil.
+                if arg_count > callee_proto.param_count {
+                    message := fmt.tprintf(
+                        "too many arguments for `%s()`: expected %d, got %d",
+                        proto_function.name, callee_proto.param_count, arg_count,
+                    )
+                    return Value{}, runtime_error(message)
+                }
+
                 for param_index := arg_count; param_index < callee_proto.param_count; param_index += 1 {
                     state.slots[callee_slot_base + param_index] = Value{}
                 }
