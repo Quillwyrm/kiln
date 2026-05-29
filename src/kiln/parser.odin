@@ -76,9 +76,7 @@ parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
 // Converts a scanner ERROR token into a Kiln Error. Owns the full invariant:
 // ERROR token -> host-facing error + Parser.failed. Idempotent.
 error_token_to_parser_error :: proc(token: Token) {
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     message := token.value.(string)
     set_error(SourceLocation{
@@ -189,15 +187,11 @@ resolve_local :: proc(proto_state: ^ProtoState, ident_name: string) -> (slot: in
 // Blocks inside the body still create scopes through normal statement parsing.
 parse_function_body :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
         parse_statement(proto_state)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
     }
 
@@ -212,14 +206,10 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
 // The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
 parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
     consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     // Parse parameters first while still compiling the parent.
     // The child proto is not created until the function signature is known.
@@ -250,9 +240,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     }
 
     consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     // Build a fresh proto state for the function body.
     // Parent proto state stays alive so the finished child can be appended to it.
@@ -379,23 +367,17 @@ parse_unary :: proc(proto_state: ^ProtoState, dst: int) {
         advance_token()
 
         operand_slot := claim_temp_slot(proto_state)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         parse_unary(proto_state, operand_slot)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         emit_not(proto_state, dst, operand_slot)
         return
     }
 
     parse_primary(proto_state, dst)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     if at_token(.LEFT_PAREN) {
         parse_call(proto_state, dst, 1)
@@ -408,9 +390,7 @@ parse_unary :: proc(proto_state: ^ProtoState, dst: int) {
 //   1 = expression context — expect exactly one result in dst
 parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int) {
     consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     arg_count := 0
     if !at_token(.RIGHT_PAREN) {
@@ -422,9 +402,7 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
             }
 
             parse_expression(proto_state, arg_slot)
-            if Parser.failed {
-                return
-            }
+            if Parser.failed { return }
             arg_count += 1
 
             if !at_token(.COMMA) {
@@ -439,9 +417,7 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
     }
 
     consume_token(proto_state, .RIGHT_PAREN, "expected ')' after call arguments")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
     emit_call(proto_state, callee_slot, arg_count, requested_results)
 }
 
@@ -457,20 +433,14 @@ parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
 // Creates a new lexical local scope.
 parse_block :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' to start block")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     begin_scope(proto_state)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
         parse_statement(proto_state)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
     }
 
@@ -480,9 +450,7 @@ parse_block :: proc(proto_state: ^ProtoState) {
     }
 
     consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close block")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     end_scope(proto_state)
 }
@@ -490,66 +458,48 @@ parse_block :: proc(proto_state: ^ProtoState) {
 // if <expression> { <statements> } [else if ...] [else { <statements> }]
 parse_if_statement :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .IF, "expected 'if'")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     temp_save := proto_state.next_temp_slot
     condition_slot := claim_temp_slot(proto_state)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     parse_expression(proto_state, condition_slot)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     false_jump := emit_jump_false(proto_state, condition_slot)
     proto_state.next_temp_slot = temp_save
     parse_block(proto_state)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     if at_token(.ELSE) {
         advance_token()
 
         end_jump := emit_jump(proto_state)
         patch_jump(proto_state, false_jump)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         if at_token(.IF) {
             parse_if_statement(proto_state)
         } else {
             parse_block(proto_state)
         }
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         patch_jump(proto_state, end_jump)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
         return
     }
 
     patch_jump(proto_state, false_jump)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 }
 
 // Condition form evaluates each iteration.
 // Braced form is infinite-loop sugar with no condition-exit jump.
 parse_for_statement :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .FOR, "expected 'for'")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     if proto_state.loop_depth >= MAX_LOOP_DEPTH {
         parser_error(proto_state, current_token(), "too many nested loops")
@@ -567,14 +517,10 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
     if !at_token(.LEFT_BRACE) {
         temp_save := proto_state.next_temp_slot
         condition_slot := claim_temp_slot(proto_state)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         parse_expression(proto_state, condition_slot)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         exit_jump = emit_jump_false(proto_state, condition_slot)
         proto_state.next_temp_slot = temp_save
@@ -582,29 +528,21 @@ parse_for_statement :: proc(proto_state: ^ProtoState) {
     }
 
     parse_block(proto_state)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     emit_jump(proto_state, loop_start)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     if has_exit_jump {
         patch_jump(proto_state, exit_jump)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
     }
 
     proto_state.loop_depth -= 1
     break_fixup_base := proto_state.loop_break_fixup_base[proto_state.loop_depth]
     for fixup_index := break_fixup_base; fixup_index < proto_state.break_fixup_count; fixup_index += 1 {
         patch_jump(proto_state, proto_state.break_fixups[fixup_index])
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
     }
     proto_state.break_fixup_count = break_fixup_base
 }
@@ -745,9 +683,7 @@ parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
 // Only valid inside loop bodies.
 parse_break_statement :: proc(proto_state: ^ProtoState) {
     break_token := consume_token(proto_state, .BREAK, "expected 'break'")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     if proto_state.loop_depth == 0 {
         parser_error(proto_state, break_token, "break is only valid inside loops")
@@ -767,9 +703,7 @@ parse_break_statement :: proc(proto_state: ^ProtoState) {
 // Each return expression is lowered as a single-result expression.
 parse_return_statement :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RETURN, "expected 'return'")
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     if at_token(.EOF) || at_token(.RIGHT_BRACE) {
         emit_return(proto_state, 0, 0)
@@ -777,14 +711,10 @@ parse_return_statement :: proc(proto_state: ^ProtoState) {
     }
 
     first_result_slot := claim_temp_slot(proto_state)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     parse_expression(proto_state, first_result_slot)
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
 
     result_count := 1
     for at_token(.COMMA) {
@@ -797,9 +727,7 @@ parse_return_statement :: proc(proto_state: ^ProtoState) {
         }
 
         parse_expression(proto_state, result_slot)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
         result_count += 1
     }
 
@@ -849,20 +777,14 @@ parse_statement :: proc(proto_state: ^ProtoState) {
     }
 
     next_token := peek_token()
-    if Parser.failed {
-        return
-    }
+    if Parser.failed { return }
     next_kind := next_token.kind
     if next_kind == .LEFT_PAREN {
         callee_slot := claim_temp_slot(proto_state)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         parse_primary(proto_state, callee_slot)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         parse_call(proto_state, callee_slot, 0)
         return
@@ -875,9 +797,7 @@ parse_statement :: proc(proto_state: ^ProtoState) {
         advance_token()
 
         slot := declare_local(proto_state, ident_token)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
 
         // Declaration gives the function proto a useful name and origin.
         if at_token(.FUNCTION) {
@@ -912,9 +832,7 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
     for !Parser.failed && !at_token(.EOF) {
         parse_statement(proto_state)
-        if Parser.failed {
-            return
-        }
+        if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
     }
 }

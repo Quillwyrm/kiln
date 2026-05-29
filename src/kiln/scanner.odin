@@ -136,13 +136,9 @@ begin_token :: proc() {
 
 // match_next conditionally consumes one exact following byte.
 match_next :: proc(expected: u8) -> bool {
-    if Scanner.index >= len(Scanner.source) {
-        return false
-    }
+    if Scanner.index >= len(Scanner.source) { return false }
 
-    if Scanner.source[Scanner.index] != expected {
-        return false
-    }
+    if Scanner.source[Scanner.index] != expected { return false }
 
     advance_char()
     return true
