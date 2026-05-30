@@ -10,13 +10,61 @@ Parser := struct {
     lookahead:     Token,
     has_lookahead: bool,
     failed:        bool, // global error latch — every mutating operation sets it, callers check and return immediately
-
-    // Scratch result from the last parsed expression.
-    // parse_expr resets these. parse_expr_call_args sets them when the whole expression is a direct call.
-    // RHS value-list lowering reads them immediately to expand a single-call RHS.
-    last_expr_was_direct_call: bool,
-    last_expr_call_index:      int,
 }{}
+
+
+// ExprDesc types ==================================================================================
+// Expression descriptors decouple parsing from slot emission.
+// parse_expr returns an ExprDesc; surrounding context emits or adjusts it.
+
+ExprInvalid :: struct {}
+ExprNil     :: struct {}
+
+ExprBool :: struct {
+    value: bool,
+}
+
+ExprInt :: struct {
+    value: i64,
+}
+
+ExprFloat :: struct {
+    value: f64,
+}
+
+ExprString :: struct {
+    value: string,
+}
+
+ExprLocal :: struct {
+    local_index: int,
+}
+
+ExprGlobal :: struct {
+    binding_id: BindingId,
+}
+
+ExprSlot :: struct {
+    slot: int,
+}
+
+ExprCall :: struct {
+    base_slot:  int,
+    call_index: int,
+}
+
+ExprDesc :: union {
+    ExprInvalid,
+    ExprNil,
+    ExprBool,
+    ExprInt,
+    ExprFloat,
+    ExprString,
+    ExprLocal,
+    ExprGlobal,
+    ExprSlot,
+    ExprCall,
+}
 
 // Token cursor ===================================================================================
 
@@ -124,6 +172,19 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     return slot
 }
 
+// reserve_slots_until ensures next_temp_slot is past a given slot boundary,
+// preventing temp reuse of slots that hold live expression results.
+reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
+    if slot_after_last > MAX_FRAME_SLOTS {
+        parser_error(proto_state, current_token(), "function uses too many values")
+        return
+    }
+
+    if proto_state.next_temp_slot < slot_after_last {
+        proto_state.next_temp_slot = slot_after_last
+    }
+}
+
 // Records the local-count mark so end_scope can discard this scope's locals.
 begin_scope :: proc(proto_state: ^ProtoState) {
     if proto_state.scope_depth >= MAX_FRAME_SLOTS {
@@ -163,6 +224,80 @@ resolve_local_index :: proc(proto_state: ^ProtoState, ident_name: string) -> int
         }
     }
     return -1
+}
+
+
+// ExprDesc lowering =======================================================================
+// These translate descriptors into concrete bytecode.
+
+// lower_expr_to_slot lowers an expression descriptor so that the value lands
+// in dst_slot at runtime.
+lower_expr_to_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int) {
+    switch e in expr {
+    case ExprInvalid:
+        return
+
+    case ExprNil:
+        emit_load_nil(proto_state, dst_slot)
+
+    case ExprBool:
+        if e.value {
+            emit_load_true(proto_state, dst_slot)
+        } else {
+            emit_load_false(proto_state, dst_slot)
+        }
+
+    case ExprInt:
+        const_index := const_int(proto_state, e.value)
+        if Parser.failed { return }
+        emit_load_const(proto_state, dst_slot, const_index)
+
+    case ExprFloat:
+        const_index := const_float(proto_state, e.value)
+        if Parser.failed { return }
+        emit_load_const(proto_state, dst_slot, const_index)
+
+    case ExprString:
+        const_index := const_string(proto_state, e.value)
+        if Parser.failed { return }
+        emit_load_const(proto_state, dst_slot, const_index)
+
+    case ExprLocal:
+        src_slot := proto_state.local_bindings[e.local_index].frame_slot
+        if src_slot != dst_slot {
+            emit_move(proto_state, dst_slot, src_slot)
+        }
+
+    case ExprGlobal:
+        emit_get_global(proto_state, dst_slot, e.binding_id)
+
+    case ExprSlot:
+        if e.slot != dst_slot {
+            emit_move(proto_state, dst_slot, e.slot)
+        }
+
+    case ExprCall:
+        set_call_requested_results(proto_state, e.call_index, 1)
+        if Parser.failed { return }
+        if e.base_slot != dst_slot {
+            emit_move(proto_state, dst_slot, e.base_slot)
+        }
+    }
+}
+
+// lower_slot_to_assignment_target writes the value in src_slot into an assignable
+// expression descriptor. Currently only ExprLocal is assignable.
+lower_slot_to_assignment_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprDesc) {
+    #partial switch t in target {
+    case ExprLocal:
+        dst_slot := proto_state.local_bindings[t.local_index].frame_slot
+        if dst_slot != src_slot {
+            emit_move(proto_state, dst_slot, src_slot)
+        }
+
+    case:
+        parser_error(proto_state, current_token(), "expected assignment target")
+    }
 }
 
 
@@ -287,121 +422,103 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 }
 
 
-// Expressions ====================================================================================
+// Expression parsers ==============================================================================
+// Each returns an ExprDesc. No slot destination is passed in.
 
 // Literals (int, float, string, bool, nil), identifiers (local-first then global), and function literals.
-parse_expr_primary :: proc(proto_state: ^ProtoState, dst: int) {
+parse_expr_primary :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    // Function literal in expression context.
     if at_token(.FUNCTION) {
-        parse_function_literal(proto_state, dst, "<function>", current_token())
-        return
+        slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        parse_function_literal(proto_state, slot, "<function>", current_token())
+        if Parser.failed { return ExprInvalid{} }
+        return ExprSlot{slot}
     }
 
     token := advance_token()
 
     #partial switch token.kind {
     case .INT:
-        if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-            parser_error(proto_state, token, "too many constants in function")
-            return
-        }
-
-        value := token.value.(i64)
-        const_index := const_int(proto_state, value)
-        emit_load_const(proto_state, dst, const_index)
+        return ExprInt{token.value.(i64)}
 
     case .FLOAT:
-        if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-            parser_error(proto_state, token, "too many constants in function")
-            return
-        }
-
-        value := token.value.(f64)
-        const_index := const_float(proto_state, value)
-        emit_load_const(proto_state, dst, const_index)
+        return ExprFloat{token.value.(f64)}
 
     case .STRING:
-        if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-            parser_error(proto_state, token, "too many constants in function")
-            return
-        }
-
-        text := token.value.(string)
-        const_index := const_string(proto_state, text)
-        emit_load_const(proto_state, dst, const_index)
+        return ExprString{token.value.(string)}
 
     case .TRUE:
-        emit_load_true(proto_state, dst)
+        return ExprBool{true}
 
     case .FALSE:
-        emit_load_false(proto_state, dst)
+        return ExprBool{false}
 
     case .NIL:
-        emit_load_nil(proto_state, dst)
+        return ExprNil{}
 
     case .IDENT:
         ident_name := token.value.(string)
         local_index := resolve_local_index(proto_state, ident_name)
         if local_index >= 0 {
-            emit_move(proto_state, dst, proto_state.local_bindings[local_index].frame_slot)
-        } else {
-            binding_id, found_global := resolve_global(ident_name)
-            if !found_global {
-                parser_error(proto_state, token, fmt.tprintf("unknown name `%s`", ident_name))
-                return
-            }
-            emit_get_global(proto_state, dst, binding_id)
+            return ExprLocal{local_index}
         }
+
+        binding_id, found_global := resolve_global(ident_name)
+        if !found_global {
+            parser_error(proto_state, token, fmt.tprintf("unknown name `%s`", ident_name))
+            return ExprInvalid{}
+        }
+
+        return ExprGlobal{binding_id}
 
     case:
         parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", token_text_for_error(token)))
-    }
-}
-
-// Prefix NOT lowers by evaluating the operand first, then emitting NOT into dst.
-parse_expr_prefix :: proc(proto_state: ^ProtoState, dst: int) {
-    if at_token(.NOT) {
-        advance_token()
-
-        operand_slot := claim_temp_slot(proto_state)
-        if Parser.failed { return }
-
-        parse_expr_prefix(proto_state, operand_slot)
-        if Parser.failed { return }
-
-        emit_not(proto_state, dst, operand_slot)
-
-        Parser.last_expr_was_direct_call = false
-        Parser.last_expr_call_index = -1
-        return
-    }
-
-    parse_expr_primary(proto_state, dst)
-    if Parser.failed { return }
-
-    if at_token(.LEFT_PAREN) {
-        parse_expr_call_args(proto_state, dst, 1)
+        return ExprInvalid{}
     }
 }
 
 // Layout: callee_slot, arg0, arg1, ...
-// requested_results controls CALL's c operand:
-//   0 = statement context — results follow the caller's return convention, not a specific slot
-//   1 = expression context — expect exactly one result in dst
-parse_expr_call_args :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int) {
+// If callee is already in a slot (ExprSlot), use it as the CALL base.
+// ExprLocal is not reused because CALL writes results into the base slot.
+// Arguments are single-valued (no call expansion in call args).
+parse_expr_call_args :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDesc {
     consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
-    if Parser.failed { return }
+    if Parser.failed { return ExprInvalid{} }
+
+    base_slot: int
+    slot_expr, callee_is_slot := callee.(ExprSlot)
+    if callee_is_slot {
+        base_slot = slot_expr.slot
+        reserve_slots_until(proto_state, base_slot + 1)
+        if Parser.failed { return ExprInvalid{} }
+    } else {
+        base_slot = claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_to_slot(proto_state, callee, base_slot)
+        if Parser.failed { return ExprInvalid{} }
+    }
 
     arg_count := 0
     if !at_token(.RIGHT_PAREN) {
         for {
-            arg_slot := callee_slot + 1 + arg_count
+            arg_slot := base_slot + 1 + arg_count
             if arg_slot >= MAX_FRAME_SLOTS {
                 parser_error(proto_state, current_token(), "call uses too many values")
-                return
+                return ExprInvalid{}
             }
 
-            parse_expr(proto_state, arg_slot)
-            if Parser.failed { return }
+            arg_expr := parse_expr(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+
+            lower_expr_to_slot(proto_state, arg_expr, arg_slot)
+            if Parser.failed { return ExprInvalid{} }
+
+            reserve_slots_until(proto_state, arg_slot + 1)
+            if Parser.failed { return ExprInvalid{} }
+
             arg_count += 1
 
             if !at_token(.COMMA) {
@@ -416,75 +533,132 @@ parse_expr_call_args :: proc(proto_state: ^ProtoState, callee_slot, requested_re
     }
 
     consume_token(proto_state, .RIGHT_PAREN, "expected ')' after call arguments")
-    if Parser.failed { return }
+    if Parser.failed { return ExprInvalid{} }
 
-    call_index := next_inst_index(proto_state)
-    emit_call(proto_state, callee_slot, arg_count, requested_results)
+    call_index := emit_call(proto_state, base_slot, arg_count, 1)
+    return ExprCall{base_slot, call_index}
+}
 
-    Parser.last_expr_was_direct_call = true
-    Parser.last_expr_call_index = call_index
+// Prefix NOT lowers by evaluating the operand first, then emitting NOT.
+// All other primaries are forwarded to parse_expr_primary with optional call suffix.
+parse_expr_prefix :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    if at_token(.NOT) {
+        advance_token()
+
+        operand := parse_expr_prefix(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        operand_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_to_slot(proto_state, operand, operand_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        result_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        emit_not(proto_state, result_slot, operand_slot)
+        return ExprSlot{result_slot}
+    }
+
+    primary := parse_expr_primary(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    if at_token(.LEFT_PAREN) {
+        return parse_expr_call_args(proto_state, primary)
+    }
+
+    return primary
 }
 
 // parse_expr currently supports unary expressions and call suffix on primaries.
 // Operator precedence parsing is not in this stage yet.
-parse_expr :: proc(proto_state: ^ProtoState, dst: int) {
-    Parser.last_expr_was_direct_call = false
-    Parser.last_expr_call_index = -1
-
-    parse_expr_prefix(proto_state, dst)
+parse_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    return parse_expr_prefix(proto_state)
 }
 
-// Parses a comma-separated RHS value list into [first_slot, first_slot+slot_count). A single unparenthesized call expands to slot_count results. Fewer values than slots fills with nil; an explicit comma list exceeding slot_count is an error.
-parse_rhs_value_list_into_slots :: proc(proto_state: ^ProtoState, first_slot: int, slot_count: int, form_name: string) {
-    parse_expr(proto_state, first_slot)
+
+// Expression lists ================================================================================
+
+// Parses: expr { "," expr }
+//
+// Every expression before the final one is emitted as one value,
+// starting at base_slot. The final expression is returned as ExprDesc
+// so the caller can expand a final call or materialize it normally.
+//
+// Invariant: base_slot must equal proto_state.next_temp_slot at entry.
+parse_expr_list :: proc(proto_state: ^ProtoState, base_slot: int) -> (expr_count: int, last_expr: ExprDesc) {
+    expr_count = 1
+    last_expr = parse_expr(proto_state)
     if Parser.failed { return }
 
-    if !at_token(.COMMA) {
-        if Parser.last_expr_was_direct_call {
-            if slot_count > 255 {
-                parser_error(proto_state, current_token(), "too many destinations for call result expansion")
-                return
-            }
+    for at_token(.COMMA) {
+        dst_slot := base_slot + expr_count - 1
 
-            word := proto_state.bytecode[Parser.last_expr_call_index]
-            inst := InstABC(word)
-            inst.c = u8(slot_count)
-            proto_state.bytecode[Parser.last_expr_call_index] = u32(inst)
+        reserve_slots_until(proto_state, dst_slot + 1)
+        if Parser.failed { return }
 
-            if slot_count > 1 {
-                record_slots(proto_state, first_slot + slot_count - 1)
-            }
-        } else {
-            for fill_index := 1; fill_index < slot_count; fill_index += 1 {
-                emit_load_nil(proto_state, first_slot + fill_index)
-            }
-        }
+        lower_expr_to_slot(proto_state, last_expr, dst_slot)
+        if Parser.failed { return }
 
+        advance_token()
+
+        last_expr = parse_expr(proto_state)
+        if Parser.failed { return }
+
+        expr_count += 1
+    }
+
+    return
+}
+
+// Finishes an expression list so it fills exactly wanted_count result slots.
+//
+// Expressions before the final one are already emitted at
+// base_slot .. base_slot + expr_count - 2.
+// The final expression is emitted or expanded to cover
+// base_slot .. base_slot + wanted_count - 1.
+//
+// Caller must validate expr_count <= wanted_count before calling.
+finish_expr_list_to_slots :: proc(
+    proto_state: ^ProtoState,
+    base_slot: int,
+    expr_count: int,
+    last_expr: ExprDesc,
+    wanted_count: int,
+) {
+    previous_count := expr_count - 1
+    last_dst := base_slot + previous_count
+    wanted_from_last := wanted_count - previous_count
+
+    if wanted_from_last <= 0 {
         return
     }
 
-    value_count := 1
+    reserve_slots_until(proto_state, base_slot + wanted_count)
+    if Parser.failed { return }
 
-    for at_token(.COMMA) {
-        advance_token()
-
-        if value_count >= slot_count {
-            parser_error(
-                proto_state,
-                current_token(),
-                fmt.tprintf("too many values in %s: expected %d", form_name, slot_count),
-            )
+    #partial switch e in last_expr {
+    case ExprCall:
+        if e.base_slot != last_dst {
+            parser_error(proto_state, current_token(), "internal error: call result base does not match expression-list destination")
             return
         }
 
-        parse_expr(proto_state, first_slot + value_count)
+        set_call_requested_results(proto_state, e.call_index, wanted_from_last)
         if Parser.failed { return }
 
-        value_count += 1
-    }
+        if wanted_from_last > 1 {
+            record_slots(proto_state, last_dst + wanted_from_last - 1)
+        }
 
-    for fill_index := value_count; fill_index < slot_count; fill_index += 1 {
-        emit_load_nil(proto_state, first_slot + fill_index)
+    case:
+        lower_expr_to_slot(proto_state, last_expr, last_dst)
+        if Parser.failed { return }
+
+        for fill_index := previous_count + 1; fill_index < wanted_count; fill_index += 1 {
+            emit_load_nil(proto_state, base_slot + fill_index)
+        }
     }
 }
 
@@ -525,7 +699,10 @@ parse_stat_if :: proc(proto_state: ^ProtoState) {
     condition_slot := claim_temp_slot(proto_state)
     if Parser.failed { return }
 
-    parse_expr(proto_state, condition_slot)
+    expr := parse_expr(proto_state)
+    if Parser.failed { return }
+
+    lower_expr_to_slot(proto_state, expr, condition_slot)
     if Parser.failed { return }
 
     false_jump := emit_jump_false(proto_state, condition_slot)
@@ -580,7 +757,10 @@ parse_stat_for :: proc(proto_state: ^ProtoState) {
         condition_slot := claim_temp_slot(proto_state)
         if Parser.failed { return }
 
-        parse_expr(proto_state, condition_slot)
+        expr := parse_expr(proto_state)
+        if Parser.failed { return }
+
+        lower_expr_to_slot(proto_state, expr, condition_slot)
         if Parser.failed { return }
 
         exit_jump = emit_jump_false(proto_state, condition_slot)
@@ -623,8 +803,13 @@ parse_stat_switch :: proc(proto_state: ^ProtoState) {
     if !at_token(.LEFT_BRACE) {
         subject_slot = claim_temp_slot(proto_state)
         if Parser.failed { return }
-        parse_expr(proto_state, subject_slot)
+
+        subject_expr := parse_expr(proto_state)
         if Parser.failed { return }
+
+        lower_expr_to_slot(proto_state, subject_expr, subject_slot)
+        if Parser.failed { return }
+
         subject_live_cursor = subject_slot + 1
         proto_state.next_temp_slot = subject_live_cursor
     }
@@ -651,8 +836,13 @@ parse_stat_switch :: proc(proto_state: ^ProtoState) {
         // Compile the case expression.
         case_slot := claim_temp_slot(proto_state)
         if Parser.failed { return }
-        parse_expr(proto_state, case_slot)
+
+        case_expr := parse_expr(proto_state)
         if Parser.failed { return }
+
+        lower_expr_to_slot(proto_state, case_expr, case_slot)
+        if Parser.failed { return }
+
         consume_token(proto_state, .COLON, "expected ':' after switch case")
         if Parser.failed { return }
 
@@ -761,6 +951,7 @@ parse_stat_break :: proc(proto_state: ^ProtoState) {
 }
 
 // return, return expr, or return a, b, c. Each value expression is lowered as a single-result expression.
+// No return-call forwarding: return f() returns exactly one value (the first result of f()).
 parse_stat_return :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RETURN, "expected 'return'")
     if Parser.failed { return }
@@ -770,73 +961,20 @@ parse_stat_return :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    first_result_slot := claim_temp_slot(proto_state)
+    base_slot := proto_state.next_temp_slot
+
+    expr_count, last_expr := parse_expr_list(proto_state, base_slot)
     if Parser.failed { return }
 
-    parse_expr(proto_state, first_result_slot)
+    if expr_count > MAX_FRAME_SLOTS {
+        parser_error(proto_state, current_token(), "return has too many values")
+        return
+    }
+
+    finish_expr_list_to_slots(proto_state, base_slot, expr_count, last_expr, expr_count)
     if Parser.failed { return }
 
-    result_count := 1
-    for at_token(.COMMA) {
-        advance_token()
-
-        result_slot := first_result_slot + result_count
-        if result_slot >= MAX_FRAME_SLOTS {
-            parser_error(proto_state, current_token(), "return has too many values")
-            return
-        }
-
-        parse_expr(proto_state, result_slot)
-        if Parser.failed { return }
-        result_count += 1
-    }
-
-    emit_return(proto_state, first_result_slot, result_count)
-}
-
-// Supported forms: if/for/break/return, decl, local assign, call.
-parse_stat :: proc(proto_state: ^ProtoState) {
-    if at_token(.RETURN) {
-        parse_stat_return(proto_state)
-        return
-    }
-
-    if at_token(.IF) {
-        parse_stat_if(proto_state)
-        return
-    }
-
-    if at_token(.FOR) {
-        parse_stat_for(proto_state)
-        return
-    }
-
-    if at_token(.BREAK) {
-        parse_stat_break(proto_state)
-        return
-    }
-
-    if at_token(.SWITCH) {
-        parse_stat_switch(proto_state)
-        return
-    }
-
-    if at_token(.CASE) {
-        parser_error(proto_state, current_token(), "case is only valid inside switch")
-        return
-    }
-    if at_token(.ELSE) {
-        parser_error(proto_state, current_token(), "else is only valid after if or inside switch")
-        return
-    }
-
-    if at_token(.IDENT) {
-        parse_stat_identifier(proto_state)
-        return
-    }
-
-    token := current_token()
-    parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", token_text_for_error(token)))
+    emit_return(proto_state, base_slot, expr_count)
 }
 
 // Current token must be IDENT.
@@ -848,13 +986,16 @@ parse_stat_identifier :: proc(proto_state: ^ProtoState) {
 
     // Call statement: foo()
     if next_token.kind == .LEFT_PAREN {
-        callee_slot := claim_temp_slot(proto_state)
+        expr := parse_expr(proto_state)
         if Parser.failed { return }
 
-        parse_expr_primary(proto_state, callee_slot)
-        if Parser.failed { return }
+        call_expr, ok := expr.(ExprCall)
+        if !ok {
+            parser_error(proto_state, current_token(), "expected function call")
+            return
+        }
 
-        parse_expr_call_args(proto_state, callee_slot, 0)
+        set_call_requested_results(proto_state, call_expr.call_index, 0)
         return
     }
 
@@ -923,12 +1064,8 @@ parse_stat_identifier :: proc(proto_state: ^ProtoState) {
         }
 
         // Reserve future local slots for RHS.
-        // RHS will be emitted directly into these slots.
-        rhs_base := proto_state.next_temp_slot
-        for target_index := 0; target_index < lhs_count; target_index += 1 {
-            claim_temp_slot(proto_state)
-            if Parser.failed { return }
-        }
+        rhs_base := proto_state.local_count
+        proto_state.next_temp_slot = rhs_base
 
         // Parse RHS into reserved slots (names not yet committed — invisible in own initializer).
         if lhs_count == 1 && at_token(.FUNCTION) {
@@ -936,7 +1073,19 @@ parse_stat_identifier :: proc(proto_state: ^ProtoState) {
             parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
             if Parser.failed { return }
         } else {
-            parse_rhs_value_list_into_slots(proto_state, rhs_base, lhs_count, "declaration")
+            expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
+            if Parser.failed { return }
+
+            if expr_count > lhs_count {
+                parser_error(
+                    proto_state,
+                    current_token(),
+                    fmt.tprintf("too many values in declaration: expected %d", lhs_count),
+                )
+                return
+            }
+
+            finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
             if Parser.failed { return }
         }
 
@@ -951,7 +1100,7 @@ parse_stat_identifier :: proc(proto_state: ^ProtoState) {
     // --- Assignment (=) ---
 
     if at_token(.ASSIGN) {
-        target_slots: [MAX_FRAME_SLOTS]int
+        targets: [MAX_FRAME_SLOTS]ExprDesc
 
         for target_index := 0; target_index < lhs_count; target_index += 1 {
             ident_text := lhs_tokens[target_index].value.(string)
@@ -966,25 +1115,34 @@ parse_stat_identifier :: proc(proto_state: ^ProtoState) {
                 return
             }
 
-            target_slots[target_index] = proto_state.local_bindings[local_index].frame_slot
+            targets[target_index] = ExprLocal{local_index}
         }
 
         advance_token()
 
-        // Claim temp slots for RHS evaluation.
+        // RHS expression-list results start at the current temp cursor.
         rhs_base := proto_state.next_temp_slot
-        for target_index := 0; target_index < lhs_count; target_index += 1 {
-            claim_temp_slot(proto_state)
-            if Parser.failed { return }
-        }
 
         // Parse RHS into temps.
-        parse_rhs_value_list_into_slots(proto_state, rhs_base, lhs_count, "assignment")
+        expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
+        if Parser.failed { return }
+
+        if expr_count > lhs_count {
+            parser_error(
+                proto_state,
+                current_token(),
+                fmt.tprintf("too many values in assignment: expected %d", lhs_count),
+            )
+            return
+        }
+
+        finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
         if Parser.failed { return }
 
         // MOVE temps into targets (swap safe).
         for target_index := 0; target_index < lhs_count; target_index += 1 {
-            emit_move(proto_state, target_slots[target_index], rhs_base + target_index)
+            lower_slot_to_assignment_target(proto_state, rhs_base + target_index, targets[target_index])
+            if Parser.failed { return }
         }
 
         return
@@ -1004,6 +1162,51 @@ parse_stat_identifier :: proc(proto_state: ^ProtoState) {
     }
 
     parser_error(proto_state, current_token(), "expected declaration or assignment after identifier list")
+}
+
+// Supported forms: if/for/break/return, decl, local assign, call.
+parse_stat :: proc(proto_state: ^ProtoState) {
+    if at_token(.RETURN) {
+        parse_stat_return(proto_state)
+        return
+    }
+
+    if at_token(.IF) {
+        parse_stat_if(proto_state)
+        return
+    }
+
+    if at_token(.FOR) {
+        parse_stat_for(proto_state)
+        return
+    }
+
+    if at_token(.BREAK) {
+        parse_stat_break(proto_state)
+        return
+    }
+
+    if at_token(.SWITCH) {
+        parse_stat_switch(proto_state)
+        return
+    }
+
+    if at_token(.CASE) {
+        parser_error(proto_state, current_token(), "case is only valid inside switch")
+        return
+    }
+    if at_token(.ELSE) {
+        parser_error(proto_state, current_token(), "else is only valid after if or inside switch")
+        return
+    }
+
+    if at_token(.IDENT) {
+        parse_stat_identifier(proto_state)
+        return
+    }
+
+    token := current_token()
+    parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", token_text_for_error(token)))
 }
 
 // Parses top-level statements until EOF. After each statement, next_temp_slot resets to local_count so temp slots are reused across statements.

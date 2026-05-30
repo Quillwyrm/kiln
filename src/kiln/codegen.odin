@@ -121,6 +121,12 @@ delete_proto_state :: proc(proto_state: ^ProtoState) {
 
 // Constants ======================================================================================
 const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
+    if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
+        set_error(proto_state.origin, "too many constants in function")
+        Parser.failed = true
+        return 0
+    }
+
     const_index := len(proto_state.const_pool)
     append(&proto_state.const_pool, Value(value))
 
@@ -128,6 +134,12 @@ const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
 }
 
 const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
+    if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
+        set_error(proto_state.origin, "too many constants in function")
+        Parser.failed = true
+        return 0
+    }
+
     const_index := len(proto_state.const_pool)
     append(&proto_state.const_pool, Value(value))
 
@@ -135,6 +147,12 @@ const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
 }
 
 const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
+    if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
+        set_error(proto_state.origin, "too many constants in function")
+        Parser.failed = true
+        return 0
+    }
+
     const_index := len(proto_state.const_pool)
     append(&proto_state.const_pool, new_string_value(text))
 
@@ -413,7 +431,10 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
 // Calls and returns ==============================================================================
 
 // Records the highest slot touched by this call layout, including requested result slots.
-emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_results: int) {
+// Returns the bytecode index of the emitted CALL instruction.
+emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_results: int) -> int {
+    call_index := next_inst_index(proto_state)
+
     occupied_call_slots := arg_count + 1
     if requested_results > occupied_call_slots {
         occupied_call_slots = requested_results
@@ -427,6 +448,23 @@ emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_resu
         c= u8(requested_results),
     })
     append(&proto_state.bytecode, inst)
+
+    return call_index
+}
+
+// set_call_requested_results rewrites the requested-result operand of a previously emitted CALL.
+// It enforces the u8 operand limit for the CALL result count.
+set_call_requested_results :: proc(proto_state: ^ProtoState, call_index, result_count: int) {
+    if result_count < 0 || result_count > 255 {
+        set_error(proto_state.origin, "too many call results")
+        Parser.failed = true
+        return
+    }
+
+    word := proto_state.bytecode[call_index]
+    inst := InstABC(word)
+    inst.c = u8(result_count)
+    proto_state.bytecode[call_index] = u32(inst)
 }
 
 emit_return :: proc(proto_state: ^ProtoState, first_slot, result_count: int) {
