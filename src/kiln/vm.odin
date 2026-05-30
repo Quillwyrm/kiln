@@ -45,7 +45,7 @@ Opcode :: enum u8 {
     // Control Flow
     JUMP,          // Jump: offset (relative to post-fetch instruction_index)
     JUMP_FALSE,    // AsBx: A=cond, B=offset; jump if slot[A] is falsey
-    HALT,          // ABC: no operands used; stop VM and return nil
+    HALT,          // ABC: no operands used; stop VM and return nil. Currently unused — reserved for debug/tool use.
 
     // Calls and Returns
     CALL,          // ABC: A=callee/result base, B=arg_count, C=requested_results
@@ -165,9 +165,8 @@ ProtoFunctionObject :: struct {
 }
 
 NativeFunctionObject :: struct {
-    header:      Object,
-    name:        string,
-    impl: NativeFunction,
+    header: Object,
+    impl:   NativeFunction,
 }
 
 
@@ -268,7 +267,6 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION
-    native_function.name = name
     native_function.impl = native_proc
 
     Active_State.global_env.values[int(binding_id)] = Value(cast(^Object)native_function)

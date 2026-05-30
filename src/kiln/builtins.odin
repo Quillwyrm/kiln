@@ -121,10 +121,7 @@ value_to_string :: proc(value: Value) -> string {
             delete(parts)
             return result
 
-        case .PROTO_FUNCTION:
-            return "function()"
-
-        case .NATIVE_FUNCTION:
+        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
             return "function()"
         }
     }

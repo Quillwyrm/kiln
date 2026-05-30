@@ -17,15 +17,14 @@ delete_state :: proc(state: ^State) {
 
 // run_source selects Active_State, clears previous error, compiles, then executes VM.
 // When err != nil, result is undefined.
-run_source :: proc(state: ^State, source, source_name: string) -> (result: Value, err: ^Error) {
+run_source :: proc(state: ^State, source, source_name: string) -> (Value, ^Error) {
     Active_State = state
     state.has_error = false
     state.error = Error{}
 
     compile_error := compile_source(source, source_name)
     if compile_error != nil {
-        result := Value{}
-        return result, compile_error
+        return Value{}, compile_error
     }
 
     vm_result, vm_error := run_vm(state)
