@@ -10,6 +10,9 @@ Parser := struct {
     lookahead:     Token,
     has_lookahead: bool,
     failed:        bool, // global error latch — every mutating operation sets it, callers check and return immediately
+
+    last_expr_was_direct_call: bool,
+    last_expr_call_index:      int,
 }{}
 
 // Token cursor ===================================================================================
@@ -373,6 +376,9 @@ parse_unary :: proc(proto_state: ^ProtoState, dst: int) {
         if Parser.failed { return }
 
         emit_not(proto_state, dst, operand_slot)
+
+        Parser.last_expr_was_direct_call = false
+        Parser.last_expr_call_index = -1
         return
     }
 
@@ -418,13 +424,74 @@ parse_call :: proc(proto_state: ^ProtoState, callee_slot, requested_results: int
 
     consume_token(proto_state, .RIGHT_PAREN, "expected ')' after call arguments")
     if Parser.failed { return }
+
+    call_index := next_inst_index(proto_state)
     emit_call(proto_state, callee_slot, arg_count, requested_results)
+
+    Parser.last_expr_was_direct_call = true
+    Parser.last_expr_call_index = call_index
 }
 
 // parse_expression currently supports unary expressions and call suffix on primaries.
 // Operator precedence parsing is not in this stage yet.
 parse_expression :: proc(proto_state: ^ProtoState, dst: int) {
+    Parser.last_expr_was_direct_call = false
+    Parser.last_expr_call_index = -1
+
     parse_unary(proto_state, dst)
+}
+
+parse_rhs_value_list_into_slots :: proc(proto_state: ^ProtoState, first_slot: int, slot_count: int, form_name: string) {
+    parse_expression(proto_state, first_slot)
+    if Parser.failed { return }
+
+    if !at_token(.COMMA) {
+        if Parser.last_expr_was_direct_call {
+            if slot_count > 255 {
+                parser_error(proto_state, current_token(), "too many destinations for call result expansion")
+                return
+            }
+
+            word := proto_state.bytecode[Parser.last_expr_call_index]
+            inst := InstABC(word)
+            inst.c = u8(slot_count)
+            proto_state.bytecode[Parser.last_expr_call_index] = u32(inst)
+
+            if slot_count > 1 {
+                record_slots(proto_state, first_slot + slot_count - 1)
+            }
+        } else {
+            for fill_index := 1; fill_index < slot_count; fill_index += 1 {
+                emit_load_nil(proto_state, first_slot + fill_index)
+            }
+        }
+
+        return
+    }
+
+    value_count := 1
+
+    for at_token(.COMMA) {
+        advance_token()
+
+        if value_count >= slot_count {
+            parser_error(
+                proto_state,
+                current_token(),
+                fmt.tprintf("too many values in %s: expected %d", form_name, slot_count),
+            )
+            return
+        }
+
+        parse_expression(proto_state, first_slot + value_count)
+        if Parser.failed { return }
+
+        value_count += 1
+    }
+
+    for fill_index := value_count; fill_index < slot_count; fill_index += 1 {
+        emit_load_nil(proto_state, first_slot + fill_index)
+    }
 }
 
 
@@ -778,8 +845,9 @@ parse_statement :: proc(proto_state: ^ProtoState) {
 
     next_token := peek_token()
     if Parser.failed { return }
-    next_kind := next_token.kind
-    if next_kind == .LEFT_PAREN {
+
+    // Call statement: foo()
+    if next_token.kind == .LEFT_PAREN {
         callee_slot := claim_temp_slot(proto_state)
         if Parser.failed { return }
 
@@ -790,42 +858,164 @@ parse_statement :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    ident_token := advance_token()
-    ident_text := ident_token.value.(string)
+    // Parse identifier list for declaration or assignment.
+    lhs_tokens: [MAX_FRAME_SLOTS]Token
+    lhs_count := 0
 
-    if next_kind == .DECL {
+    lhs_tokens[lhs_count] = consume_token(proto_state, .IDENT, "expected identifier")
+    if Parser.failed { return }
+    lhs_count += 1
+
+    for at_token(.COMMA) {
         advance_token()
 
-        slot := declare_local(proto_state, ident_token)
+        if lhs_count >= MAX_FRAME_SLOTS {
+            parser_error(proto_state, current_token(), "too many assignment targets")
+            return
+        }
+
+        lhs_tokens[lhs_count] = consume_token(proto_state, .IDENT, "expected identifier after ','")
         if Parser.failed { return }
 
-        // Declaration gives the function proto a useful name and origin.
-        if at_token(.FUNCTION) {
-            parse_function_literal(proto_state, slot, ident_text, ident_token)
+        lhs_count += 1
+    }
+
+    // --- Declaration (:=) ---
+
+    if at_token(.DECL) {
+        advance_token()
+
+        // Single-name function declaration — keep debug-name behavior.
+        if lhs_count == 1 && at_token(.FUNCTION) {
+            slot := declare_local(proto_state, lhs_tokens[0])
+            if Parser.failed { return }
+
+            ident_text := lhs_tokens[0].value.(string)
+            parse_function_literal(proto_state, slot, ident_text, lhs_tokens[0])
             return
         }
 
-        parse_expression(proto_state, slot)
+        // Validate all declaration names before RHS emission.
+        for check_index := 0; check_index < lhs_count; check_index += 1 {
+            check_name := lhs_tokens[check_index].value.(string)
+
+            for prev_index := 0; prev_index < check_index; prev_index += 1 {
+                if lhs_tokens[prev_index].value.(string) == check_name {
+                    parser_error(
+                        proto_state,
+                        lhs_tokens[check_index],
+                        fmt.tprintf("duplicate declaration name `%s`", check_name),
+                    )
+                    return
+                }
+            }
+
+            scope_start := 0
+            if proto_state.scope_depth > 0 {
+                scope_start = proto_state.scope_local_counts[proto_state.scope_depth - 1]
+            }
+
+            for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
+                if proto_state.local_bindings[local_index].name == check_name {
+                    parser_error(
+                        proto_state,
+                        lhs_tokens[check_index],
+                        fmt.tprintf("local variable `%s` is already declared in this scope", check_name),
+                    )
+                    return
+                }
+            }
+        }
+
+        if proto_state.local_count + lhs_count > MAX_FRAME_SLOTS {
+            parser_error(proto_state, lhs_tokens[0], "too many local variables in function")
+            return
+        }
+
+        // Reserve future local slots for RHS.
+        // RHS will be emitted directly into these slots.
+        rhs_base := proto_state.next_temp_slot
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            claim_temp_slot(proto_state)
+            if Parser.failed { return }
+        }
+
+        // Parse RHS into reserved slots (names not yet committed — invisible in own initializer).
+        parse_rhs_value_list_into_slots(proto_state, rhs_base, lhs_count, "declaration")
+        if Parser.failed { return }
+
+        // Commit names to the slots that already hold the RHS values.
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            ident_name := lhs_tokens[target_index].value.(string)
+
+            dst_slot := proto_state.local_count
+            proto_state.local_bindings[proto_state.local_count] = LocalBinding{
+                name       = ident_name,
+                frame_slot = dst_slot,
+            }
+            proto_state.local_count += 1
+            proto_state.next_temp_slot = proto_state.local_count
+        }
+
         return
     }
 
-    if next_kind == .ASSIGN {
-        slot, is_local := resolve_local(proto_state, ident_text)
-        if !is_local {
-            parser_error(proto_state, ident_token, fmt.tprintf("assignment target `%s` is not a local variable", ident_text))
-            return
+    // --- Assignment (=) ---
+
+    if at_token(.ASSIGN) {
+        target_slots: [MAX_FRAME_SLOTS]int
+
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            ident_text := lhs_tokens[target_index].value.(string)
+
+            slot, is_local := resolve_local(proto_state, ident_text)
+            if !is_local {
+                parser_error(
+                    proto_state,
+                    lhs_tokens[target_index],
+                    fmt.tprintf("assignment target `%s` is not a local variable", ident_text),
+                )
+                return
+            }
+
+            target_slots[target_index] = slot
         }
 
         advance_token()
-        parse_expression(proto_state, slot)
+
+        // Claim temp slots for RHS evaluation.
+        rhs_base := proto_state.next_temp_slot
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            claim_temp_slot(proto_state)
+            if Parser.failed { return }
+        }
+
+        // Parse RHS into temps.
+        parse_rhs_value_list_into_slots(proto_state, rhs_base, lhs_count, "assignment")
+        if Parser.failed { return }
+
+        // MOVE temps into targets (swap safe).
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            emit_move(proto_state, target_slots[target_index], rhs_base + target_index)
+        }
+
         return
     }
 
-    parser_error(
-        proto_state,
-        ident_token,
-        fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", ident_text),
-    )
+    // --- No valid operator after identifier list ---
+
+    first_name := lhs_tokens[0].value.(string)
+
+    if lhs_count == 1 {
+        parser_error(
+            proto_state,
+            lhs_tokens[0],
+            fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", first_name),
+        )
+        return
+    }
+
+    parser_error(proto_state, current_token(), "expected declaration or assignment after identifier list")
 }
 
 // After each statement, next_temp_slot resets to local_count so temporary slots are reused.

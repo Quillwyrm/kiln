@@ -175,6 +175,47 @@ print(to_number("42"))
 print(to_number("3.14"))
 print(to_number("bad"))
 
+// ── Multi-value declaration/assignment ────────────────────────────────────────────────────────────
+
+print("--- multi value ---")
+
+// Multi declaration
+a0, b0 := 1, 2
+print(a0, b0)
+
+// Missing RHS fills nil
+a1, b1 := 1
+print(a1, b1)
+
+// Direct call expansion
+pair0 := function() {
+    return 10, 20
+}
+a2, b2 := pair0()
+print(a2, b2)
+
+// Call inside comma list does not expand
+pair1 := function() {
+    return 10, 20
+}
+a3, b3 := pair1(), 99
+print(a3, b3)
+
+// Swap assignment
+a4 := 1
+b4 := 2
+a4, b4 = b4, a4
+print(a4, b4)
+
+// Assignment from direct call
+pair2 := function() {
+    return 3, 4
+}
+a5 := 1
+b5 := 2
+a5, b5 = pair2()
+print(a5, b5)
+
 // ── Top-level return ──────────────────────────────────────────────────────────────────────────────
 
 print("--- return ---")
