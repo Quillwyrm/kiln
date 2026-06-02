@@ -18,16 +18,16 @@ Opcode :: enum u8 {
     // Array Operations
     NEW_ARRAY,     // ABx: A=dst,       B=initial capacity
     ARRAY_LEN,     // ABx: A=dst,       B=src_array
-    ARRAY_GET,     // ABC: A=dst,       B=src_array, C=index
-    ARRAY_SET,     // ABC: A=dst_array, B=src, C=index
     ARRAY_PUSH,    // ABx: A=dst_array, B=src
     ARRAY_POP,     // ABx: A=dst,       B=src_array
 
     // Map Operations
     NEW_MAP,       // ABx: A=dst,     B=reserved
     MAP_LEN,       // ABx: A=dst,     B=src_map
-    MAP_GET,       // ABC: A=dst,     B=src_map, C=key
-    MAP_SET,       // ABC: A=dst_map, B=key, C=src
+
+    // Indexed Access
+    INDEX_GET,     // ABC: A=dst,       B=container, C=key
+    INDEX_SET,     // ABC: A=container, B=key,       C=src
 
     // Numeric Operations
     ADD,           // ABC: A=dst, B=lhs, C=rhs
@@ -687,61 +687,106 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             array_object := cast(^ArrayObject)header
             state.slots[dst] = Value(i64(len(array_object.data)))
 
-        // Reads array[B][index C] into slot A.
-        case .ARRAY_GET:
+        // Reads container B at key/index C into slot A.
+        case .INDEX_GET:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
-            array_slot := frame.slot_base + int(inst.b)
-            index_slot := frame.slot_base + int(inst.c)
+            container_slot := frame.slot_base + int(inst.b)
+            key_slot := frame.slot_base + int(inst.c)
 
-            array_header, is_object := state.slots[array_slot].(^Object)
-            if !is_object || array_header.kind != .ARRAY {
-                panic("ARRAY_GET expected array object")
-            }
-            array_object := cast(^ArrayObject)array_header
-
-            index_i64, is_i64 := state.slots[index_slot].(i64)
-            if !is_i64 {
-                panic("ARRAY_GET expected i64 index")
-            }
-            if index_i64 < 0 {
-                panic("ARRAY_GET index out of bounds")
+            container_header, is_object := state.slots[container_slot].(^Object)
+            if !is_object {
+                panic("INDEX_GET expected array or map object")
             }
 
-            index := int(index_i64)
-            if index >= len(array_object.data) {
-                panic("ARRAY_GET index out of bounds")
-            }
-            state.slots[dst] = array_object.data[index]
+            switch container_header.kind {
+            case .ARRAY:
+                array_object := cast(^ArrayObject)container_header
 
-        // Writes slot B into array A at index C.
-        case .ARRAY_SET:
+                index_i64, is_i64 := state.slots[key_slot].(i64)
+                if !is_i64 {
+                    panic("INDEX_GET expected i64 array index")
+                }
+                if index_i64 < 0 {
+                    panic("INDEX_GET array index out of bounds")
+                }
+
+                index := int(index_i64)
+                if index >= len(array_object.data) {
+                    panic("INDEX_GET array index out of bounds")
+                }
+                state.slots[dst] = array_object.data[index]
+
+            case .MAP:
+                map_object := cast(^MapObject)container_header
+
+                key_header, is_key_object := state.slots[key_slot].(^Object)
+                if !is_key_object || key_header.kind != .STRING {
+                    panic("INDEX_GET expected string map key")
+                }
+                key_object := cast(^StringObject)key_header
+
+                value, exists := map_object.data[key_object.data]
+                if exists {
+                    state.slots[dst] = value
+                } else {
+                    state.slots[dst] = Value{}
+                }
+
+            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+                panic("INDEX_GET expected array or map object")
+            }
+
+        // Writes slot C into container A at key/index B.
+        case .INDEX_SET:
             inst := InstABC(word)
-            array_slot := frame.slot_base + int(inst.a)
-            value_slot := frame.slot_base + int(inst.b)
-            index_slot := frame.slot_base + int(inst.c)
+            container_slot := frame.slot_base + int(inst.a)
+            key_slot := frame.slot_base + int(inst.b)
+            value_slot := frame.slot_base + int(inst.c)
 
             value := state.slots[value_slot]
 
-            array_header, is_object := state.slots[array_slot].(^Object)
-            if !is_object || array_header.kind != .ARRAY {
-                panic("ARRAY_SET expected array object")
-            }
-            array_object := cast(^ArrayObject)array_header
-
-            index_i64, is_i64 := state.slots[index_slot].(i64)
-            if !is_i64 {
-                panic("ARRAY_SET expected i64 index")
-            }
-            if index_i64 < 0 {
-                panic("ARRAY_SET index out of bounds")
+            container_header, is_object := state.slots[container_slot].(^Object)
+            if !is_object {
+                panic("INDEX_SET expected array or map object")
             }
 
-            index := int(index_i64)
-            if index >= len(array_object.data) {
-                panic("ARRAY_SET index out of bounds")
+            switch container_header.kind {
+            case .ARRAY:
+                array_object := cast(^ArrayObject)container_header
+
+                index_i64, is_i64 := state.slots[key_slot].(i64)
+                if !is_i64 {
+                    panic("INDEX_SET expected i64 array index")
+                }
+                if index_i64 < 0 {
+                    panic("INDEX_SET array index out of bounds")
+                }
+
+                index := int(index_i64)
+                if index >= len(array_object.data) {
+                    panic("INDEX_SET array index out of bounds")
+                }
+                array_object.data[index] = value
+
+            case .MAP:
+                map_object := cast(^MapObject)container_header
+
+                key_header, is_key_object := state.slots[key_slot].(^Object)
+                if !is_key_object || key_header.kind != .STRING {
+                    panic("INDEX_SET expected string map key")
+                }
+                key_object := cast(^StringObject)key_header
+
+                if value == nil {
+                    delete_key(&map_object.data, key_object.data)
+                } else {
+                    map_object.data[key_object.data] = value
+                }
+
+            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+                panic("INDEX_SET expected array or map object")
             }
-            array_object.data[index] = value
 
         // Appends slot B to array in slot A.
         case .ARRAY_PUSH:
@@ -796,56 +841,6 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             }
             map_object := cast(^MapObject)map_header
             state.slots[dst] = Value(i64(len(map_object.data)))
-
-        case .MAP_GET:
-            inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            map_slot := frame.slot_base + int(inst.b)
-            key_slot := frame.slot_base + int(inst.c)
-
-            map_header, is_map_object := state.slots[map_slot].(^Object)
-            if !is_map_object || map_header.kind != .MAP {
-                panic("MAP_GET expected map object")
-            }
-            map_object := cast(^MapObject)map_header
-
-            key_header, is_key_object := state.slots[key_slot].(^Object)
-            if !is_key_object || key_header.kind != .STRING {
-                panic("MAP_GET expected string key")
-            }
-            key_object := cast(^StringObject)key_header
-
-            value, exists := map_object.data[key_object.data]
-            if exists {
-                state.slots[dst] = value
-            } else {
-                state.slots[dst] = Value{}
-            }
-
-        case .MAP_SET:
-            inst := InstABC(word)
-            map_slot := frame.slot_base + int(inst.a)
-            key_slot := frame.slot_base + int(inst.b)
-            value_slot := frame.slot_base + int(inst.c)
-
-            map_header, is_map_object := state.slots[map_slot].(^Object)
-            if !is_map_object || map_header.kind != .MAP {
-                panic("MAP_SET expected map object")
-            }
-            map_object := cast(^MapObject)map_header
-
-            key_header, is_key_object := state.slots[key_slot].(^Object)
-            if !is_key_object || key_header.kind != .STRING {
-                panic("MAP_SET expected string key")
-            }
-            key_object := cast(^StringObject)key_header
-
-            value := state.slots[value_slot]
-            if value == nil {
-                delete_key(&map_object.data, key_object.data)
-            } else {
-                map_object.data[key_object.data] = value
-            }
 
         case .ADD:
             inst := InstABC(word)

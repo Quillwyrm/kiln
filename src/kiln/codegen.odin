@@ -223,20 +223,6 @@ emit_array_len :: proc(proto_state: ^ProtoState, dst, src_array: int) {
     append(&proto_state.bytecode, inst)
 }
 
-emit_array_get :: proc(proto_state: ^ProtoState, dst, src_array, index: int) {
-    record_slots(proto_state, dst, src_array, index)
-
-    inst := u32(InstABC{ op= .ARRAY_GET, a= u8(dst), b= u8(src_array), c= u8(index) })
-    append(&proto_state.bytecode, inst)
-}
-
-emit_array_set :: proc(proto_state: ^ProtoState, dst_array, src, index: int) {
-    record_slots(proto_state, dst_array, src, index)
-
-    inst := u32(InstABC{ op= .ARRAY_SET, a= u8(dst_array), b= u8(src), c= u8(index) })
-    append(&proto_state.bytecode, inst)
-}
-
 emit_array_push :: proc(proto_state: ^ProtoState, dst_array, src: int) {
     record_slots(proto_state, dst_array, src)
 
@@ -267,17 +253,19 @@ emit_map_len :: proc(proto_state: ^ProtoState, dst, src_map: int) {
     append(&proto_state.bytecode, inst)
 }
 
-emit_map_get :: proc(proto_state: ^ProtoState, dst, src_map, key: int) {
-    record_slots(proto_state, dst, src_map, key)
+// Indexed access ================================================================================
 
-    inst := u32(InstABC{ op= .MAP_GET, a= u8(dst), b= u8(src_map), c= u8(key) })
+emit_index_get :: proc(proto_state: ^ProtoState, dst, container, key: int) {
+    record_slots(proto_state, dst, container, key)
+
+    inst := u32(InstABC{ op= .INDEX_GET, a= u8(dst), b= u8(container), c= u8(key) })
     append(&proto_state.bytecode, inst)
 }
 
-emit_map_set :: proc(proto_state: ^ProtoState, dst_map, key, src: int) {
-    record_slots(proto_state, dst_map, key, src)
+emit_index_set :: proc(proto_state: ^ProtoState, container, key, src: int) {
+    record_slots(proto_state, container, key, src)
 
-    inst := u32(InstABC{ op= .MAP_SET, a= u8(dst_map), b= u8(key), c= u8(src) })
+    inst := u32(InstABC{ op= .INDEX_SET, a= u8(container), b= u8(key), c= u8(src) })
     append(&proto_state.bytecode, inst)
 }
 

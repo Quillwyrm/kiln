@@ -216,6 +216,46 @@ b5 := 2
 a5, b5 = pair2()
 print(a5, b5)
 
+print("--- arrays/index ---")
+
+items := [10, 20, 30]
+print(items[0], items[1], items[2])
+
+items[1] = 99
+print(items[1])
+
+nested := [[1], [2]]
+print(nested[0][0], nested[1][0])
+
+left := [1]
+right := [2]
+left[0], right[0] = right[0], left[0]
+print(left[0], right[0])
+
+make_printer := function() {
+    return function() {
+        print("chained call")
+    }
+}
+make_printer()()
+
+callbacks := [
+    function() {
+        print("first callback")
+    },
+    function() {
+        print("second callback")
+    },
+]
+callbacks[1]()
+
+callbacks[0] = function() {
+    print("replaced callback")
+}
+callbacks[0]()
+
+print((items[1]))
+
 // ── Delayed commit ────────────────────────────────────────────────────────────────────────────────
 
 print("--- delayed commit ---")
