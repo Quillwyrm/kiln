@@ -1,9 +1,8 @@
-// Kiln surface test
-// Every feature wired end-to-end (scanner → parser → codegen → VM).
+// Kiln surface test.
+// Covers scanner -> parser -> codegen -> VM behavior for the implemented language core.
 // No binary operators yet, so no a+b, a<b, etc.
 
-// ── Literals ──────────────────────────────────────────────────────────────────────────────────────
-
+// Basic literal forms.
 print("--- literals ---")
 
 print(nil)
@@ -16,117 +15,114 @@ print(3.14)
 print(.5)
 print("hello")
 
-// ── Variables ────────────────────────────────────────────────────────────────────────────────────
+// Mutable bindings, assignment, and block-local scope.
+print("--- bindings and scopes ---")
 
-print("--- variables ---")
+counter := 10
+print(counter)
 
-x := 10
-print(x)
+counter = 20
+print(counter)
 
-x = 20
-print(x)
-
-y := "hi"
-print(y)
+message := "hi"
+print(message)
 
 if true {
-    inner := "scoped"
-    print(inner)
+    scoped_value := "scoped"
+    print(scoped_value)
 }
 
-// ── Functions ────────────────────────────────────────────────────────────────────────────────────
-
+// `global` declares into the shared State global environment.
+// The declaration can happen at top level or from inside a function.
 print("--- globals ---")
 
-global score := 42
-print(score)
-score = 99
-print(score)
+global shared_count := 42
+print(shared_count)
 
-make_global :: function() {
+shared_count = 99
+print(shared_count)
+
+declare_inner_global :: function() {
     global inner_global := "from function"
 }
-make_global()
+declare_inner_global()
 print(inner_global)
 
-global global_fn :: function() {
-    return score
+global read_shared_count :: function() {
+    return shared_count
 }
-print(global_fn())
+print(read_shared_count())
 
-set_score :: function() {
-    score = 77
+set_shared_count :: function() {
+    shared_count = 77
 }
-set_score()
-print(score)
+set_shared_count()
+print(shared_count)
 
+// `::` makes the binding immutable, not the referenced object.
+// The array binding is fixed, but its indexed contents can still change.
 print("--- immutable bindings ---")
 
-answer :: 42
-print(answer)
+fixed_answer :: 42
+print(fixed_answer)
 
-fixed_items :: [1, 2]
-fixed_items[0] = 99
-print(fixed_items[0])
+fixed_array :: [1, 2]
+fixed_array[0] = 99
+print(fixed_array[0])
 
-global global_answer :: "locked"
-print(global_answer)
+global fixed_global :: "locked"
+print(fixed_global)
 
+// Function literals, calls, shadowing, nil-filled missing args, and statement calls.
 print("--- functions ---")
 
-// Identity function.
-id :: function(v) {
-    return v
+identity :: function(value) {
+    return value
 }
-print(id("identity"))
+print(identity("identity"))
 
-// No-op.
-noop :: function() {}
-print(noop())
+do_nothing :: function() {}
+print(do_nothing())
 
-// Parameter shadowing.
-shadow :: function(a) {
+show_shadowing :: function(value) {
     if true {
-        a := "inner"
-        print(a)
+        value := "inner"
+        print(value)
     }
-    print(a)
+    print(value)
 }
-shadow("outer")
+show_shadowing("outer")
 
-// Missing args filled with nil.
-partial :: function(a, b, c) {
-    print(a, b, c)
+show_missing_args :: function(first, second, third) {
+    print(first, second, third)
 }
-partial(1)
+show_missing_args(1)
 
-// Multi-value return.
-two_vals :: function() {
+return_two_values :: function() {
     return 7, 9
 }
-print(two_vals())
+print(return_two_values())
 
-// Call in statement position.
 print("statement call")
 
+// Mutable function bindings can be reassigned.
 print("--- function patching ---")
 
-patchable := function() {
+patchable_function := function() {
     print("patch one")
 }
-patchable()
+patchable_function()
 
-patchable = function() {
+patchable_function = function() {
     print("patch two")
 }
-patchable()
+patchable_function()
 
-// ── Control Flow ─────────────────────────────────────────────────────────────────────────────────
-
+// Conditional blocks and else-if parsing.
 print("--- if/else ---")
 
-cond := true
-if cond {
+condition := true
+if condition {
     print("if taken")
 } else {
     print("if not taken")
@@ -140,6 +136,7 @@ if false {
     print("else not taken")
 }
 
+// Conditional and unconditional loops both use `break`.
 print("--- for/break ---")
 
 for true {
@@ -152,10 +149,11 @@ for {
     break
 }
 
+// Subject switch, string equality in cases, subjectless switch, and nested switch.
 print("--- switch ---")
 
-status := 200
-switch status {
+status_code := 200
+switch status_code {
 case 200: print("ok")
 case 404: print("not found")
 else:     print("unknown")
@@ -171,12 +169,11 @@ case true: print("subjectless")
 else:      print("not taken")
 }
 
-// Nested switch.
-outer := 1
-inner := 2
-switch outer {
+outer_value := 1
+inner_value := 2
+switch outer_value {
 case 1:
-    switch inner {
+    switch inner_value {
     case 2: print("nested switch")
     else:   print("inner else")
     }
@@ -184,9 +181,8 @@ else:
     print("outer else")
 }
 
-// ── Unary ─────────────────────────────────────────────────────────────────────────────────────────
-
-print("--- unary not ---")
+// Unary truthiness and numeric negation.
+print("--- unary ---")
 
 print(!false)
 print(!true)
@@ -194,17 +190,14 @@ print(!nil)
 print(!0)
 print(!!"nested")
 
-print("--- unary minus ---")
-
 print(-42)
 print(-3.14)
 print(-0xFF)
-neg_source := 9
-print(-neg_source)
-print(--neg_source)
+number_to_negate := 9
+print(-number_to_negate)
+print(--number_to_negate)
 
-// ── Builtins ─────────────────────────────────────────────────────────────────────────────────────
-
+// Native globals installed by the host standard environment.
 print("--- builtins ---")
 
 print("variadic", 1, 2, 3)
@@ -230,63 +223,144 @@ print(to_number("42"))
 print(to_number("3.14"))
 print(to_number("bad"))
 
-// ── Multi-value declaration/assignment ────────────────────────────────────────────────────────────
-
+// Multiple result declarations and assignments.
+// A direct final call expands; a call before another comma value is single-valued.
 print("--- multi value ---")
 
-// Multi declaration
-a0, b0 := 1, 2
-print(a0, b0)
+left_decl, right_decl := 1, 2
+print(left_decl, right_decl)
 
-// Missing RHS fills nil
-a1, b1 := 1
-print(a1, b1)
+present_value, missing_value := 1
+print(present_value, missing_value)
 
-// Direct call expansion
-pair0 :: function() {
+make_pair_a :: function() {
     return 10, 20
 }
-a2, b2 := pair0()
-print(a2, b2)
+expanded_a, expanded_b := make_pair_a()
+print(expanded_a, expanded_b)
 
-// Call inside comma list does not expand
-pair1 :: function() {
+make_pair_b :: function() {
     return 10, 20
 }
-a3, b3 := pair1(), 99
-print(a3, b3)
+first_call_result, explicit_value := make_pair_b(), 99
+print(first_call_result, explicit_value)
 
-// Swap assignment
-a4 := 1
-b4 := 2
-a4, b4 = b4, a4
-print(a4, b4)
+swap_left := 1
+swap_right := 2
+swap_left, swap_right = swap_right, swap_left
+print(swap_left, swap_right)
 
-// Assignment from direct call
-pair2 :: function() {
+make_pair_c :: function() {
     return 3, 4
 }
-a5 := 1
-b5 := 2
-a5, b5 = pair2()
-print(a5, b5)
+assign_left := 1
+assign_right := 2
+assign_left, assign_right = make_pair_c()
+print(assign_left, assign_right)
 
-print("--- arrays/index ---")
+// Array literals, nested indexing, indexed assignment, and indexed swap.
+print("--- arrays ---")
 
-items := [10, 20, 30]
-print(items[0], items[1], items[2])
+numbers := [10, 20, 30]
+print(numbers[0], numbers[1], numbers[2])
 
-items[1] = 99
-print(items[1])
+numbers[1] = 99
+print(numbers[1])
 
-nested := [[1], [2]]
-print(nested[0][0], nested[1][0])
+nested_arrays := [[1], [2]]
+print(nested_arrays[0][0], nested_arrays[1][0])
 
-left := [1]
-right := [2]
-left[0], right[0] = right[0], left[0]
-print(left[0], right[0])
+swap_array_left := [1]
+swap_array_right := [2]
+swap_array_left[0], swap_array_right[0] = swap_array_right[0], swap_array_left[0]
+print(swap_array_left[0], swap_array_right[0])
 
+// Map literals use static string keys: identifier shorthand or string literals.
+// Values are full expressions, so calls are valid as values.
+print("--- maps ---")
+
+make_label :: function() {
+    return "Kiln VM"
+}
+
+settings :: map {
+    name: "kiln",
+    "display name": make_label(),
+    enabled: true,
+}
+
+print(settings["name"])
+print(settings["display name"])
+print(settings["enabled"])
+
+dynamic_key := "name"
+print(settings[dynamic_key])
+
+empty_map :: map {}
+print(length(empty_map))
+
+settings["enabled"] = false
+print(settings["enabled"])
+
+missing_setting := nil
+nil_from_binding :: map {
+    optional: missing_setting,
+}
+print(length(nil_from_binding))
+print(nil_from_binding["optional"])
+
+// Collections and functions nested together.
+// This stresses parser temp slots, chained indexing, and call roots from indexed values.
+print("--- collection composition ---")
+
+workspace :: map {
+    root: "kilnvm_dev",
+    paths: ["src", "dev", "refs"],
+    flags: map {
+        debug: true,
+        verbose: false,
+    },
+    actions: map {
+        echo: function(value) {
+            print(value)
+        },
+        id: function(value) {
+            return value
+        },
+    },
+}
+
+print(workspace["root"])
+print(workspace["paths"][1])
+print(workspace["flags"]["debug"])
+
+workspace["paths"][0] = "source"
+workspace["flags"]["verbose"] = true
+print(workspace["paths"][0])
+print(workspace["flags"]["verbose"])
+
+workspace["actions"]["echo"]("from nested function")
+print(workspace["actions"]["id"]("returned from nested function"))
+
+// Map construction from locals and returning indexed map values.
+make_record :: function(name, value) {
+    return map {
+        name: name,
+        value: value,
+    }
+}
+
+record := make_record("answer", 42)
+print(record["name"], record["value"])
+
+read_record :: function(input_record) {
+    return input_record["name"], input_record["value"]
+}
+
+record_name, record_value := read_record(record)
+print(record_name, record_value)
+
+// Returning a function and immediately calling it.
 make_printer :: function() {
     return function() {
         print("chained call")
@@ -294,6 +368,7 @@ make_printer :: function() {
 }
 make_printer()()
 
+// Arrays can store functions and indexed function values can be called or replaced.
 callbacks := [
     function() {
         print("first callback")
@@ -309,46 +384,52 @@ callbacks[0] = function() {
 }
 callbacks[0]()
 
-print((items[1]))
+print((numbers[1]))
 
+// Return forwarding expands only the final call expression in a return list.
 print("--- return forwarding ---")
+
 many_values :: function() {
     return 1, 2, 3
 }
+
 forward_many :: function(fn) {
     return fn()
 }
-rf_a, rf_b, rf_c := forward_many(many_values)
-print(rf_a, rf_b, rf_c)
+forward_a, forward_b, forward_c := forward_many(many_values)
+print(forward_a, forward_b, forward_c)
 
 prefix_many :: function(fn) {
     return 9, fn()
 }
-rp_a, rp_b, rp_c, rp_d := prefix_many(many_values)
-print(rp_a, rp_b, rp_c, rp_d)
+prefix_a, prefix_b, prefix_c, prefix_d := prefix_many(many_values)
+print(prefix_a, prefix_b, prefix_c, prefix_d)
 
 left_values :: function() {
     return 7, 8
 }
+
 right_values :: function() {
     return 10, 11
 }
-final_only :: function(left, right) {
-    return left(), right()
+
+final_call_only_expands :: function(left_fn, right_fn) {
+    return left_fn(), right_fn()
 }
-ro_a, ro_b, ro_c := final_only(left_values, right_values)
-print(ro_a, ro_b, ro_c)
+return_a, return_b, return_c := final_call_only_expands(left_values, right_values)
+print(return_a, return_b, return_c)
 
 no_values :: function() {
     return
 }
+
 prefix_empty :: function(fn) {
     return 5, fn()
 }
-re_a, re_b := prefix_empty(no_values)
-print(re_a, re_b)
+empty_a, empty_b := prefix_empty(no_values)
+print(empty_a, empty_b)
 
-indexed_final :: function() {
+indexed_final_call :: function() {
     funcs := [
         function() {
             return 20, 21
@@ -356,26 +437,24 @@ indexed_final :: function() {
     ]
     return 19, funcs[0]()
 }
-ri_a, ri_b, ri_c := indexed_final()
-print(ri_a, ri_b, ri_c)
+indexed_a, indexed_b, indexed_c := indexed_final_call()
+print(indexed_a, indexed_b, indexed_c)
 
-native_final :: function() {
+native_final_call :: function() {
     return type(123)
 }
-print(native_final())
+print(native_final_call())
 
-// ── Delayed commit ────────────────────────────────────────────────────────────────────────────────
-
+// Declaration commits after RHS lowering, so the RHS reads the outer binding.
 print("--- delayed commit ---")
 
-shadow_test := 10
+shadow_source := 10
 if true {
-    shadow_test := shadow_test
-    print(shadow_test)
+    shadow_source := shadow_source
+    print(shadow_source)
 }
 
-// ── Top-level return ──────────────────────────────────────────────────────────────────────────────
-
+// Top-level return exits the chunk.
 print("--- return ---")
 return "done"
 print("never reached")

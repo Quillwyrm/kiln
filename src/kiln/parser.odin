@@ -521,6 +521,138 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return ExprSlot{array_slot}
 }
 
+parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    consume_token(proto_state, .MAP, "expected 'map' to start map literal")
+    if Parser.failed { return ExprInvalid{} }
+
+    consume_token(proto_state, .LEFT_BRACE, "expected '{' after map")
+    if Parser.failed { return ExprInvalid{} }
+
+    map_slot := claim_temp_slot(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    emit_new_map(proto_state, map_slot)
+    reserve_slots_until(proto_state, map_slot + 1)
+    if Parser.failed { return ExprInvalid{} }
+
+    key_texts := make([dynamic]string)
+    defer delete(key_texts)
+
+    if !at_token(.RIGHT_BRACE) {
+        for {
+            key_token := current_token()
+            key_text: string
+
+            #partial switch key_token.kind {
+            case .IDENT:
+                key_text = key_token.value.(string)
+                advance_token()
+
+                if at_token(.LEFT_PAREN) {
+                    parser_error(
+                        proto_state,
+                        current_token(),
+                        "map key invalid; expected identifier shorthand or string literal, got call expression",
+                    )
+                    return ExprInvalid{}
+                }
+
+                if at_token(.LEFT_BRACKET) {
+                    parser_error(
+                        proto_state,
+                        current_token(),
+                        "map key invalid; expected identifier shorthand or string literal, got indexed expression",
+                    )
+                    return ExprInvalid{}
+                }
+
+                if at_token(.DOT) {
+                    parser_error(
+                        proto_state,
+                        current_token(),
+                        "map key invalid; expected identifier shorthand or string literal, got field or namespace expression",
+                    )
+                    return ExprInvalid{}
+                }
+
+            case .STRING:
+                key_text = key_token.value.(string)
+                advance_token()
+
+            case:
+                parser_error(
+                    proto_state,
+                    key_token,
+                    "map key invalid; expected identifier shorthand or string literal",
+                )
+                return ExprInvalid{}
+            }
+
+            for existing_key in key_texts {
+                if existing_key == key_text {
+                    parser_error(proto_state, key_token, fmt.tprintf("duplicate map key `%s`", key_text))
+                    return ExprInvalid{}
+                }
+            }
+            append(&key_texts, key_text)
+
+            consume_token(proto_state, .COLON, "map entry invalid; expected ':' after map key")
+            if Parser.failed { return ExprInvalid{} }
+
+            key_slot := claim_temp_slot(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+
+            key_const := const_string(proto_state, key_text)
+            if Parser.failed { return ExprInvalid{} }
+
+            emit_load_const(proto_state, key_slot, key_const)
+
+            value_slot := claim_temp_slot(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+
+            value_token := current_token()
+
+            value_expr := parse_expr(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+
+            #partial switch e in value_expr {
+            case ExprNil:
+                parser_error(
+                    proto_state,
+                    value_token,
+                    fmt.tprintf("invalid value for key `%s` in map literal; nil literals are not valid in map literals", key_text),
+                )
+                return ExprInvalid{}
+            }
+
+            lower_expr_to_slot(proto_state, value_expr, value_slot)
+            if Parser.failed { return ExprInvalid{} }
+
+            emit_index_set(proto_state, map_slot, key_slot, value_slot)
+            proto_state.next_temp_slot = map_slot + 1
+
+            if !at_token(.COMMA) {
+                break
+            }
+
+            advance_token()
+            if at_token(.RIGHT_BRACE) {
+                break
+            }
+        }
+    }
+
+    if !at_token(.RIGHT_BRACE) {
+        parser_error(proto_state, current_token(), "map entry invalid; expected ',' or '}' after map value")
+        return ExprInvalid{}
+    }
+
+    consume_token(proto_state, .RIGHT_BRACE, "expected '}' after map literal")
+    if Parser.failed { return ExprInvalid{} }
+
+    return ExprSlot{map_slot}
+}
+
 parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .LEFT_PAREN, "expected '(' to start grouped expression")
     if Parser.failed { return ExprInvalid{} }
@@ -559,8 +691,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 
     if at_token(.MAP) {
-        parser_error(proto_state, current_token(), "map literals are not implemented yet")
-        return ExprInvalid{}
+        return parse_map_literal(proto_state)
     }
 
     token := current_token()
@@ -810,27 +941,28 @@ finish_expr_list_to_slots :: proc(
     reserve_slots_until(proto_state, base_slot + wanted_count)
     if Parser.failed { return }
 
-    #partial switch e in last_expr {
-    case ExprCall:
-        if e.base_slot != last_dst {
+    call_expr, final_is_call := last_expr.(ExprCall)
+    if final_is_call {
+        if call_expr.base_slot != last_dst {
             parser_error(proto_state, current_token(), "internal error: call result base does not match expression-list destination")
             return
         }
 
-        set_call_requested_results(proto_state, e.call_index, wanted_from_last)
+        set_call_requested_results(proto_state, call_expr.call_index, wanted_from_last)
         if Parser.failed { return }
 
         if wanted_from_last > 1 {
             record_slots(proto_state, last_dst + wanted_from_last - 1)
         }
 
-    case:
-        lower_expr_to_slot(proto_state, last_expr, last_dst)
-        if Parser.failed { return }
+        return
+    }
 
-        for fill_index := previous_count + 1; fill_index < wanted_count; fill_index += 1 {
-            emit_load_nil(proto_state, base_slot + fill_index)
-        }
+    lower_expr_to_slot(proto_state, last_expr, last_dst)
+    if Parser.failed { return }
+
+    for fill_index := previous_count + 1; fill_index < wanted_count; fill_index += 1 {
+        emit_load_nil(proto_state, base_slot + fill_index)
     }
 }
 
