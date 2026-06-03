@@ -1,6 +1,5 @@
 // Kiln surface test.
 // Covers scanner -> parser -> codegen -> VM behavior for the implemented language core.
-// No binary operators yet, so no a+b, a<b, etc.
 
 // Basic literal forms.
 print("--- literals ---")
@@ -196,6 +195,38 @@ print(-0xFF)
 number_to_negate := 9
 print(-number_to_negate)
 print(--number_to_negate)
+
+// Arithmetic and comparison precedence.
+print("--- arithmetic and comparison ---")
+
+print(1 + 2 * 3)
+print((1 + 2) * 3)
+print(10 - 3 - 2)
+print(20 / 2 / 2)
+print(-1 + 2)
+print(-(1 + 2))
+print(1 + 2 * 3 == 7)
+
+print(1 < 2)
+print(2 <= 2)
+print(3 > 2)
+print(3 >= 3)
+print(1 == 1.0)
+print(1 != 2)
+
+if 1 + 2 * 3 == 7 {
+    print("precedence ok")
+}
+
+for 1 < 2 {
+    print("comparison for")
+    break
+}
+
+switch 6 {
+case 1 + 5: print("comparison switch")
+else:       print("comparison switch failed")
+}
 
 // Native globals installed by the host standard environment.
 print("--- builtins ---")

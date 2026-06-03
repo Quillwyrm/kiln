@@ -775,9 +775,142 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return parse_primary_expr(proto_state)
 }
 
-// Operator precedence parsing is not in this stage yet.
+parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    left := parse_unary_expr(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    // mulOp = "*" | "/".
+    for Parser.current_token.kind == .STAR || Parser.current_token.kind == .SLASH {
+        op_token := advance_token()
+
+        right := parse_unary_expr(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, left, lhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        rhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, right, rhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        if op_token.kind == .STAR {
+            emit_mul(proto_state, lhs_slot, lhs_slot, rhs_slot)
+        } else {
+            emit_div(proto_state, lhs_slot, lhs_slot, rhs_slot)
+        }
+
+        // Only the accumulated left result remains live after the binary op.
+        proto_state.next_temp_slot = lhs_slot + 1
+        left = ExprSlot{lhs_slot}
+    }
+
+    return left
+}
+
+parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    left := parse_mul_expr(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    // addOp = "+" | "-".
+    for Parser.current_token.kind == .PLUS || Parser.current_token.kind == .MINUS {
+        op_token := advance_token()
+
+        right := parse_mul_expr(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, left, lhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        rhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, right, rhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        if op_token.kind == .PLUS {
+            emit_add(proto_state, lhs_slot, lhs_slot, rhs_slot)
+        } else {
+            emit_sub(proto_state, lhs_slot, lhs_slot, rhs_slot)
+        }
+
+        // Only the accumulated left result remains live after the binary op.
+        proto_state.next_temp_slot = lhs_slot + 1
+        left = ExprSlot{lhs_slot}
+    }
+
+    return left
+}
+
+parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    left := parse_add_expr(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    // compareOp = "==" | "!=" | "<" | "<=" | ">" | ">=".
+    #partial switch Parser.current_token.kind {
+    case .EQUAL, .NOT_EQUAL, .LESS, .LESS_OR_EQUAL, .GREATER, .GREATER_OR_EQUAL:
+        op_token := advance_token()
+
+        right := parse_add_expr(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, left, lhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        rhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, right, rhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        #partial switch op_token.kind {
+        case .EQUAL:
+            emit_equal(proto_state, lhs_slot, lhs_slot, rhs_slot)
+
+        case .NOT_EQUAL:
+            emit_equal(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_not(proto_state, lhs_slot, lhs_slot)
+
+        case .LESS:
+            emit_less(proto_state, lhs_slot, lhs_slot, rhs_slot)
+
+        case .LESS_OR_EQUAL:
+            emit_less_or_equal(proto_state, lhs_slot, lhs_slot, rhs_slot)
+
+        case .GREATER:
+            emit_less(proto_state, lhs_slot, rhs_slot, lhs_slot)
+
+        case .GREATER_OR_EQUAL:
+            emit_less_or_equal(proto_state, lhs_slot, rhs_slot, lhs_slot)
+        }
+
+        // Only the accumulated left result remains live after the binary op.
+        proto_state.next_temp_slot = lhs_slot + 1
+        left = ExprSlot{lhs_slot}
+
+        // compareExpr allows one compareOp, not a chain.
+        #partial switch Parser.current_token.kind {
+        case .EQUAL, .NOT_EQUAL, .LESS, .LESS_OR_EQUAL, .GREATER, .GREATER_OR_EQUAL:
+            parser_error(proto_state, Parser.current_token, "comparison chaining is not valid; use parentheses or split the expression")
+            return ExprInvalid{}
+        }
+    }
+
+    return left
+}
+
 parse_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    return parse_unary_expr(proto_state)
+    return parse_compare_expr(proto_state)
 }
 
 
