@@ -209,21 +209,22 @@ end_scope :: proc(proto_state: ^ProtoState) {
     proto_state.next_temp_slot = proto_state.local_count
 }
 
-// add_local_binding commits a name to the next local frame slot.
+// local_binding_append appends a name to the next local frame slot.
 // Caller must have already validated: no duplicate in scope, capacity available.
-add_local_binding :: proc(proto_state: ^ProtoState, name: string) -> int {
+local_binding_append :: proc(proto_state: ^ProtoState, name: string, is_mutable: bool) -> int {
     slot := proto_state.local_count
     proto_state.local_bindings[slot] = LocalBinding{
         name       = name,
         frame_slot = slot,
+        is_mutable = is_mutable,
     }
     proto_state.local_count += 1
     proto_state.next_temp_slot = proto_state.local_count
     return slot
 }
 
-// Reverse scan returns the index of the most recently declared matching local, or -1 if not found.
-resolve_local_index :: proc(proto_state: ^ProtoState, ident_name: string) -> int {
+// local_binding_find returns the most recently declared matching local index, or -1 if absent.
+local_binding_find :: proc(proto_state: ^ProtoState, ident_name: string) -> int {
     for idx := proto_state.local_count - 1; idx >= 0; idx -= 1 {
         if proto_state.local_bindings[idx].name == ident_name {
             return idx
@@ -404,7 +405,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
             }
         }
 
-        add_local_binding(&child_proto_state, param_name)
+        local_binding_append(&child_proto_state, param_name, true)
     }
 
     parse_function_body(&child_proto_state)
@@ -442,12 +443,12 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
 resolve_ident_expr :: proc(proto_state: ^ProtoState, token: Token) -> ExprDesc {
     ident_name := token.value.(string)
-    local_index := resolve_local_index(proto_state, ident_name)
+    local_index := local_binding_find(proto_state, ident_name)
     if local_index >= 0 {
         return ExprLocal{local_index}
     }
 
-    binding_index := binding_find(&Active_State.global_env, ident_name)
+    binding_index := binding_table_find(&Active_State.global_env, ident_name)
     if binding_index < 0 {
         parser_error(proto_state, token, fmt.tprintf("unknown name `%s`", ident_name))
         return ExprInvalid{}
@@ -1214,7 +1215,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (
     return
 }
 
-finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token) {
+finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutable: bool) {
     advance_token()
 
     lhs_count := len(lhs_tokens)
@@ -1234,7 +1235,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token) {
             }
         }
 
-        global_index := binding_find(&Active_State.global_env, check_name)
+        global_index := binding_table_find(&Active_State.global_env, check_name)
         if global_index >= 0 {
             parser_error(
                 proto_state,
@@ -1293,7 +1294,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token) {
 
     // Commit names to the slots that already hold the RHS values.
     for target_index := 0; target_index < lhs_count; target_index += 1 {
-        add_local_binding(proto_state, lhs_tokens[target_index].value.(string))
+        local_binding_append(proto_state, lhs_tokens[target_index].value.(string), is_mutable)
     }
 }
 
@@ -1309,14 +1310,32 @@ finish_assign_stmt :: proc(
         if is_plain_ident[target_index] {
             ident_text := lhs_tokens[target_index].value.(string)
 
-            local_index := resolve_local_index(proto_state, ident_text)
+            local_index := local_binding_find(proto_state, ident_text)
             if local_index >= 0 {
+                if !proto_state.local_bindings[local_index].is_mutable {
+                    parser_error(
+                        proto_state,
+                        lhs_tokens[target_index],
+                        fmt.tprintf("cannot assign to immutable binding `%s`", ident_text),
+                    )
+                    return
+                }
+
                 targets[target_index] = ExprLocal{local_index}
                 continue
             }
 
-            global_index := binding_find(&Active_State.global_env, ident_text)
+            global_index := binding_table_find(&Active_State.global_env, ident_text)
             if global_index >= 0 {
+                if !Active_State.global_env.is_mutable[global_index] {
+                    parser_error(
+                        proto_state,
+                        lhs_tokens[target_index],
+                        fmt.tprintf("cannot assign to immutable binding `%s`", ident_text),
+                    )
+                    return
+                }
+
                 targets[target_index] = ExprGlobal{BindingId(global_index)}
                 continue
             }
@@ -1392,18 +1411,18 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
         advance_token()
     }
 
-    if at_token(.CONST_DECL) {
-        parser_error(proto_state, current_token(), "global const declarations are not implemented yet")
-        return
-    }
-
     if at_token(.ASSIGN) {
         parser_error(proto_state, current_token(), "global declarations use ':=' or '::', not '='")
         return
     }
 
-    if !at_token(.DECL) {
-        parser_error(proto_state, current_token(), "expected ':=' after global declaration name list")
+    is_mutable: bool
+    if at_token(.DECL) {
+        is_mutable = true
+    } else if at_token(.IMMUTABLE_DECL) {
+        is_mutable = false
+    } else {
+        parser_error(proto_state, current_token(), "expected ':=' or '::' after global declaration name list")
         return
     }
     advance_token()
@@ -1422,7 +1441,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             }
         }
 
-        global_index := binding_find(&Active_State.global_env, check_name)
+        global_index := binding_table_find(&Active_State.global_env, check_name)
         if global_index >= 0 {
             parser_error(
                 proto_state,
@@ -1432,7 +1451,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             return
         }
 
-        local_index := resolve_local_index(proto_state, check_name)
+        local_index := local_binding_find(proto_state, check_name)
         if local_index >= 0 {
             parser_error(
                 proto_state,
@@ -1450,7 +1469,11 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     global_count_before := Active_State.global_env.count
     for target_index := 0; target_index < lhs_count; target_index += 1 {
-        binding_ids[target_index] = binding_add(&Active_State.global_env, lhs_tokens[target_index].value.(string))
+        binding_ids[target_index] = binding_table_append(
+            &Active_State.global_env,
+            lhs_tokens[target_index].value.(string),
+            is_mutable,
+        )
     }
 
     rhs_base := proto_state.next_temp_slot
@@ -1543,12 +1566,19 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             }
         }
 
-        finish_decl_stmt(proto_state, lhs_tokens[:lhs_count])
+        finish_decl_stmt(proto_state, lhs_tokens[:lhs_count], true)
         return
     }
 
-    if at_token(.CONST_DECL) {
-        parser_error(proto_state, current_token(), "const declarations are not implemented yet")
+    if at_token(.IMMUTABLE_DECL) {
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            if !plain_ident[target_index] {
+                parser_error(proto_state, lhs_tokens[target_index], "declaration target must be an identifier")
+                return
+            }
+        }
+
+        finish_decl_stmt(proto_state, lhs_tokens[:lhs_count], false)
         return
     }
 

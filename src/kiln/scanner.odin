@@ -39,9 +39,9 @@ TokenKind :: enum {
     MAP,
 
     // Binding Operators
-    DECL,       // :=
-    CONST_DECL, // ::
-    ASSIGN,     // =
+    DECL,           // :=
+    IMMUTABLE_DECL, // ::
+    ASSIGN,         // =
 
     // Arithmetic Operators
     PLUS,
@@ -373,7 +373,7 @@ scan_symbol :: proc() -> Token {
         if match_next('=') {
             return make_token(.DECL)
         } else if match_next(':') {
-            return make_token(.CONST_DECL)
+            return make_token(.IMMUTABLE_DECL)
         } else {
             return make_token(.COLON)
         }

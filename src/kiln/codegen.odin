@@ -22,8 +22,9 @@ MAX_JUMP_OFFSET :: 8388607
 
 // LocalBinding maps an identifier name to a frame slot index.
 LocalBinding :: struct {
-    name: string,
+    name:       string,
     frame_slot: int,
+    is_mutable: bool,
 }
 
 // Proto state ====================================================================================

@@ -185,9 +185,10 @@ BindingId :: distinct int
 // BindingTable is a named value namespace.
 // BindingId values are indexes into one specific BindingTable.
 BindingTable :: struct {
-    names:  [MAX_BINDINGS]string,
-    values: [MAX_BINDINGS]Value,
-    count:  int,
+    names:      [MAX_BINDINGS]string,
+    values:     [MAX_BINDINGS]Value,
+    is_mutable: [MAX_BINDINGS]bool,
+    count:      int,
 }
 
 
@@ -229,8 +230,8 @@ Active_State: ^State
 
 // Binding table primitives =======================================================================
 
-// binding_find returns the binding index for name, or -1 when name is absent.
-binding_find :: proc(table: ^BindingTable, name: string) -> int {
+// binding_table_find returns the binding index for name, or -1 when name is absent.
+binding_table_find :: proc(table: ^BindingTable, name: string) -> int {
     for binding_index := 0; binding_index < table.count; binding_index += 1 {
         if table.names[binding_index] == name {
             return binding_index
@@ -240,10 +241,11 @@ binding_find :: proc(table: ^BindingTable, name: string) -> int {
     return -1
 }
 
-// binding_add appends a new binding. Caller owns duplicate and capacity policy.
-binding_add :: proc(table: ^BindingTable, name: string) -> BindingId {
+// binding_table_append appends a new binding. Caller owns duplicate and capacity policy.
+binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: bool) -> BindingId {
     binding_id := BindingId(table.count)
     table.names[table.count] = name
+    table.is_mutable[table.count] = is_mutable
     table.count += 1
     return binding_id
 }
@@ -255,7 +257,7 @@ binding_add :: proc(table: ^BindingTable, name: string) -> BindingId {
 
 // bind_native_global installs one native callable into global_env by binding name.
 bind_native_global :: proc(name: string, native_proc: NativeFunction) {
-    binding_index := binding_find(&Active_State.global_env, name)
+    binding_index := binding_table_find(&Active_State.global_env, name)
 
     binding_id: BindingId
     if binding_index >= 0 {
@@ -266,8 +268,9 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
             return
         }
 
-        binding_id = binding_add(&Active_State.global_env, name)
+        binding_id = binding_table_append(&Active_State.global_env, name, false)
     }
+    Active_State.global_env.is_mutable[int(binding_id)] = false
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION

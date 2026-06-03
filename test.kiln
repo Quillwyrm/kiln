@@ -43,37 +43,49 @@ print(score)
 score = 99
 print(score)
 
-make_global := function() {
+make_global :: function() {
     global inner_global := "from function"
 }
 make_global()
 print(inner_global)
 
-global global_fn := function() {
+global global_fn :: function() {
     return score
 }
 print(global_fn())
 
-set_score := function() {
+set_score :: function() {
     score = 77
 }
 set_score()
 print(score)
 
+print("--- immutable bindings ---")
+
+answer :: 42
+print(answer)
+
+fixed_items :: [1, 2]
+fixed_items[0] = 99
+print(fixed_items[0])
+
+global global_answer :: "locked"
+print(global_answer)
+
 print("--- functions ---")
 
 // Identity function.
-id := function(v) {
+id :: function(v) {
     return v
 }
 print(id("identity"))
 
 // No-op.
-noop := function() {}
+noop :: function() {}
 print(noop())
 
 // Parameter shadowing.
-shadow := function(a) {
+shadow :: function(a) {
     if true {
         a := "inner"
         print(a)
@@ -83,19 +95,31 @@ shadow := function(a) {
 shadow("outer")
 
 // Missing args filled with nil.
-partial := function(a, b, c) {
+partial :: function(a, b, c) {
     print(a, b, c)
 }
 partial(1)
 
 // Multi-value return.
-two_vals := function() {
+two_vals :: function() {
     return 7, 9
 }
 print(two_vals())
 
 // Call in statement position.
 print("statement call")
+
+print("--- function patching ---")
+
+patchable := function() {
+    print("patch one")
+}
+patchable()
+
+patchable = function() {
+    print("patch two")
+}
+patchable()
 
 // ── Control Flow ─────────────────────────────────────────────────────────────────────────────────
 
@@ -132,26 +156,19 @@ print("--- switch ---")
 
 status := 200
 switch status {
-case 200:
-    print("ok")
-case 404:
-    print("not found")
-else:
-    print("unknown")
+case 200: print("ok")
+case 404: print("not found")
+else:     print("unknown")
 }
 
 switch "same" {
-case "same":
-    print("string text equal")
-else:
-    print("string equality failed")
+case "same": print("string text equal")
+else:        print("string equality failed")
 }
 
 switch {
-case true:
-    print("subjectless")
-else:
-    print("not taken")
+case true: print("subjectless")
+else:      print("not taken")
 }
 
 // Nested switch.
@@ -160,10 +177,8 @@ inner := 2
 switch outer {
 case 1:
     switch inner {
-    case 2:
-        print("nested switch")
-    else:
-        print("inner else")
+    case 2: print("nested switch")
+    else:   print("inner else")
     }
 else:
     print("outer else")
@@ -228,14 +243,14 @@ a1, b1 := 1
 print(a1, b1)
 
 // Direct call expansion
-pair0 := function() {
+pair0 :: function() {
     return 10, 20
 }
 a2, b2 := pair0()
 print(a2, b2)
 
 // Call inside comma list does not expand
-pair1 := function() {
+pair1 :: function() {
     return 10, 20
 }
 a3, b3 := pair1(), 99
@@ -248,7 +263,7 @@ a4, b4 = b4, a4
 print(a4, b4)
 
 // Assignment from direct call
-pair2 := function() {
+pair2 :: function() {
     return 3, 4
 }
 a5 := 1
@@ -272,7 +287,7 @@ right := [2]
 left[0], right[0] = right[0], left[0]
 print(left[0], right[0])
 
-make_printer := function() {
+make_printer :: function() {
     return function() {
         print("chained call")
     }
@@ -297,43 +312,43 @@ callbacks[0]()
 print((items[1]))
 
 print("--- return forwarding ---")
-many_values := function() {
+many_values :: function() {
     return 1, 2, 3
 }
-forward_many := function(fn) {
+forward_many :: function(fn) {
     return fn()
 }
 rf_a, rf_b, rf_c := forward_many(many_values)
 print(rf_a, rf_b, rf_c)
 
-prefix_many := function(fn) {
+prefix_many :: function(fn) {
     return 9, fn()
 }
 rp_a, rp_b, rp_c, rp_d := prefix_many(many_values)
 print(rp_a, rp_b, rp_c, rp_d)
 
-left_values := function() {
+left_values :: function() {
     return 7, 8
 }
-right_values := function() {
+right_values :: function() {
     return 10, 11
 }
-final_only := function(left, right) {
+final_only :: function(left, right) {
     return left(), right()
 }
 ro_a, ro_b, ro_c := final_only(left_values, right_values)
 print(ro_a, ro_b, ro_c)
 
-no_values := function() {
+no_values :: function() {
     return
 }
-prefix_empty := function(fn) {
+prefix_empty :: function(fn) {
     return 5, fn()
 }
 re_a, re_b := prefix_empty(no_values)
 print(re_a, re_b)
 
-indexed_final := function() {
+indexed_final :: function() {
     funcs := [
         function() {
             return 20, 21
@@ -344,7 +359,7 @@ indexed_final := function() {
 ri_a, ri_b, ri_c := indexed_final()
 print(ri_a, ri_b, ri_c)
 
-native_final := function() {
+native_final :: function() {
     return type(123)
 }
 print(native_final())
