@@ -36,6 +36,30 @@ if true {
 
 // ── Functions ────────────────────────────────────────────────────────────────────────────────────
 
+print("--- globals ---")
+
+global score := 42
+print(score)
+score = 99
+print(score)
+
+make_global := function() {
+    global inner_global := "from function"
+}
+make_global()
+print(inner_global)
+
+global global_fn := function() {
+    return score
+}
+print(global_fn())
+
+set_score := function() {
+    score = 77
+}
+set_score()
+print(score)
+
 print("--- functions ---")
 
 // Identity function.
@@ -116,6 +140,13 @@ else:
     print("unknown")
 }
 
+switch "same" {
+case "same":
+    print("string text equal")
+else:
+    print("string equality failed")
+}
+
 switch {
 case true:
     print("subjectless")
@@ -147,6 +178,15 @@ print(!true)
 print(!nil)
 print(!0)
 print(!!"nested")
+
+print("--- unary minus ---")
+
+print(-42)
+print(-3.14)
+print(-0xFF)
+neg_source := 9
+print(-neg_source)
+print(--neg_source)
 
 // ── Builtins ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -255,6 +295,59 @@ callbacks[0] = function() {
 callbacks[0]()
 
 print((items[1]))
+
+print("--- return forwarding ---")
+many_values := function() {
+    return 1, 2, 3
+}
+forward_many := function(fn) {
+    return fn()
+}
+rf_a, rf_b, rf_c := forward_many(many_values)
+print(rf_a, rf_b, rf_c)
+
+prefix_many := function(fn) {
+    return 9, fn()
+}
+rp_a, rp_b, rp_c, rp_d := prefix_many(many_values)
+print(rp_a, rp_b, rp_c, rp_d)
+
+left_values := function() {
+    return 7, 8
+}
+right_values := function() {
+    return 10, 11
+}
+final_only := function(left, right) {
+    return left(), right()
+}
+ro_a, ro_b, ro_c := final_only(left_values, right_values)
+print(ro_a, ro_b, ro_c)
+
+no_values := function() {
+    return
+}
+prefix_empty := function(fn) {
+    return 5, fn()
+}
+re_a, re_b := prefix_empty(no_values)
+print(re_a, re_b)
+
+indexed_final := function() {
+    funcs := [
+        function() {
+            return 20, 21
+        },
+    ]
+    return 19, funcs[0]()
+}
+ri_a, ri_b, ri_c := indexed_final()
+print(ri_a, ri_b, ri_c)
+
+native_final := function() {
+    return type(123)
+}
+print(native_final())
 
 // ── Delayed commit ────────────────────────────────────────────────────────────────────────────────
 

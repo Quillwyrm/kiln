@@ -418,13 +418,14 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
 
 // Calls and returns ==============================================================================
 
-// Records the highest slot touched by this call layout, including requested result slots.
+// Records the highest fixed slot touched by this call layout.
+// Open-result calls record the callee/args only; produced result count is runtime data.
 // Returns the bytecode index of the emitted CALL instruction.
 emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_results: int) -> int {
     call_index := next_inst_index(proto_state)
 
     occupied_call_slots := arg_count + 1
-    if requested_results > occupied_call_slots {
+    if requested_results != CALL_OPEN_RESULTS && requested_results > occupied_call_slots {
         occupied_call_slots = requested_results
     }
     record_slots(proto_state, call_base + occupied_call_slots - 1)
@@ -443,7 +444,7 @@ emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_resu
 // set_call_requested_results rewrites the requested-result operand of a previously emitted CALL.
 // It enforces the u8 operand limit for the CALL result count.
 set_call_requested_results :: proc(proto_state: ^ProtoState, call_index, result_count: int) {
-    if result_count < 0 || result_count > 255 {
+    if result_count < 0 || result_count >= CALL_OPEN_RESULTS {
         set_error(proto_state.origin, "too many call results")
         Parser.failed = true
         return
@@ -455,8 +456,16 @@ set_call_requested_results :: proc(proto_state: ^ProtoState, call_index, result_
     proto_state.bytecode[call_index] = u32(inst)
 }
 
+// set_call_open_results rewrites a previously emitted CALL to produce an open result range.
+set_call_open_results :: proc(proto_state: ^ProtoState, call_index: int) {
+    word := proto_state.bytecode[call_index]
+    inst := InstABC(word)
+    inst.c = u8(CALL_OPEN_RESULTS)
+    proto_state.bytecode[call_index] = u32(inst)
+}
+
 emit_return :: proc(proto_state: ^ProtoState, first_slot, result_count: int) {
-    if result_count > 0 {
+    if result_count != RETURN_OPEN_RESULTS && result_count > 0 {
         record_slots(proto_state, first_slot + result_count - 1)
     }
 

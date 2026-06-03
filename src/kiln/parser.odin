@@ -304,6 +304,9 @@ lower_slot_to_assignment_target :: proc(proto_state: ^ProtoState, src_slot: int,
             emit_move(proto_state, dst_slot, src_slot)
         }
 
+    case ExprGlobal:
+        emit_set_global(proto_state, src_slot, t.binding_id)
+
     case ExprIndex:
         emit_index_set(proto_state, t.container_slot, t.key_slot, src_slot)
 
@@ -444,13 +447,13 @@ resolve_ident_expr :: proc(proto_state: ^ProtoState, token: Token) -> ExprDesc {
         return ExprLocal{local_index}
     }
 
-    binding_id, found_global := resolve_global(ident_name)
-    if !found_global {
+    binding_index := binding_find(&Active_State.global_env, ident_name)
+    if binding_index < 0 {
         parser_error(proto_state, token, fmt.tprintf("unknown name `%s`", ident_name))
         return ExprInvalid{}
     }
 
-    return ExprGlobal{binding_id}
+    return ExprGlobal{BindingId(binding_index)}
 }
 
 parse_basic_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
@@ -718,6 +721,25 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         return ExprSlot{result_slot}
     }
 
+    if at_token(.MINUS) {
+        advance_token()
+
+        operand := parse_unary_expr(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        operand_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_to_slot(proto_state, operand, operand_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        result_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        emit_neg(proto_state, result_slot, operand_slot)
+        return ExprSlot{result_slot}
+    }
+
     return parse_primary_expr(proto_state)
 }
 
@@ -971,11 +993,6 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         parser_error(proto_state, current_token(), "expected 'case', 'else', or '}' in switch")
         return
     }
-    if at_token(.RIGHT_BRACE) {
-        parser_error(proto_state, current_token(), "switch body must have at least one arm")
-        return
-    }
-
     end_jumps: [256]int
     end_jump_count := 0
 
@@ -1099,8 +1116,8 @@ parse_break_stmt :: proc(proto_state: ^ProtoState) {
     proto_state.break_fixup_count += 1
 }
 
-// return, return expr, or return a, b, c. Each value expression is lowered as a single-result expression.
-// No return-call forwarding: return f() returns exactly one value (the first result of f()).
+// return, return expr, or return a, b, c.
+// Non-final expressions produce one value. A final call returns its open result range.
 parse_return_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RETURN, "expected 'return'")
     if Parser.failed { return }
@@ -1117,6 +1134,28 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
 
     if expr_count > MAX_FRAME_SLOTS {
         parser_error(proto_state, current_token(), "return has too many values")
+        return
+    }
+
+    call_expr, final_is_call := last_expr.(ExprCall)
+    if final_is_call {
+        prefix_count := expr_count - 1
+        return_base := call_expr.base_slot - prefix_count
+        if return_base < 0 {
+            parser_error(proto_state, current_token(), "internal error: open return call overlaps fixed return prefix")
+            return
+        }
+
+        // If evaluating the final callee used temp slots, compact the already
+        // lowered fixed prefix so it sits directly before the open call results.
+        if return_base != base_slot && prefix_count > 0 {
+            for move_index := prefix_count - 1; move_index >= 0; move_index -= 1 {
+                emit_move(proto_state, return_base + move_index, base_slot + move_index)
+            }
+        }
+
+        set_call_open_results(proto_state, call_expr.call_index)
+        emit_return(proto_state, return_base, RETURN_OPEN_RESULTS)
         return
     }
 
@@ -1165,7 +1204,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (
         }
 
         if at_token(.DOT) {
-            parser_error(proto_state, current_token(), "field access is not implemented yet")
+            parser_error(proto_state, current_token(), "field/namespace access is not implemented yet")
             return
         }
 
@@ -1193,6 +1232,16 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token) {
                 )
                 return
             }
+        }
+
+        global_index := binding_find(&Active_State.global_env, check_name)
+        if global_index >= 0 {
+            parser_error(
+                proto_state,
+                lhs_tokens[check_index],
+                fmt.tprintf("local variable `%s` cannot shadow global binding", check_name),
+            )
+            return
         }
 
         scope_start := 0
@@ -1261,17 +1310,23 @@ finish_assign_stmt :: proc(
             ident_text := lhs_tokens[target_index].value.(string)
 
             local_index := resolve_local_index(proto_state, ident_text)
-            if local_index < 0 {
-                parser_error(
-                    proto_state,
-                    lhs_tokens[target_index],
-                    fmt.tprintf("assignment target `%s` is not a local variable", ident_text),
-                )
-                return
+            if local_index >= 0 {
+                targets[target_index] = ExprLocal{local_index}
+                continue
             }
 
-            targets[target_index] = ExprLocal{local_index}
-            continue
+            global_index := binding_find(&Active_State.global_env, ident_text)
+            if global_index >= 0 {
+                targets[target_index] = ExprGlobal{BindingId(global_index)}
+                continue
+            }
+
+            parser_error(
+                proto_state,
+                lhs_tokens[target_index],
+                fmt.tprintf("assignment target `%s` is not a declared binding", ident_text),
+            )
+            return
         }
 
         #partial switch target in targets[target_index] {
@@ -1306,6 +1361,133 @@ finish_assign_stmt :: proc(
     for target_index := 0; target_index < target_count; target_index += 1 {
         lower_slot_to_assignment_target(proto_state, rhs_base + target_index, targets[target_index])
         if Parser.failed { return }
+    }
+}
+
+parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
+    global_token := advance_token()
+
+    lhs_tokens: [MAX_BINDINGS]Token
+    binding_ids: [MAX_BINDINGS]BindingId
+    lhs_count := 0
+
+    for {
+        if lhs_count >= MAX_BINDINGS {
+            parser_error(proto_state, current_token(), "too many global declaration names")
+            return
+        }
+
+        if !at_token(.IDENT) {
+            parser_error(proto_state, current_token(), "expected identifier in global declaration")
+            return
+        }
+
+        lhs_tokens[lhs_count] = advance_token()
+        lhs_count += 1
+
+        if !at_token(.COMMA) {
+            break
+        }
+
+        advance_token()
+    }
+
+    if at_token(.CONST_DECL) {
+        parser_error(proto_state, current_token(), "global const declarations are not implemented yet")
+        return
+    }
+
+    if at_token(.ASSIGN) {
+        parser_error(proto_state, current_token(), "global declarations use ':=' or '::', not '='")
+        return
+    }
+
+    if !at_token(.DECL) {
+        parser_error(proto_state, current_token(), "expected ':=' after global declaration name list")
+        return
+    }
+    advance_token()
+
+    for check_index := 0; check_index < lhs_count; check_index += 1 {
+        check_name := lhs_tokens[check_index].value.(string)
+
+        for prev_index := 0; prev_index < check_index; prev_index += 1 {
+            if lhs_tokens[prev_index].value.(string) == check_name {
+                parser_error(
+                    proto_state,
+                    lhs_tokens[check_index],
+                    fmt.tprintf("duplicate global declaration name `%s`", check_name),
+                )
+                return
+            }
+        }
+
+        global_index := binding_find(&Active_State.global_env, check_name)
+        if global_index >= 0 {
+            parser_error(
+                proto_state,
+                lhs_tokens[check_index],
+                fmt.tprintf("global binding `%s` is already declared", check_name),
+            )
+            return
+        }
+
+        local_index := resolve_local_index(proto_state, check_name)
+        if local_index >= 0 {
+            parser_error(
+                proto_state,
+                lhs_tokens[check_index],
+                fmt.tprintf("global binding `%s` conflicts with local variable", check_name),
+            )
+            return
+        }
+    }
+
+    if Active_State.global_env.count + lhs_count > MAX_BINDINGS {
+        parser_error(proto_state, global_token, "too many global bindings")
+        return
+    }
+
+    global_count_before := Active_State.global_env.count
+    for target_index := 0; target_index < lhs_count; target_index += 1 {
+        binding_ids[target_index] = binding_add(&Active_State.global_env, lhs_tokens[target_index].value.(string))
+    }
+
+    rhs_base := proto_state.next_temp_slot
+
+    if lhs_count == 1 && at_token(.FUNCTION) {
+        ident_text := lhs_tokens[0].value.(string)
+        parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
+        if Parser.failed {
+            Active_State.global_env.count = global_count_before
+            return
+        }
+    } else {
+        expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
+        if Parser.failed {
+            Active_State.global_env.count = global_count_before
+            return
+        }
+
+        if expr_count > lhs_count {
+            Active_State.global_env.count = global_count_before
+            parser_error(
+                proto_state,
+                current_token(),
+                fmt.tprintf("too many values in global declaration: expected %d", lhs_count),
+            )
+            return
+        }
+
+        finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
+        if Parser.failed {
+            Active_State.global_env.count = global_count_before
+            return
+        }
+    }
+
+    for target_index := 0; target_index < lhs_count; target_index += 1 {
+        emit_set_global(proto_state, rhs_base + target_index, binding_ids[target_index])
     }
 }
 
@@ -1435,7 +1617,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if at_token(.GLOBAL) {
-        parser_error(proto_state, current_token(), "global declarations are not implemented yet")
+        parse_global_decl_stmt(proto_state)
         return
     }
 

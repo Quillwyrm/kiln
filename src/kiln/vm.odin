@@ -56,6 +56,11 @@ Opcode :: enum u8 {
     SET_GLOBAL,    // ABx: A=src, B=binding_id
 }
 
+// Count operand sentinels.
+// CALL.C is u8. RETURN.B is u16.
+CALL_OPEN_RESULTS :: 255
+RETURN_OPEN_RESULTS :: 65535
+
 
 // Instruction layout types =======================================================================
 // Types used to pack and decode instruction words.
@@ -196,6 +201,8 @@ CallFrame :: struct {
 
     return_slot_base:         int,
     requested_results:   int,
+    open_result_base:         int,
+    open_result_count:        int,
 
     caller_slot_count: int,
 }
@@ -220,49 +227,46 @@ State :: struct {
 Active_State: ^State
 
 
+// Binding table primitives =======================================================================
+
+// binding_find returns the binding index for name, or -1 when name is absent.
+binding_find :: proc(table: ^BindingTable, name: string) -> int {
+    for binding_index := 0; binding_index < table.count; binding_index += 1 {
+        if table.names[binding_index] == name {
+            return binding_index
+        }
+    }
+
+    return -1
+}
+
+// binding_add appends a new binding. Caller owns duplicate and capacity policy.
+binding_add :: proc(table: ^BindingTable, name: string) -> BindingId {
+    binding_id := BindingId(table.count)
+    table.names[table.count] = name
+    table.count += 1
+    return binding_id
+}
+
+
 // Global bindings ================================================================================
 // Global binding helpers operate on Active_State.global_env.
 // Public host entry points select Active_State before these helpers run.
 
-// declare_global returns a BindingId for binding_name.
-// If the name exists, it returns the existing id.
-// Otherwise it appends a new binding and returns its id.
-// The bool is false only when the fixed binding table is full.
-declare_global :: proc(binding_name: string) -> (BindingId, bool) {
-    for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
-        if Active_State.global_env.names[binding_index] == binding_name {
-            return BindingId(binding_index), true
-        }
-    }
-
-    if Active_State.global_env.count >= MAX_BINDINGS {
-        set_error(SourceLocation{}, "too many global bindings")
-        return {}, false
-    }
-
-    binding_id := BindingId(Active_State.global_env.count)
-    Active_State.global_env.names[Active_State.global_env.count] = binding_name
-    Active_State.global_env.count += 1
-
-    return binding_id, true
-}
-
-// resolve_global looks up an existing binding name without creating one.
-resolve_global :: proc(binding_name: string) -> (binding_id: BindingId, found: bool) {
-    for binding_index := 0; binding_index < Active_State.global_env.count; binding_index += 1 {
-        if Active_State.global_env.names[binding_index] == binding_name {
-            return BindingId(binding_index), true
-        }
-    }
-
-    return {}, false
-}
-
 // bind_native_global installs one native callable into global_env by binding name.
 bind_native_global :: proc(name: string, native_proc: NativeFunction) {
-    binding_id, has_binding_id := declare_global(name)
-    if !has_binding_id {
-        return
+    binding_index := binding_find(&Active_State.global_env, name)
+
+    binding_id: BindingId
+    if binding_index >= 0 {
+        binding_id = BindingId(binding_index)
+    } else {
+        if Active_State.global_env.count >= MAX_BINDINGS {
+            set_error(SourceLocation{}, "too many global bindings")
+            return
+        }
+
+        binding_id = binding_add(&Active_State.global_env, name)
     }
 
     native_function := new(NativeFunctionObject)
@@ -274,7 +278,6 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
 
 // Execution primitives ===========================================================================
-// Type failures in these helpers are VM bugs until converted to user-facing runtime errors.
 
 
 decode_op :: proc(word: u32) -> Opcode {
@@ -295,8 +298,6 @@ value_add :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(f64(left_int) + right_float)
         }
-
-        panic("ADD expected numbers")
     }
 
     left_float, is_float := lhs.(f64)
@@ -310,11 +311,14 @@ value_add :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(left_float + right_float)
         }
-
-        panic("ADD expected numbers")
     }
 
-    panic("ADD expected numbers")
+    runtime_error(fmt.tprintf(
+        "invalid `+`; expected numbers, got `%s` and `%s`",
+        value_type_to_string(lhs),
+        value_type_to_string(rhs),
+    ))
+    return Value{}
 }
 
 value_sub :: proc(lhs, rhs: Value) -> Value {
@@ -329,8 +333,6 @@ value_sub :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(f64(left_int) - right_float)
         }
-
-        panic("SUB expected numbers")
     }
 
     left_float, is_float := lhs.(f64)
@@ -344,11 +346,14 @@ value_sub :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(left_float - right_float)
         }
-
-        panic("SUB expected numbers")
     }
 
-    panic("SUB expected numbers")
+    runtime_error(fmt.tprintf(
+        "invalid `-`; expected numbers, got `%s` and `%s`",
+        value_type_to_string(lhs),
+        value_type_to_string(rhs),
+    ))
+    return Value{}
 }
 
 value_mul :: proc(lhs, rhs: Value) -> Value {
@@ -363,8 +368,6 @@ value_mul :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(f64(left_int) * right_float)
         }
-
-        panic("MUL expected numbers")
     }
 
     left_float, is_float := lhs.(f64)
@@ -378,11 +381,14 @@ value_mul :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(left_float * right_float)
         }
-
-        panic("MUL expected numbers")
     }
 
-    panic("MUL expected numbers")
+    runtime_error(fmt.tprintf(
+        "invalid `*`; expected numbers, got `%s` and `%s`",
+        value_type_to_string(lhs),
+        value_type_to_string(rhs),
+    ))
+    return Value{}
 }
 
 value_div :: proc(lhs, rhs: Value) -> Value {
@@ -397,8 +403,6 @@ value_div :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(f64(left_int) / right_float)
         }
-
-        panic("DIV expected numbers")
     }
 
     left_float, is_float := lhs.(f64)
@@ -412,11 +416,14 @@ value_div :: proc(lhs, rhs: Value) -> Value {
         if is_float {
             return Value(left_float / right_float)
         }
-
-        panic("DIV expected numbers")
     }
 
-    panic("DIV expected numbers")
+    runtime_error(fmt.tprintf(
+        "invalid `/`; expected numbers, got `%s` and `%s`",
+        value_type_to_string(lhs),
+        value_type_to_string(rhs),
+    ))
+    return Value{}
 }
 
 value_neg :: proc(value: Value) -> Value {
@@ -430,7 +437,11 @@ value_neg :: proc(value: Value) -> Value {
         return Value(-float_value)
     }
 
-    panic("NEG expected number")
+    runtime_error(fmt.tprintf(
+        "invalid unary `-`; expected number, got `%s`",
+        value_type_to_string(value),
+    ))
+    return Value{}
 }
 
 // Comparison/truthiness helpers ==================================================================
@@ -493,6 +504,12 @@ value_equal :: proc(lhs, rhs: Value) -> bool {
     if is_object {
         right_object, is_object := rhs.(^Object)
         if is_object {
+            if left_object.kind == .STRING && right_object.kind == .STRING {
+                left_string := cast(^StringObject)left_object
+                right_string := cast(^StringObject)right_object
+                return left_string.data == right_string.data
+            }
+
             return left_object == right_object
         }
 
@@ -518,8 +535,6 @@ value_less :: proc(lhs, rhs: Value) -> bool {
         if is_float {
             return f64(left_int) < right_float
         }
-
-        panic("LESS expected numbers")
     }
 
     left_float, is_float := lhs.(f64)
@@ -533,11 +548,14 @@ value_less :: proc(lhs, rhs: Value) -> bool {
         if is_float {
             return left_float < right_float
         }
-
-        panic("LESS expected numbers")
     }
 
-    panic("LESS expected numbers")
+    runtime_error(fmt.tprintf(
+        "invalid `<`; expected numbers, got `%s` and `%s`",
+        value_type_to_string(lhs),
+        value_type_to_string(rhs),
+    ))
+    return false
 }
 
 value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
@@ -552,8 +570,6 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
         if is_float {
             return f64(left_int) <= right_float
         }
-
-        panic("LESS_OR_EQUAL expected numbers")
     }
 
     left_float, is_float := lhs.(f64)
@@ -567,11 +583,14 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
         if is_float {
             return left_float <= right_float
         }
-
-        panic("LESS_OR_EQUAL expected numbers")
     }
 
-    panic("LESS_OR_EQUAL expected numbers")
+    runtime_error(fmt.tprintf(
+        "invalid `<=`; expected numbers, got `%s` and `%s`",
+        value_type_to_string(lhs),
+        value_type_to_string(rhs),
+    ))
+    return false
 }
 
 // Runtime errors =================================================================================
@@ -607,7 +626,9 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
         slot_base                = 0,
         return_slot_base         = 0,
         requested_results   = 1,
-        caller_slot_count = 0,
+        open_result_base         = 0,
+        open_result_count        = 0,
+        caller_slot_count        = 0,
     }
     state.frame_count = 1
 
@@ -696,7 +717,10 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             container_header, is_object := state.slots[container_slot].(^Object)
             if !is_object {
-                panic("INDEX_GET expected array or map object")
+                return Value{}, runtime_error(fmt.tprintf(
+                    "invalid index read; expected `array` or `map`, got `%s`",
+                    value_type_to_string(state.slots[container_slot]),
+                ))
             }
 
             switch container_header.kind {
@@ -705,15 +729,26 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 index_i64, is_i64 := state.slots[key_slot].(i64)
                 if !is_i64 {
-                    panic("INDEX_GET expected i64 array index")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "invalid array index; expected `int`, got `%s`",
+                        value_type_to_string(state.slots[key_slot]),
+                    ))
                 }
                 if index_i64 < 0 {
-                    panic("INDEX_GET array index out of bounds")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "array index out of range: index %d, length %d",
+                        index_i64,
+                        len(array_object.data),
+                    ))
                 }
 
                 index := int(index_i64)
                 if index >= len(array_object.data) {
-                    panic("INDEX_GET array index out of bounds")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "array index out of range: index %d, length %d",
+                        index_i64,
+                        len(array_object.data),
+                    ))
                 }
                 state.slots[dst] = array_object.data[index]
 
@@ -722,7 +757,10 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 key_header, is_key_object := state.slots[key_slot].(^Object)
                 if !is_key_object || key_header.kind != .STRING {
-                    panic("INDEX_GET expected string map key")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "invalid map key; expected `string`, got `%s`",
+                        value_type_to_string(state.slots[key_slot]),
+                    ))
                 }
                 key_object := cast(^StringObject)key_header
 
@@ -734,7 +772,10 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 }
 
             case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
-                panic("INDEX_GET expected array or map object")
+                return Value{}, runtime_error(fmt.tprintf(
+                    "invalid index read; expected `array` or `map`, got `%s`",
+                    value_type_to_string(state.slots[container_slot]),
+                ))
             }
 
         // Writes slot C into container A at key/index B.
@@ -748,7 +789,10 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             container_header, is_object := state.slots[container_slot].(^Object)
             if !is_object {
-                panic("INDEX_SET expected array or map object")
+                return Value{}, runtime_error(fmt.tprintf(
+                    "invalid index assignment; expected `array` or `map`, got `%s`",
+                    value_type_to_string(state.slots[container_slot]),
+                ))
             }
 
             switch container_header.kind {
@@ -757,15 +801,26 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 index_i64, is_i64 := state.slots[key_slot].(i64)
                 if !is_i64 {
-                    panic("INDEX_SET expected i64 array index")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "invalid array index; expected `int`, got `%s`",
+                        value_type_to_string(state.slots[key_slot]),
+                    ))
                 }
                 if index_i64 < 0 {
-                    panic("INDEX_SET array index out of bounds")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "array index out of range: index %d, length %d",
+                        index_i64,
+                        len(array_object.data),
+                    ))
                 }
 
                 index := int(index_i64)
                 if index >= len(array_object.data) {
-                    panic("INDEX_SET array index out of bounds")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "array index out of range: index %d, length %d",
+                        index_i64,
+                        len(array_object.data),
+                    ))
                 }
                 array_object.data[index] = value
 
@@ -774,7 +829,10 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 key_header, is_key_object := state.slots[key_slot].(^Object)
                 if !is_key_object || key_header.kind != .STRING {
-                    panic("INDEX_SET expected string map key")
+                    return Value{}, runtime_error(fmt.tprintf(
+                        "invalid map key; expected `string`, got `%s`",
+                        value_type_to_string(state.slots[key_slot]),
+                    ))
                 }
                 key_object := cast(^StringObject)key_header
 
@@ -785,7 +843,10 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 }
 
             case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
-                panic("INDEX_SET expected array or map object")
+                return Value{}, runtime_error(fmt.tprintf(
+                    "invalid index assignment; expected `array` or `map`, got `%s`",
+                    value_type_to_string(state.slots[container_slot]),
+                ))
             }
 
         // Appends slot B to array in slot A.
@@ -848,6 +909,9 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = value_add(state.slots[lhs], state.slots[rhs])
+            if state.has_error {
+                return Value{}, &state.error
+            }
 
         case .SUB:
             inst := InstABC(word)
@@ -855,6 +919,9 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = value_sub(state.slots[lhs], state.slots[rhs])
+            if state.has_error {
+                return Value{}, &state.error
+            }
 
         case .MUL:
             inst := InstABC(word)
@@ -862,6 +929,9 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = value_mul(state.slots[lhs], state.slots[rhs])
+            if state.has_error {
+                return Value{}, &state.error
+            }
 
         case .DIV:
             inst := InstABC(word)
@@ -869,12 +939,18 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = value_div(state.slots[lhs], state.slots[rhs])
+            if state.has_error {
+                return Value{}, &state.error
+            }
 
         case .NEG:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
             src := frame.slot_base + int(inst.b)
             state.slots[dst] = value_neg(state.slots[src])
+            if state.has_error {
+                return Value{}, &state.error
+            }
 
         case .EQUAL:
             inst := InstABC(word)
@@ -889,6 +965,9 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = Value(value_less(state.slots[lhs], state.slots[rhs]))
+            if state.has_error {
+                return Value{}, &state.error
+            }
 
         case .LESS_OR_EQUAL:
             inst := InstABC(word)
@@ -896,6 +975,9 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = Value(value_less_or_equal(state.slots[lhs], state.slots[rhs]))
+            if state.has_error {
+                return Value{}, &state.error
+            }
 
         case .NOT:
             inst := InstABx(word)
@@ -941,7 +1023,18 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                     return Value{}, &state.error
                 }
 
-                if produced_results < requested_results {
+                if requested_results == CALL_OPEN_RESULTS {
+                    result_end := call_base + produced_results
+                    if result_end > frame.slot_base + MAX_FRAME_SLOTS || result_end > MAX_VM_SLOTS {
+                        return Value{}, runtime_error("open call produced too many results")
+                    }
+
+                    frame.open_result_base = call_base
+                    frame.open_result_count = produced_results
+                    if result_end > state.slot_count {
+                        state.slot_count = result_end
+                    }
+                } else if produced_results < requested_results {
                     // Native produced fewer than caller wants.
                     // Fill the missing result slots with nil.
                     for fill_index := produced_results; fill_index < requested_results; fill_index += 1 {
@@ -990,6 +1083,8 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                     slot_base                = callee_slot_base,
                     return_slot_base         = call_base,
                     requested_results   = requested_results,
+                    open_result_base         = 0,
+                    open_result_count        = 0,
                     caller_slot_count        = caller_slot_count,
                 }
                 state.frame_count += 1
@@ -1019,6 +1114,14 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             produced_slot_base := frame.slot_base + int(inst.a)
             produced_results := int(inst.b)
 
+            if produced_results == RETURN_OPEN_RESULTS {
+                fixed_prefix_count := frame.open_result_base - produced_slot_base
+                if fixed_prefix_count < 0 {
+                    return Value{}, runtime_error("invalid open return")
+                }
+                produced_results = fixed_prefix_count + frame.open_result_count
+            }
+
             if state.frame_count == 1 {
                 // Top-level RETURN ends execution and returns to the host.
                 // Return first produced value when present, else nil.
@@ -1030,6 +1133,32 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             caller_result_base := frame.return_slot_base
             requested_results := frame.requested_results
+
+            if requested_results == CALL_OPEN_RESULTS {
+                result_end := caller_result_base + produced_results
+                if result_end > MAX_VM_SLOTS {
+                    return Value{}, runtime_error("open return produced too many results")
+                }
+
+                caller_frame := &state.frame_stack[state.frame_count - 2]
+                if result_end > caller_frame.slot_base + MAX_FRAME_SLOTS {
+                    return Value{}, runtime_error("open return produced too many results")
+                }
+
+                for value_index := 0; value_index < produced_results; value_index += 1 {
+                    state.slots[caller_result_base + value_index] = state.slots[produced_slot_base + value_index]
+                }
+
+                caller_frame.open_result_base = caller_result_base
+                caller_frame.open_result_count = produced_results
+
+                state.slot_count = frame.caller_slot_count
+                if result_end > state.slot_count {
+                    state.slot_count = result_end
+                }
+                state.frame_count -= 1
+                continue
+            }
 
             copied_result_count := produced_results
             if copied_result_count > requested_results {
