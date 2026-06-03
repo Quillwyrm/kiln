@@ -6,9 +6,7 @@ import "core:fmt"
 // Token cursor and failure latch for one compile operation.
 
 Parser := struct {
-    current_token:       Token,
-    peek_token:     Token,
-    peeking: bool,
+    current_token: Token,
     failed:        bool, // global error latch — every mutating operation sets it, callers check and return immediately
 }{}
 
@@ -63,28 +61,19 @@ ExprDesc :: union {
 
 // Token cursor ===================================================================================
 
-get_current_token :: proc() -> Token {
-    return Parser.current_token
-}
-
-
-at_token :: proc(kind: TokenKind) -> bool {
-    return get_current_token().kind == kind
-}
 
 advance_token :: proc() -> Token {
     token := Parser.current_token
-
-    if Parser.peeking {
-        Parser.current_token = Parser.peek_token
-        Parser.peek_token = Token{}
-        Parser.peeking = false
-    } else {
-        Parser.current_token = scan_next_token()
-    }
+    Parser.current_token = scan_next_token()
 
     if Parser.current_token.kind == .ERROR {
-        error_token_to_parser_error(Parser.current_token)
+        message := Parser.current_token.value.(string)
+        set_error(SourceLocation{
+            source_name = Scanner.source_name,
+            line        = Parser.current_token.line,
+            column      = Parser.current_token.column,
+        }, message)
+        Parser.failed = true
     }
 
     return token
@@ -93,14 +82,13 @@ advance_token :: proc() -> Token {
 
 // Parser errors ==================================================================================
 
-token_text_for_error :: proc(token: Token) -> string {
+error_token_text :: proc(token: Token) -> string {
     if token.kind == .EOF {
         return "end of file"
     }
     return token.source_text
 }
 
-// Covers grammar errors and codegen limits found while the parser drives bytecode generation.
 parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
     set_error(SourceLocation{
         source_name = proto_state.origin.source_name,
@@ -110,28 +98,13 @@ parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
     Parser.failed = true
 }
 
-// Converts a scanner ERROR token into a Kiln Error. Owns the full invariant:
-// ERROR token -> host-facing error + Parser.failed. Idempotent.
-error_token_to_parser_error :: proc(token: Token) {
-    if Parser.failed { return }
-
-    message := token.value.(string)
-    set_error(SourceLocation{
-        source_name = Scanner.source_name,
-        line        = token.line,
-        column      = token.column,
-    }, message)
-
-    Parser.failed = true
-}
-
 // On mismatch records an error and returns zero token value.
 consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string) -> Token {
-    if at_token(kind) {
+    if Parser.current_token.kind == kind {
         return advance_token()
     }
 
-    token := get_current_token()
+    token := Parser.current_token
     parser_error(proto_state, token, message)
     return Token{}
 }
@@ -146,7 +119,7 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
 // while frame_slot_count only grows.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, get_current_token(), "function uses too many values")
+        parser_error(proto_state, Parser.current_token, "function uses too many values")
         return 0
     }
 
@@ -159,7 +132,7 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 // preventing temp reuse of slots that hold live expression results.
 reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
     if slot_after_last > MAX_FRAME_SLOTS {
-        parser_error(proto_state, get_current_token(), "function uses too many values")
+        parser_error(proto_state, Parser.current_token, "function uses too many values")
         return
     }
 
@@ -171,7 +144,7 @@ reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
 // Records the local-count mark so end_scope can discard this scope's locals.
 begin_scope :: proc(proto_state: ^ProtoState) {
     if proto_state.scope_depth >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, get_current_token(), "too many nested scopes")
+        parser_error(proto_state, Parser.current_token, "too many nested scopes")
         return
     }
 
@@ -302,14 +275,14 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
     if Parser.failed { return }
 
-    for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
+    for !Parser.failed && Parser.current_token.kind != .RIGHT_BRACE && Parser.current_token.kind != .EOF {
         parse_stmt(proto_state)
         if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
     }
 
-    if at_token(.EOF) {
-        parser_error(proto_state, get_current_token(), "expected '}' to close function body")
+    if Parser.current_token.kind == .EOF {
+        parser_error(proto_state, Parser.current_token, "expected '}' to close function body")
         return
     }
 
@@ -328,10 +301,10 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     // The child proto is not created until the function signature is known.
     param_tokens: [MAX_FRAME_SLOTS]Token
     param_count := 0
-    if !at_token(.RIGHT_PAREN) {
+    if Parser.current_token.kind != .RIGHT_PAREN {
         for {
             if param_count >= MAX_FRAME_SLOTS {
-                parser_error(parent_proto_state, get_current_token(), "too many function parameters")
+                parser_error(parent_proto_state, Parser.current_token, "too many function parameters")
                 return
             }
 
@@ -341,12 +314,12 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
             }
             param_count += 1
 
-            if !at_token(.COMMA) {
+            if Parser.current_token.kind != .COMMA {
                 break
             }
 
             advance_token()
-            if at_token(.RIGHT_PAREN) {
+            if Parser.current_token.kind == .RIGHT_PAREN {
                 break
             }
         }
@@ -424,7 +397,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     reserve_slots_until(proto_state, array_slot + 1)
     if Parser.failed { return ExprInvalid{} }
 
-    if !at_token(.RIGHT_BRACKET) {
+    if Parser.current_token.kind != .RIGHT_BRACKET {
         for {
             value_slot := claim_temp_slot(proto_state)
             if Parser.failed { return ExprInvalid{} }
@@ -438,12 +411,12 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             emit_array_push(proto_state, array_slot, value_slot)
             proto_state.next_temp_slot = array_slot + 1
 
-            if !at_token(.COMMA) {
+            if Parser.current_token.kind != .COMMA {
                 break
             }
 
             advance_token()
-            if at_token(.RIGHT_BRACKET) {
+            if Parser.current_token.kind == .RIGHT_BRACKET {
                 break
             }
         }
@@ -472,9 +445,9 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     key_texts := make([dynamic]string)
     defer delete(key_texts)
 
-    if !at_token(.RIGHT_BRACE) {
+    if Parser.current_token.kind != .RIGHT_BRACE {
         for {
-            key_token := get_current_token()
+            key_token := Parser.current_token
             key_text: string
 
             #partial switch key_token.kind {
@@ -482,18 +455,18 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 key_text = key_token.value.(string)
                 advance_token()
 
-                if at_token(.LEFT_PAREN) {
-                    parser_error(proto_state, get_current_token(), "map key invalid; expected identifier shorthand or string literal, got call expression")
+                if Parser.current_token.kind == .LEFT_PAREN {
+                    parser_error(proto_state, Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got call expression")
                     return ExprInvalid{}
                 }
 
-                if at_token(.LEFT_BRACKET) {
-                    parser_error(proto_state, get_current_token(), "map key invalid; expected identifier shorthand or string literal, got indexed expression")
+                if Parser.current_token.kind == .LEFT_BRACKET {
+                    parser_error(proto_state, Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got indexed expression")
                     return ExprInvalid{}
                 }
 
-                if at_token(.DOT) {
-                    parser_error(proto_state, get_current_token(), "map key invalid; expected identifier shorthand or string literal, got field or namespace expression")
+                if Parser.current_token.kind == .DOT {
+                    parser_error(proto_state, Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got field or namespace expression")
                     return ExprInvalid{}
                 }
 
@@ -528,7 +501,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             value_slot := claim_temp_slot(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            value_token := get_current_token()
+            value_token := Parser.current_token
             if value_token.kind == .NIL {
                 parser_error(proto_state, value_token, fmt.tprintf("invalid value for key `%s` in map literal; nil literals are not valid in map literals", key_text))
                 return ExprInvalid{}
@@ -543,19 +516,19 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             emit_index_set(proto_state, map_slot, key_slot, value_slot)
             proto_state.next_temp_slot = map_slot + 1
 
-            if !at_token(.COMMA) {
+            if Parser.current_token.kind != .COMMA {
                 break
             }
 
             advance_token()
-            if at_token(.RIGHT_BRACE) {
+            if Parser.current_token.kind == .RIGHT_BRACE {
                 break
             }
         }
     }
 
-    if !at_token(.RIGHT_BRACE) {
-        parser_error(proto_state, get_current_token(), "map entry invalid; expected ',' or '}' after map value")
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        parser_error(proto_state, Parser.current_token, "map entry invalid; expected ',' or '}' after map value")
         return ExprInvalid{}
     }
 
@@ -575,8 +548,8 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .RIGHT_PAREN, "expected ')' after grouped expression")
     if Parser.failed { return ExprInvalid{} }
 
-    if at_token(.LEFT_PAREN) || at_token(.LEFT_BRACKET) || at_token(.DOT) {
-        parser_error(proto_state, get_current_token(), "grouped expression cannot be used as a chain root")
+    if Parser.current_token.kind == .LEFT_PAREN || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .DOT {
+        parser_error(proto_state, Parser.current_token, "grouped expression cannot be used as a chain root")
         return ExprInvalid{}
     }
 
@@ -584,29 +557,29 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 }
 
 parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    if at_token(.IDENT) {
+    if Parser.current_token.kind == .IDENT {
         return ExprUnresolvedBinding{advance_token()}
     }
 
-    if at_token(.FUNCTION) {
+    if Parser.current_token.kind == .FUNCTION {
         slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        parse_function_literal(proto_state, slot, "<function>", get_current_token())
+        parse_function_literal(proto_state, slot, "<function>", Parser.current_token)
         if Parser.failed { return ExprInvalid{} }
         return ExprSlot{slot}
     }
 
-    if at_token(.LEFT_BRACKET) {
+    if Parser.current_token.kind == .LEFT_BRACKET {
         return parse_array_literal(proto_state)
     }
 
-    if at_token(.MAP) {
+    if Parser.current_token.kind == .MAP {
         return parse_map_literal(proto_state)
     }
 
-    token := get_current_token()
-    parser_error(proto_state, token, fmt.tprintf("expected chain expression, got `%s`", token_text_for_error(token)))
+    token := Parser.current_token
+    parser_error(proto_state, token, fmt.tprintf("expected chain expression, got `%s`", error_token_text(token)))
     return ExprInvalid{}
 }
 
@@ -631,11 +604,11 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
     }
 
     arg_count := 0
-    if !at_token(.RIGHT_PAREN) {
+    if Parser.current_token.kind != .RIGHT_PAREN {
         for {
             arg_slot := base_slot + 1 + arg_count
             if arg_slot >= MAX_FRAME_SLOTS {
-                parser_error(proto_state, get_current_token(), "call uses too many values")
+                parser_error(proto_state, Parser.current_token, "call uses too many values")
                 return ExprInvalid{}
             }
 
@@ -650,12 +623,12 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
 
             arg_count += 1
 
-            if !at_token(.COMMA) {
+            if Parser.current_token.kind != .COMMA {
                 break
             }
 
             advance_token()
-            if at_token(.RIGHT_PAREN) {
+            if Parser.current_token.kind == .RIGHT_PAREN {
                 break
             }
         }
@@ -706,20 +679,20 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.failed { return ExprInvalid{} }
 
     for {
-        if at_token(.LEFT_PAREN) {
+        if Parser.current_token.kind == .LEFT_PAREN {
             expr = parse_call_postfix(proto_state, expr)
             if Parser.failed { return ExprInvalid{} }
             continue
         }
 
-        if at_token(.LEFT_BRACKET) {
+        if Parser.current_token.kind == .LEFT_BRACKET {
             expr = parse_index_postfix(proto_state, expr)
             if Parser.failed { return ExprInvalid{} }
             continue
         }
 
-        if at_token(.DOT) {
-            parser_error(proto_state, get_current_token(), "field access is not implemented yet")
+        if Parser.current_token.kind == .DOT {
+            parser_error(proto_state, Parser.current_token, "field access is not implemented yet")
             return ExprInvalid{}
         }
 
@@ -730,7 +703,7 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 }
 
 parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    #partial switch get_current_token().kind {
+    #partial switch Parser.current_token.kind {
     case .INT:
         token := advance_token()
         return token.value.(i64)
@@ -754,14 +727,14 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     case .IDENT, .FUNCTION, .LEFT_BRACKET, .MAP:
         return parse_chain_expr(proto_state)
     case:
-        token := get_current_token()
-        parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", token_text_for_error(token)))
+        token := Parser.current_token
+        parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", error_token_text(token)))
         return ExprInvalid{}
     }
 }
 
 parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    if at_token(.NOT) {
+    if Parser.current_token.kind == .NOT {
         advance_token()
 
         operand := parse_unary_expr(proto_state)
@@ -780,7 +753,7 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         return ExprSlot{result_slot}
     }
 
-    if at_token(.MINUS) {
+    if Parser.current_token.kind == .MINUS {
         advance_token()
 
         operand := parse_unary_expr(proto_state)
@@ -822,7 +795,7 @@ parse_expr_list :: proc(proto_state: ^ProtoState, base_slot: int) -> (expr_count
     last_expr = parse_expr(proto_state)
     if Parser.failed { return }
 
-    for at_token(.COMMA) {
+    for Parser.current_token.kind == .COMMA {
         dst_slot := base_slot + expr_count - 1
 
         reserve_slots_until(proto_state, dst_slot + 1)
@@ -897,14 +870,14 @@ parse_block_stmt :: proc(proto_state: ^ProtoState) {
     begin_scope(proto_state)
     if Parser.failed { return }
 
-    for !Parser.failed && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
+    for !Parser.failed && Parser.current_token.kind != .RIGHT_BRACE && Parser.current_token.kind != .EOF {
         parse_stmt(proto_state)
         if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
     }
 
-    if at_token(.EOF) {
-        parser_error(proto_state, get_current_token(), "expected '}' to close block")
+    if Parser.current_token.kind == .EOF {
+        parser_error(proto_state, Parser.current_token, "expected '}' to close block")
         return
     }
 
@@ -934,14 +907,14 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
     parse_block_stmt(proto_state)
     if Parser.failed { return }
 
-    if at_token(.ELSE) {
+    if Parser.current_token.kind == .ELSE {
         advance_token()
 
         end_jump := emit_jump(proto_state)
         patch_jump(proto_state, false_jump)
         if Parser.failed { return }
 
-        if at_token(.IF) {
+        if Parser.current_token.kind == .IF {
             parse_if_stmt(proto_state)
         } else {
             parse_block_stmt(proto_state)
@@ -964,7 +937,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     if proto_state.loop_depth >= MAX_LOOP_DEPTH {
-        parser_error(proto_state, get_current_token(), "too many nested loops")
+        parser_error(proto_state, Parser.current_token, "too many nested loops")
         return
     }
     proto_state.loop_break_fixup_base[proto_state.loop_depth] = proto_state.break_fixup_count
@@ -976,7 +949,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
 
     // `for { ... }` has no condition expression.
     // It loops until `break`, `return`, or runtime termination.
-    if !at_token(.LEFT_BRACE) {
+    if Parser.current_token.kind != .LEFT_BRACE {
         temp_save := proto_state.next_temp_slot
         condition_slot := claim_temp_slot(proto_state)
         if Parser.failed { return }
@@ -1024,7 +997,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     subject_live_cursor := temp_save
 
     // Subject switch: evaluate subject expression into a temp slot.
-    if !at_token(.LEFT_BRACE) {
+    if Parser.current_token.kind != .LEFT_BRACE {
         subject_slot = claim_temp_slot(proto_state)
         if Parser.failed { return }
 
@@ -1042,14 +1015,14 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     // Reject empty switch body and unexpected tokens.
-    if !at_token(.CASE) && !at_token(.ELSE) && !at_token(.RIGHT_BRACE) {
-        parser_error(proto_state, get_current_token(), "expected 'case', 'else', or '}' in switch")
+    if Parser.current_token.kind != .CASE && Parser.current_token.kind != .ELSE && Parser.current_token.kind != .RIGHT_BRACE {
+        parser_error(proto_state, Parser.current_token, "expected 'case', 'else', or '}' in switch")
         return
     }
     end_jumps: [256]int
     end_jump_count := 0
 
-    for at_token(.CASE) {
+    for Parser.current_token.kind == .CASE {
         advance_token()
 
         // Compile the case expression.
@@ -1084,7 +1057,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         if Parser.failed { return }
 
         if end_jump_count >= len(end_jumps) {
-            parser_error(proto_state, get_current_token(), "switch has too many arms")
+            parser_error(proto_state, Parser.current_token, "switch has too many arms")
             return
         }
         end_jumps[end_jump_count] = emit_jump(proto_state)
@@ -1104,14 +1077,14 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         }
     }
 
-    if at_token(.ELSE) {
+    if Parser.current_token.kind == .ELSE {
         advance_token()
         consume_token(proto_state, .COLON, "expected ':' after switch else")
         if Parser.failed { return }
         parse_switch_arm_body(proto_state)
         if Parser.failed { return }
-        if at_token(.CASE) {
-            parser_error(proto_state, get_current_token(), "case cannot appear after else")
+        if Parser.current_token.kind == .CASE {
+            parser_error(proto_state, Parser.current_token, "case cannot appear after else")
             return
         }
     }
@@ -1133,7 +1106,7 @@ parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     statement_count := 0
-    for !at_token(.CASE) && !at_token(.ELSE) && !at_token(.RIGHT_BRACE) && !at_token(.EOF) {
+    for Parser.current_token.kind != .CASE && Parser.current_token.kind != .ELSE && Parser.current_token.kind != .RIGHT_BRACE && Parser.current_token.kind != .EOF {
         parse_stmt(proto_state)
         if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
@@ -1142,7 +1115,7 @@ parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
 
     if statement_count == 0 {
         end_scope(proto_state)
-        parser_error(proto_state, get_current_token(), "switch arm must have at least one statement")
+        parser_error(proto_state, Parser.current_token, "switch arm must have at least one statement")
         return
     }
 
@@ -1175,7 +1148,7 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RETURN, "expected 'return'")
     if Parser.failed { return }
 
-    if at_token(.EOF) || at_token(.RIGHT_BRACE) {
+    if Parser.current_token.kind == .EOF || Parser.current_token.kind == .RIGHT_BRACE {
         emit_return(proto_state, 0, 0)
         return
     }
@@ -1186,7 +1159,7 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     if expr_count > MAX_FRAME_SLOTS {
-        parser_error(proto_state, get_current_token(), "return has too many values")
+        parser_error(proto_state, Parser.current_token, "return has too many values")
         return
     }
 
@@ -1231,25 +1204,25 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
 
     expr = ExprUnresolvedBinding{ident_token}
 
-    if !at_token(.LEFT_PAREN) && !at_token(.LEFT_BRACKET) && !at_token(.DOT) {
+    if Parser.current_token.kind != .LEFT_PAREN && Parser.current_token.kind != .LEFT_BRACKET && Parser.current_token.kind != .DOT {
         return
     }
 
     for {
-        if at_token(.LEFT_PAREN) {
+        if Parser.current_token.kind == .LEFT_PAREN {
             expr = parse_call_postfix(proto_state, expr)
             if Parser.failed { return }
             continue
         }
 
-        if at_token(.LEFT_BRACKET) {
+        if Parser.current_token.kind == .LEFT_BRACKET {
             expr = parse_index_postfix(proto_state, expr)
             if Parser.failed { return }
             continue
         }
 
-        if at_token(.DOT) {
-            parser_error(proto_state, get_current_token(), "field/namespace access is not implemented yet")
+        if Parser.current_token.kind == .DOT {
+            parser_error(proto_state, Parser.current_token, "field/namespace access is not implemented yet")
             return
         }
 
@@ -1303,7 +1276,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     rhs_base := proto_state.local_count
     proto_state.next_temp_slot = rhs_base
 
-    if lhs_count == 1 && at_token(.FUNCTION) {
+    if lhs_count == 1 && Parser.current_token.kind == .FUNCTION {
         ident_text := lhs_tokens[0].value.(string)
         parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
         if Parser.failed { return }
@@ -1312,7 +1285,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
         if Parser.failed { return }
 
         if expr_count > lhs_count {
-            parser_error(proto_state, get_current_token(), fmt.tprintf("too many values in declaration: expected %d", lhs_count))
+            parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
             return
         }
 
@@ -1378,7 +1351,7 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
     if Parser.failed { return }
 
     if expr_count > target_count {
-        parser_error(proto_state, get_current_token(), fmt.tprintf("too many values in assignment: expected %d", target_count))
+        parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in assignment: expected %d", target_count))
         return
     }
 
@@ -1417,37 +1390,37 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     for {
         if lhs_count >= MAX_BINDINGS {
-            parser_error(proto_state, get_current_token(), "too many global declaration names")
+            parser_error(proto_state, Parser.current_token, "too many global declaration names")
             return
         }
 
-        if !at_token(.IDENT) {
-            parser_error(proto_state, get_current_token(), "expected identifier in global declaration")
+        if Parser.current_token.kind != .IDENT {
+            parser_error(proto_state, Parser.current_token, "expected identifier in global declaration")
             return
         }
 
         lhs_tokens[lhs_count] = advance_token()
         lhs_count += 1
 
-        if !at_token(.COMMA) {
+        if Parser.current_token.kind != .COMMA {
             break
         }
 
         advance_token()
     }
 
-    if at_token(.ASSIGN) {
-        parser_error(proto_state, get_current_token(), "global declarations use ':=' or '::', not '='")
+    if Parser.current_token.kind == .ASSIGN {
+        parser_error(proto_state, Parser.current_token, "global declarations use ':=' or '::', not '='")
         return
     }
 
     is_mutable: bool
-    if at_token(.DECL) {
+    if Parser.current_token.kind == .DECL {
         is_mutable = true
-    } else if at_token(.IMMUTABLE_DECL) {
+    } else if Parser.current_token.kind == .IMMUTABLE_DECL {
         is_mutable = false
     } else {
-        parser_error(proto_state, get_current_token(), "expected ':=' or '::' after global declaration name list")
+        parser_error(proto_state, Parser.current_token, "expected ':=' or '::' after global declaration name list")
         return
     }
     advance_token()
@@ -1487,7 +1460,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     rhs_base := proto_state.next_temp_slot
 
-    if lhs_count == 1 && at_token(.FUNCTION) {
+    if lhs_count == 1 && Parser.current_token.kind == .FUNCTION {
         ident_text := lhs_tokens[0].value.(string)
         parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
         if Parser.failed {
@@ -1503,7 +1476,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
         if expr_count > lhs_count {
             Active_State.global_env.count = global_count_before
-            parser_error(proto_state, get_current_token(), fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
+            parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
             return
         }
 
@@ -1525,7 +1498,7 @@ parse_call_stmt :: proc(proto_state: ^ProtoState) {
 
     call_expr, is_call := expr.(ExprCall)
     if !is_call {
-        parser_error(proto_state, get_current_token(), "call statement must end in a call")
+        parser_error(proto_state, Parser.current_token, "call statement must end in a call")
         return
     }
 
@@ -1533,7 +1506,7 @@ parse_call_stmt :: proc(proto_state: ^ProtoState) {
 }
 
 parse_simple_stmt :: proc(proto_state: ^ProtoState) {
-    if !at_token(.IDENT) {
+    if Parser.current_token.kind != .IDENT {
         parse_call_stmt(proto_state)
         return
     }
@@ -1547,7 +1520,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
     for {
         if lhs_count >= MAX_FRAME_SLOTS {
-            parser_error(proto_state, get_current_token(), "too many assignment targets")
+            parser_error(proto_state, Parser.current_token, "too many assignment targets")
             return
         }
 
@@ -1555,14 +1528,14 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
         if Parser.failed { return }
         lhs_count += 1
 
-        if !at_token(.COMMA) {
+        if Parser.current_token.kind != .COMMA {
             break
         }
 
         advance_token()
     }
 
-    if at_token(.DECL) {
+    if Parser.current_token.kind == .DECL {
         for target_index := 0; target_index < lhs_count; target_index += 1 {
             #partial switch target in targets[target_index] {
             case ExprUnresolvedBinding:
@@ -1576,7 +1549,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    if at_token(.IMMUTABLE_DECL) {
+    if Parser.current_token.kind == .IMMUTABLE_DECL {
         for target_index := 0; target_index < lhs_count; target_index += 1 {
             #partial switch target in targets[target_index] {
             case ExprUnresolvedBinding:
@@ -1590,7 +1563,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    if at_token(.ASSIGN) {
+    if Parser.current_token.kind == .ASSIGN {
         finish_assign_stmt(proto_state, lhs_tokens[:lhs_count], targets[:lhs_count])
         return
     }
@@ -1613,67 +1586,67 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    parser_error(proto_state, get_current_token(), "expected declaration or assignment after target list")
+    parser_error(proto_state, Parser.current_token, "expected declaration or assignment after target list")
 }
 
 // Supported forms: block, if/for/break/return/switch, decl, assign, call.
 parse_stmt :: proc(proto_state: ^ProtoState) {
-    if at_token(.RETURN) {
+    if Parser.current_token.kind == .RETURN {
         parse_return_stmt(proto_state)
         return
     }
 
-    if at_token(.LEFT_BRACE) {
+    if Parser.current_token.kind == .LEFT_BRACE {
         parse_block_stmt(proto_state)
         return
     }
 
-    if at_token(.IF) {
+    if Parser.current_token.kind == .IF {
         parse_if_stmt(proto_state)
         return
     }
 
-    if at_token(.FOR) {
+    if Parser.current_token.kind == .FOR {
         parse_for_stmt(proto_state)
         return
     }
 
-    if at_token(.BREAK) {
+    if Parser.current_token.kind == .BREAK {
         parse_break_stmt(proto_state)
         return
     }
 
-    if at_token(.SWITCH) {
+    if Parser.current_token.kind == .SWITCH {
         parse_switch_stmt(proto_state)
         return
     }
 
-    if at_token(.CASE) {
-        parser_error(proto_state, get_current_token(), "case is only valid inside switch")
+    if Parser.current_token.kind == .CASE {
+        parser_error(proto_state, Parser.current_token, "case is only valid inside switch")
         return
     }
-    if at_token(.ELSE) {
-        parser_error(proto_state, get_current_token(), "else is only valid after if or inside switch")
+    if Parser.current_token.kind == .ELSE {
+        parser_error(proto_state, Parser.current_token, "else is only valid after if or inside switch")
         return
     }
 
-    if at_token(.GLOBAL) {
+    if Parser.current_token.kind == .GLOBAL {
         parse_global_decl_stmt(proto_state)
         return
     }
 
-    if at_token(.IDENT) || at_token(.FUNCTION) || at_token(.LEFT_BRACKET) || at_token(.MAP) {
+    if Parser.current_token.kind == .IDENT || Parser.current_token.kind == .FUNCTION || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .MAP {
         parse_simple_stmt(proto_state)
         return
     }
 
-    token := get_current_token()
-    parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", token_text_for_error(token)))
+    token := Parser.current_token
+    parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", error_token_text(token)))
 }
 
 // Parses top-level statements until EOF. After each statement, next_temp_slot resets to local_count so temp slots are reused across statements.
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
-    for !Parser.failed && !at_token(.EOF) {
+    for !Parser.failed && Parser.current_token.kind != .EOF {
         parse_stmt(proto_state)
         if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
@@ -1688,8 +1661,6 @@ compile_source :: proc(source, source_name: string) -> ^Error {
     begin_scan(source, source_name)
 
     Parser.current_token = Token{}
-    Parser.peek_token = Token{}
-    Parser.peeking = false
     Parser.failed = false
 
     advance_token()

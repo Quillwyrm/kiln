@@ -50,21 +50,4 @@ run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
     return run_source(state, string(source_bytes), path)
 }
 
-// debug path that prints source and output before execution.
-debug_run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
-    Active_State = state
 
-    source_bytes, read_error := os.read_entire_file(path, context.allocator)
-    if read_error != nil {
-        result := Value{}
-        location := SourceLocation{source_name = path, line = 0, column = 0}
-        return result, set_error(location, fmt.tprintf("failed to read '%s'", path))
-    }
-    defer delete(source_bytes)
-
-    fmt.println("source in:")
-    fmt.println(string(source_bytes))
-
-    fmt.println("kiln out:")
-    return run_source(state, string(source_bytes), path)
-}

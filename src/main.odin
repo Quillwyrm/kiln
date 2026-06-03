@@ -6,20 +6,27 @@ import "core:fmt"
 import "kiln"
 
 main :: proc() {
+
     kstate := kiln.new_state()
     defer kiln.delete_state(kstate)
 
     kiln.bind_global_env(kstate)
 
-    kiln_result, kiln_err := kiln.run_file(kstate, "test.kiln")
-    if kiln_err != nil {
-        if kiln_err.runtime_context != "" {
-            fmt.eprintfln("%s[%d:%d] Error %s: %s", kiln_err.location.source_name, kiln_err.location.line, kiln_err.location.column, kiln_err.runtime_context, kiln_err.message)
+    result, err := kiln.run_file(kstate, "test.kiln")
+    if err != nil {
+        name    := err.location.source_name
+        line    := err.location.line
+        col     := err.location.column
+        run_ctx := err.runtime_context
+        msg     := err.message
+
+        if err.runtime_context != "" {
+            fmt.eprintfln("%s[%d:%d] Error %s: %s", name, line, col, run_ctx, msg)
         } else {
-            fmt.eprintfln("%s[%d:%d] Error: %s", kiln_err.location.source_name, kiln_err.location.line, kiln_err.location.column, kiln_err.message)
+            fmt.eprintfln("%s[%d:%d] Error: %s", name, line, col, msg)
         }
         return
     }
 
-    fmt.println("kiln returns:", kiln.value_to_string(kiln_result))
+    fmt.println("kiln returns:", kiln.value_to_string(result))
 }
