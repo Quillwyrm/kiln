@@ -6,9 +6,9 @@ import "core:fmt"
 // Token cursor and failure latch for one compile operation.
 
 Parser := struct {
-    current:       Token,
-    lookahead:     Token,
-    has_lookahead: bool,
+    current_token:       Token,
+    peek_token:     Token,
+    peeking: bool,
     failed:        bool, // global error latch — every mutating operation sets it, callers check and return immediately
 }{}
 
@@ -19,22 +19,6 @@ Parser := struct {
 
 ExprInvalid :: struct {}
 ExprNil     :: struct {}
-
-ExprBool :: struct {
-    value: bool,
-}
-
-ExprInt :: struct {
-    value: i64,
-}
-
-ExprFloat :: struct {
-    value: f64,
-}
-
-ExprString :: struct {
-    value: string,
-}
 
 ExprUnresolvedBinding :: struct {
     token: Token,
@@ -65,10 +49,10 @@ ExprIndex :: struct {
 ExprDesc :: union {
     ExprInvalid,
     ExprNil,
-    ExprBool,
-    ExprInt,
-    ExprFloat,
-    ExprString,
+    bool,
+    i64,
+    f64,
+    string,
     ExprUnresolvedBinding,
     ExprLocal,
     ExprGlobal,
@@ -79,40 +63,28 @@ ExprDesc :: union {
 
 // Token cursor ===================================================================================
 
-current_token :: proc() -> Token {
-    return Parser.current
+get_current_token :: proc() -> Token {
+    return Parser.current_token
 }
 
-peek_token :: proc() -> Token {
-    if !Parser.has_lookahead {
-        Parser.lookahead = scan_next_token()
-        Parser.has_lookahead = true
-
-        if Parser.lookahead.kind == .ERROR {
-            error_token_to_parser_error(Parser.lookahead)
-        }
-    }
-
-    return Parser.lookahead
-}
 
 at_token :: proc(kind: TokenKind) -> bool {
-    return current_token().kind == kind
+    return get_current_token().kind == kind
 }
 
 advance_token :: proc() -> Token {
-    token := Parser.current
+    token := Parser.current_token
 
-    if Parser.has_lookahead {
-        Parser.current = Parser.lookahead
-        Parser.lookahead = Token{}
-        Parser.has_lookahead = false
+    if Parser.peeking {
+        Parser.current_token = Parser.peek_token
+        Parser.peek_token = Token{}
+        Parser.peeking = false
     } else {
-        Parser.current = scan_next_token()
+        Parser.current_token = scan_next_token()
     }
 
-    if Parser.current.kind == .ERROR {
-        error_token_to_parser_error(Parser.current)
+    if Parser.current_token.kind == .ERROR {
+        error_token_to_parser_error(Parser.current_token)
     }
 
     return token
@@ -159,7 +131,7 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
         return advance_token()
     }
 
-    token := current_token()
+    token := get_current_token()
     parser_error(proto_state, token, message)
     return Token{}
 }
@@ -174,7 +146,7 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
 // while frame_slot_count only grows.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, current_token(), "function uses too many values")
+        parser_error(proto_state, get_current_token(), "function uses too many values")
         return 0
     }
 
@@ -187,7 +159,7 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 // preventing temp reuse of slots that hold live expression results.
 reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
     if slot_after_last > MAX_FRAME_SLOTS {
-        parser_error(proto_state, current_token(), "function uses too many values")
+        parser_error(proto_state, get_current_token(), "function uses too many values")
         return
     }
 
@@ -199,7 +171,7 @@ reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
 // Records the local-count mark so end_scope can discard this scope's locals.
 begin_scope :: proc(proto_state: ^ProtoState) {
     if proto_state.scope_depth >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, current_token(), "too many nested scopes")
+        parser_error(proto_state, get_current_token(), "too many nested scopes")
         return
     }
 
@@ -242,9 +214,9 @@ local_binding_find :: proc(proto_state: ^ProtoState, ident_name: string) -> int 
 // ExprDesc lowering =======================================================================
 // These translate descriptors into concrete bytecode.
 
-// lower_expr_to_slot lowers an expression descriptor so that the value lands
+// lower_expr_desc lowers an expression descriptor so that the value lands
 // in dst_slot at runtime.
-lower_expr_to_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int) {
+lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int) {
     switch e in expr {
     case ExprInvalid:
         return
@@ -252,25 +224,25 @@ lower_expr_to_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: i
     case ExprNil:
         emit_load_nil(proto_state, dst_slot)
 
-    case ExprBool:
-        if e.value {
+    case bool:
+        if e {
             emit_load_true(proto_state, dst_slot)
         } else {
             emit_load_false(proto_state, dst_slot)
         }
 
-    case ExprInt:
-        const_index := const_int(proto_state, e.value)
+    case i64:
+        const_index := const_int(proto_state, e)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
-    case ExprFloat:
-        const_index := const_float(proto_state, e.value)
+    case f64:
+        const_index := const_float(proto_state, e)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
-    case ExprString:
-        const_index := const_string(proto_state, e.value)
+    case string:
+        const_index := const_string(proto_state, e)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
@@ -337,7 +309,7 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
     }
 
     if at_token(.EOF) {
-        parser_error(proto_state, current_token(), "expected '}' to close function body")
+        parser_error(proto_state, get_current_token(), "expected '}' to close function body")
         return
     }
 
@@ -359,7 +331,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     if !at_token(.RIGHT_PAREN) {
         for {
             if param_count >= MAX_FRAME_SLOTS {
-                parser_error(parent_proto_state, current_token(), "too many function parameters")
+                parser_error(parent_proto_state, get_current_token(), "too many function parameters")
                 return
             }
 
@@ -399,11 +371,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
         for prev_index := 0; prev_index < param_index; prev_index += 1 {
             if param_tokens[prev_index].value.(string) == param_name {
-                parser_error(
-                    &child_proto_state,
-                    param_tokens[param_index],
-                    fmt.tprintf("parameter `%s` is already declared in this function", param_name),
-                )
+                parser_error(&child_proto_state, param_tokens[param_index], fmt.tprintf("parameter `%s` is already declared in this function", param_name))
                 delete_proto_state(&child_proto_state)
                 return
             }
@@ -464,7 +432,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             value_expr := parse_expr(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            lower_expr_to_slot(proto_state, value_expr, value_slot)
+            lower_expr_desc(proto_state, value_expr, value_slot)
             if Parser.failed { return ExprInvalid{} }
 
             emit_array_push(proto_state, array_slot, value_slot)
@@ -506,7 +474,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
     if !at_token(.RIGHT_BRACE) {
         for {
-            key_token := current_token()
+            key_token := get_current_token()
             key_text: string
 
             #partial switch key_token.kind {
@@ -515,29 +483,17 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 advance_token()
 
                 if at_token(.LEFT_PAREN) {
-                    parser_error(
-                        proto_state,
-                        current_token(),
-                        "map key invalid; expected identifier shorthand or string literal, got call expression",
-                    )
+                    parser_error(proto_state, get_current_token(), "map key invalid; expected identifier shorthand or string literal, got call expression")
                     return ExprInvalid{}
                 }
 
                 if at_token(.LEFT_BRACKET) {
-                    parser_error(
-                        proto_state,
-                        current_token(),
-                        "map key invalid; expected identifier shorthand or string literal, got indexed expression",
-                    )
+                    parser_error(proto_state, get_current_token(), "map key invalid; expected identifier shorthand or string literal, got indexed expression")
                     return ExprInvalid{}
                 }
 
                 if at_token(.DOT) {
-                    parser_error(
-                        proto_state,
-                        current_token(),
-                        "map key invalid; expected identifier shorthand or string literal, got field or namespace expression",
-                    )
+                    parser_error(proto_state, get_current_token(), "map key invalid; expected identifier shorthand or string literal, got field or namespace expression")
                     return ExprInvalid{}
                 }
 
@@ -546,11 +502,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 advance_token()
 
             case:
-                parser_error(
-                    proto_state,
-                    key_token,
-                    "map key invalid; expected identifier shorthand or string literal",
-                )
+                parser_error(proto_state, key_token, "map key invalid; expected identifier shorthand or string literal")
                 return ExprInvalid{}
             }
 
@@ -576,20 +528,16 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             value_slot := claim_temp_slot(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            value_token := current_token()
+            value_token := get_current_token()
             if value_token.kind == .NIL {
-                parser_error(
-                    proto_state,
-                    value_token,
-                    fmt.tprintf("invalid value for key `%s` in map literal; nil literals are not valid in map literals", key_text),
-                )
+                parser_error(proto_state, value_token, fmt.tprintf("invalid value for key `%s` in map literal; nil literals are not valid in map literals", key_text))
                 return ExprInvalid{}
             }
 
             value_expr := parse_expr(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            lower_expr_to_slot(proto_state, value_expr, value_slot)
+            lower_expr_desc(proto_state, value_expr, value_slot)
             if Parser.failed { return ExprInvalid{} }
 
             emit_index_set(proto_state, map_slot, key_slot, value_slot)
@@ -607,7 +555,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 
     if !at_token(.RIGHT_BRACE) {
-        parser_error(proto_state, current_token(), "map entry invalid; expected ',' or '}' after map value")
+        parser_error(proto_state, get_current_token(), "map entry invalid; expected ',' or '}' after map value")
         return ExprInvalid{}
     }
 
@@ -628,7 +576,7 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.failed { return ExprInvalid{} }
 
     if at_token(.LEFT_PAREN) || at_token(.LEFT_BRACKET) || at_token(.DOT) {
-        parser_error(proto_state, current_token(), "grouped expression cannot be used as a chain root")
+        parser_error(proto_state, get_current_token(), "grouped expression cannot be used as a chain root")
         return ExprInvalid{}
     }
 
@@ -644,7 +592,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        parse_function_literal(proto_state, slot, "<function>", current_token())
+        parse_function_literal(proto_state, slot, "<function>", get_current_token())
         if Parser.failed { return ExprInvalid{} }
         return ExprSlot{slot}
     }
@@ -657,7 +605,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         return parse_map_literal(proto_state)
     }
 
-    token := current_token()
+    token := get_current_token()
     parser_error(proto_state, token, fmt.tprintf("expected chain expression, got `%s`", token_text_for_error(token)))
     return ExprInvalid{}
 }
@@ -678,7 +626,7 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
         base_slot = claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_to_slot(proto_state, callee, base_slot)
+        lower_expr_desc(proto_state, callee, base_slot)
         if Parser.failed { return ExprInvalid{} }
     }
 
@@ -687,14 +635,14 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
         for {
             arg_slot := base_slot + 1 + arg_count
             if arg_slot >= MAX_FRAME_SLOTS {
-                parser_error(proto_state, current_token(), "call uses too many values")
+                parser_error(proto_state, get_current_token(), "call uses too many values")
                 return ExprInvalid{}
             }
 
             arg_expr := parse_expr(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            lower_expr_to_slot(proto_state, arg_expr, arg_slot)
+            lower_expr_desc(proto_state, arg_expr, arg_slot)
             if Parser.failed { return ExprInvalid{} }
 
             reserve_slots_until(proto_state, arg_slot + 1)
@@ -734,7 +682,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
         container_slot = claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_to_slot(proto_state, container, container_slot)
+        lower_expr_desc(proto_state, container, container_slot)
         if Parser.failed { return ExprInvalid{} }
     }
 
@@ -744,7 +692,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     key_expr := parse_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    lower_expr_to_slot(proto_state, key_expr, key_slot)
+    lower_expr_desc(proto_state, key_expr, key_slot)
     if Parser.failed { return ExprInvalid{} }
 
     consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after index expression")
@@ -771,7 +719,7 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         }
 
         if at_token(.DOT) {
-            parser_error(proto_state, current_token(), "field access is not implemented yet")
+            parser_error(proto_state, get_current_token(), "field access is not implemented yet")
             return ExprInvalid{}
         }
 
@@ -782,22 +730,22 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 }
 
 parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    #partial switch current_token().kind {
+    #partial switch get_current_token().kind {
     case .INT:
         token := advance_token()
-        return ExprInt{token.value.(i64)}
+        return token.value.(i64)
     case .FLOAT:
         token := advance_token()
-        return ExprFloat{token.value.(f64)}
+        return token.value.(f64)
     case .STRING:
         token := advance_token()
-        return ExprString{token.value.(string)}
+        return token.value.(string)
     case .TRUE:
         advance_token()
-        return ExprBool{true}
+        return true
     case .FALSE:
         advance_token()
-        return ExprBool{false}
+        return false
     case .NIL:
         advance_token()
         return ExprNil{}
@@ -806,7 +754,7 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     case .IDENT, .FUNCTION, .LEFT_BRACKET, .MAP:
         return parse_chain_expr(proto_state)
     case:
-        token := current_token()
+        token := get_current_token()
         parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", token_text_for_error(token)))
         return ExprInvalid{}
     }
@@ -822,7 +770,7 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         operand_slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_to_slot(proto_state, operand, operand_slot)
+        lower_expr_desc(proto_state, operand, operand_slot)
         if Parser.failed { return ExprInvalid{} }
 
         result_slot := claim_temp_slot(proto_state)
@@ -841,7 +789,7 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         operand_slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_to_slot(proto_state, operand, operand_slot)
+        lower_expr_desc(proto_state, operand, operand_slot)
         if Parser.failed { return ExprInvalid{} }
 
         result_slot := claim_temp_slot(proto_state)
@@ -880,7 +828,7 @@ parse_expr_list :: proc(proto_state: ^ProtoState, base_slot: int) -> (expr_count
         reserve_slots_until(proto_state, dst_slot + 1)
         if Parser.failed { return }
 
-        lower_expr_to_slot(proto_state, last_expr, dst_slot)
+        lower_expr_desc(proto_state, last_expr, dst_slot)
         if Parser.failed { return }
 
         advance_token()
@@ -902,13 +850,7 @@ parse_expr_list :: proc(proto_state: ^ProtoState, base_slot: int) -> (expr_count
 // base_slot .. base_slot + wanted_count - 1.
 //
 // Caller must validate expr_count <= wanted_count before calling.
-finish_expr_list_to_slots :: proc(
-    proto_state: ^ProtoState,
-    base_slot: int,
-    expr_count: int,
-    last_expr: ExprDesc,
-    wanted_count: int,
-) {
+finish_expr_list_to_slots :: proc(proto_state: ^ProtoState, base_slot: int, expr_count: int, last_expr: ExprDesc, wanted_count: int) {
     previous_count := expr_count - 1
     last_dst := base_slot + previous_count
     wanted_from_last := wanted_count - previous_count
@@ -936,7 +878,7 @@ finish_expr_list_to_slots :: proc(
         return
     }
 
-    lower_expr_to_slot(proto_state, last_expr, last_dst)
+    lower_expr_desc(proto_state, last_expr, last_dst)
     if Parser.failed { return }
 
     for fill_index := previous_count + 1; fill_index < wanted_count; fill_index += 1 {
@@ -962,7 +904,7 @@ parse_block_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if at_token(.EOF) {
-        parser_error(proto_state, current_token(), "expected '}' to close block")
+        parser_error(proto_state, get_current_token(), "expected '}' to close block")
         return
     }
 
@@ -984,7 +926,7 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
     expr := parse_expr(proto_state)
     if Parser.failed { return }
 
-    lower_expr_to_slot(proto_state, expr, condition_slot)
+    lower_expr_desc(proto_state, expr, condition_slot)
     if Parser.failed { return }
 
     false_jump := emit_jump_false(proto_state, condition_slot)
@@ -1022,7 +964,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     if proto_state.loop_depth >= MAX_LOOP_DEPTH {
-        parser_error(proto_state, current_token(), "too many nested loops")
+        parser_error(proto_state, get_current_token(), "too many nested loops")
         return
     }
     proto_state.loop_break_fixup_base[proto_state.loop_depth] = proto_state.break_fixup_count
@@ -1042,7 +984,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
         expr := parse_expr(proto_state)
         if Parser.failed { return }
 
-        lower_expr_to_slot(proto_state, expr, condition_slot)
+        lower_expr_desc(proto_state, expr, condition_slot)
         if Parser.failed { return }
 
         exit_jump = emit_jump_false(proto_state, condition_slot)
@@ -1089,7 +1031,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         subject_expr := parse_expr(proto_state)
         if Parser.failed { return }
 
-        lower_expr_to_slot(proto_state, subject_expr, subject_slot)
+        lower_expr_desc(proto_state, subject_expr, subject_slot)
         if Parser.failed { return }
 
         subject_live_cursor = subject_slot + 1
@@ -1101,7 +1043,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
 
     // Reject empty switch body and unexpected tokens.
     if !at_token(.CASE) && !at_token(.ELSE) && !at_token(.RIGHT_BRACE) {
-        parser_error(proto_state, current_token(), "expected 'case', 'else', or '}' in switch")
+        parser_error(proto_state, get_current_token(), "expected 'case', 'else', or '}' in switch")
         return
     }
     end_jumps: [256]int
@@ -1117,7 +1059,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         case_expr := parse_expr(proto_state)
         if Parser.failed { return }
 
-        lower_expr_to_slot(proto_state, case_expr, case_slot)
+        lower_expr_desc(proto_state, case_expr, case_slot)
         if Parser.failed { return }
 
         consume_token(proto_state, .COLON, "expected ':' after switch case")
@@ -1142,7 +1084,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         if Parser.failed { return }
 
         if end_jump_count >= len(end_jumps) {
-            parser_error(proto_state, current_token(), "switch has too many arms")
+            parser_error(proto_state, get_current_token(), "switch has too many arms")
             return
         }
         end_jumps[end_jump_count] = emit_jump(proto_state)
@@ -1169,7 +1111,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         parse_switch_arm_body(proto_state)
         if Parser.failed { return }
         if at_token(.CASE) {
-            parser_error(proto_state, current_token(), "case cannot appear after else")
+            parser_error(proto_state, get_current_token(), "case cannot appear after else")
             return
         }
     }
@@ -1200,7 +1142,7 @@ parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
 
     if statement_count == 0 {
         end_scope(proto_state)
-        parser_error(proto_state, current_token(), "switch arm must have at least one statement")
+        parser_error(proto_state, get_current_token(), "switch arm must have at least one statement")
         return
     }
 
@@ -1244,7 +1186,7 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     if expr_count > MAX_FRAME_SLOTS {
-        parser_error(proto_state, current_token(), "return has too many values")
+        parser_error(proto_state, get_current_token(), "return has too many values")
         return
     }
 
@@ -1283,10 +1225,7 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
 // Parses one identifier-rooted prefix from a simple statement.
 // Bare identifiers stay as ExprUnresolvedBinding until the statement context
 // decides declaration, assignment, read, or call behavior.
-parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (
-    ident_token: Token,
-    expr: ExprDesc,
-) {
+parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Token, expr: ExprDesc) {
     ident_token = consume_token(proto_state, .IDENT, "expected identifier")
     if Parser.failed { return }
 
@@ -1310,7 +1249,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (
         }
 
         if at_token(.DOT) {
-            parser_error(proto_state, current_token(), "field/namespace access is not implemented yet")
+            parser_error(proto_state, get_current_token(), "field/namespace access is not implemented yet")
             return
         }
 
@@ -1331,22 +1270,14 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
         for prev_index := 0; prev_index < check_index; prev_index += 1 {
             if lhs_tokens[prev_index].value.(string) == check_name {
-                parser_error(
-                    proto_state,
-                    lhs_tokens[check_index],
-                    fmt.tprintf("duplicate declaration name `%s`", check_name),
-                )
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate declaration name `%s`", check_name))
                 return
             }
         }
 
         global_index := binding_table_find(&Active_State.global_env, check_name)
         if global_index >= 0 {
-            parser_error(
-                proto_state,
-                lhs_tokens[check_index],
-                fmt.tprintf("local variable `%s` cannot shadow global binding", check_name),
-            )
+            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local variable `%s` cannot shadow global binding", check_name))
             return
         }
 
@@ -1357,11 +1288,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
         for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
             if proto_state.local_bindings[local_index].name == check_name {
-                parser_error(
-                    proto_state,
-                    lhs_tokens[check_index],
-                    fmt.tprintf("local variable `%s` is already declared in this scope", check_name),
-                )
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local variable `%s` is already declared in this scope", check_name))
                 return
             }
         }
@@ -1385,11 +1312,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
         if Parser.failed { return }
 
         if expr_count > lhs_count {
-            parser_error(
-                proto_state,
-                current_token(),
-                fmt.tprintf("too many values in declaration: expected %d", lhs_count),
-            )
+            parser_error(proto_state, get_current_token(), fmt.tprintf("too many values in declaration: expected %d", lhs_count))
             return
         }
 
@@ -1403,11 +1326,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     }
 }
 
-finish_assign_stmt :: proc(
-    proto_state: ^ProtoState,
-    lhs_tokens: []Token,
-    targets: []ExprDesc,
-) {
+finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, targets: []ExprDesc) {
     target_count := len(targets)
 
     for target_index := 0; target_index < target_count; target_index += 1 {
@@ -1420,11 +1339,7 @@ finish_assign_stmt :: proc(
             local_index := local_binding_find(proto_state, ident_text)
             if local_index >= 0 {
                 if !proto_state.local_bindings[local_index].is_mutable {
-                    parser_error(
-                        proto_state,
-                        lhs_tokens[target_index],
-                        fmt.tprintf("cannot assign to immutable binding `%s`", ident_text),
-                    )
+                    parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
                     return
                 }
 
@@ -1432,20 +1347,12 @@ finish_assign_stmt :: proc(
             } else {
                 global_index := binding_table_find(&Active_State.global_env, ident_text)
                 if global_index < 0 {
-                    parser_error(
-                        proto_state,
-                        lhs_tokens[target_index],
-                        fmt.tprintf("assignment target `%s` is not a declared binding", ident_text),
-                    )
+                    parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
                     return
                 }
 
                 if !Active_State.global_env.is_mutable[global_index] {
-                    parser_error(
-                        proto_state,
-                        lhs_tokens[target_index],
-                        fmt.tprintf("cannot assign to immutable binding `%s`", ident_text),
-                    )
+                    parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
                     return
                 }
 
@@ -1457,14 +1364,7 @@ finish_assign_stmt :: proc(
 
         #partial switch target in targets[target_index] {
         case ExprCall:
-            parser_error(
-                proto_state,
-                lhs_tokens[target_index],
-                fmt.tprintf(
-                    "call expression `%s` is not an assignment target; expected identifier or indexed expression",
-                    lhs_tokens[target_index].value.(string),
-                ),
-            )
+            parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("call expression `%s` is not an assignment target; expected identifier or indexed expression", lhs_tokens[target_index].value.(string)))
             return
         }
     }
@@ -1478,11 +1378,7 @@ finish_assign_stmt :: proc(
     if Parser.failed { return }
 
     if expr_count > target_count {
-        parser_error(
-            proto_state,
-            current_token(),
-            fmt.tprintf("too many values in assignment: expected %d", target_count),
-        )
+        parser_error(proto_state, get_current_token(), fmt.tprintf("too many values in assignment: expected %d", target_count))
         return
     }
 
@@ -1521,12 +1417,12 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     for {
         if lhs_count >= MAX_BINDINGS {
-            parser_error(proto_state, current_token(), "too many global declaration names")
+            parser_error(proto_state, get_current_token(), "too many global declaration names")
             return
         }
 
         if !at_token(.IDENT) {
-            parser_error(proto_state, current_token(), "expected identifier in global declaration")
+            parser_error(proto_state, get_current_token(), "expected identifier in global declaration")
             return
         }
 
@@ -1541,7 +1437,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if at_token(.ASSIGN) {
-        parser_error(proto_state, current_token(), "global declarations use ':=' or '::', not '='")
+        parser_error(proto_state, get_current_token(), "global declarations use ':=' or '::', not '='")
         return
     }
 
@@ -1551,7 +1447,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     } else if at_token(.IMMUTABLE_DECL) {
         is_mutable = false
     } else {
-        parser_error(proto_state, current_token(), "expected ':=' or '::' after global declaration name list")
+        parser_error(proto_state, get_current_token(), "expected ':=' or '::' after global declaration name list")
         return
     }
     advance_token()
@@ -1561,32 +1457,20 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
         for prev_index := 0; prev_index < check_index; prev_index += 1 {
             if lhs_tokens[prev_index].value.(string) == check_name {
-                parser_error(
-                    proto_state,
-                    lhs_tokens[check_index],
-                    fmt.tprintf("duplicate global declaration name `%s`", check_name),
-                )
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate global declaration name `%s`", check_name))
                 return
             }
         }
 
         global_index := binding_table_find(&Active_State.global_env, check_name)
         if global_index >= 0 {
-            parser_error(
-                proto_state,
-                lhs_tokens[check_index],
-                fmt.tprintf("global binding `%s` is already declared", check_name),
-            )
+            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` is already declared", check_name))
             return
         }
 
         local_index := local_binding_find(proto_state, check_name)
         if local_index >= 0 {
-            parser_error(
-                proto_state,
-                lhs_tokens[check_index],
-                fmt.tprintf("global binding `%s` conflicts with local variable", check_name),
-            )
+            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` conflicts with local variable", check_name))
             return
         }
     }
@@ -1598,11 +1482,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     global_count_before := Active_State.global_env.count
     for target_index := 0; target_index < lhs_count; target_index += 1 {
-        binding_ids[target_index] = binding_table_append(
-            &Active_State.global_env,
-            lhs_tokens[target_index].value.(string),
-            is_mutable,
-        )
+        binding_ids[target_index] = binding_table_append(&Active_State.global_env, lhs_tokens[target_index].value.(string), is_mutable)
     }
 
     rhs_base := proto_state.next_temp_slot
@@ -1623,11 +1503,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
         if expr_count > lhs_count {
             Active_State.global_env.count = global_count_before
-            parser_error(
-                proto_state,
-                current_token(),
-                fmt.tprintf("too many values in global declaration: expected %d", lhs_count),
-            )
+            parser_error(proto_state, get_current_token(), fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
             return
         }
 
@@ -1649,7 +1525,7 @@ parse_call_stmt :: proc(proto_state: ^ProtoState) {
 
     call_expr, is_call := expr.(ExprCall)
     if !is_call {
-        parser_error(proto_state, current_token(), "call statement must end in a call")
+        parser_error(proto_state, get_current_token(), "call statement must end in a call")
         return
     }
 
@@ -1671,7 +1547,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
     for {
         if lhs_count >= MAX_FRAME_SLOTS {
-            parser_error(proto_state, current_token(), "too many assignment targets")
+            parser_error(proto_state, get_current_token(), "too many assignment targets")
             return
         }
 
@@ -1728,31 +1604,16 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
         #partial switch target in targets[0] {
         case ExprUnresolvedBinding:
-            parser_error(
-                proto_state,
-                lhs_tokens[0],
-                fmt.tprintf(
-                    "bare expression `%s` is not a statement; expected declaration, assignment, or call",
-                    lhs_tokens[0].value.(string),
-                ),
-            )
+            parser_error(proto_state, lhs_tokens[0], fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
         case ExprIndex:
-            parser_error(
-                proto_state,
-                lhs_tokens[0],
-                fmt.tprintf("indexed expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)),
-            )
+            parser_error(proto_state, lhs_tokens[0], fmt.tprintf("indexed expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)))
         case:
-            parser_error(
-                proto_state,
-                lhs_tokens[0],
-                fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)),
-            )
+            parser_error(proto_state, lhs_tokens[0], fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
         }
         return
     }
 
-    parser_error(proto_state, current_token(), "expected declaration or assignment after target list")
+    parser_error(proto_state, get_current_token(), "expected declaration or assignment after target list")
 }
 
 // Supported forms: block, if/for/break/return/switch, decl, assign, call.
@@ -1788,11 +1649,11 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if at_token(.CASE) {
-        parser_error(proto_state, current_token(), "case is only valid inside switch")
+        parser_error(proto_state, get_current_token(), "case is only valid inside switch")
         return
     }
     if at_token(.ELSE) {
-        parser_error(proto_state, current_token(), "else is only valid after if or inside switch")
+        parser_error(proto_state, get_current_token(), "else is only valid after if or inside switch")
         return
     }
 
@@ -1806,7 +1667,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    token := current_token()
+    token := get_current_token()
     parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", token_text_for_error(token)))
 }
 
@@ -1826,9 +1687,9 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 compile_source :: proc(source, source_name: string) -> ^Error {
     begin_scan(source, source_name)
 
-    Parser.current = Token{}
-    Parser.lookahead = Token{}
-    Parser.has_lookahead = false
+    Parser.current_token = Token{}
+    Parser.peek_token = Token{}
+    Parser.peeking = false
     Parser.failed = false
 
     advance_token()

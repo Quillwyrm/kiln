@@ -182,10 +182,7 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
         }
     }
 
-    message := fmt.tprintf(
-        "`length()` called with invalid argument; expected `array`, `map`, or `string`, got `%s`",
-        value_type_to_string(value),
-    )
+    message := fmt.tprintf("`length()` called with invalid argument; expected `array`, `map`, or `string`, got `%s`", value_type_to_string(value))
     runtime_error(message)
     return 0
 }
@@ -211,9 +208,7 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
             return 0
         }
 
-        runtime_error(
-            fmt.tprintf("assertion failed; condition was `%s`", value_to_string(condition)),
-        )
+        runtime_error(fmt.tprintf("assertion failed; condition was `%s`", value_to_string(condition)))
         return 0
     }
 

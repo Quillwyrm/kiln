@@ -154,13 +154,7 @@ Proto :: struct {
 }
 
 // Odin-backed function impl. CALL shapes produced results to requested: missing = nil, extras ignored.
-NativeFunction :: proc(
-    vm: ^State,
-    args_base: int,
-    arg_count: int,
-    return_slot_base: int,
-    requested_results: int,
-) -> int
+NativeFunction :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int
 
 
 ProtoFunctionObject :: struct {
@@ -316,11 +310,7 @@ value_add :: proc(lhs, rhs: Value) -> Value {
         }
     }
 
-    runtime_error(fmt.tprintf(
-        "invalid `+`; expected numbers, got `%s` and `%s`",
-        value_type_to_string(lhs),
-        value_type_to_string(rhs),
-    ))
+    runtime_error(fmt.tprintf("invalid `+`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
     return Value{}
 }
 
@@ -351,11 +341,7 @@ value_sub :: proc(lhs, rhs: Value) -> Value {
         }
     }
 
-    runtime_error(fmt.tprintf(
-        "invalid `-`; expected numbers, got `%s` and `%s`",
-        value_type_to_string(lhs),
-        value_type_to_string(rhs),
-    ))
+    runtime_error(fmt.tprintf("invalid `-`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
     return Value{}
 }
 
@@ -386,11 +372,7 @@ value_mul :: proc(lhs, rhs: Value) -> Value {
         }
     }
 
-    runtime_error(fmt.tprintf(
-        "invalid `*`; expected numbers, got `%s` and `%s`",
-        value_type_to_string(lhs),
-        value_type_to_string(rhs),
-    ))
+    runtime_error(fmt.tprintf("invalid `*`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
     return Value{}
 }
 
@@ -421,11 +403,7 @@ value_div :: proc(lhs, rhs: Value) -> Value {
         }
     }
 
-    runtime_error(fmt.tprintf(
-        "invalid `/`; expected numbers, got `%s` and `%s`",
-        value_type_to_string(lhs),
-        value_type_to_string(rhs),
-    ))
+    runtime_error(fmt.tprintf("invalid `/`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
     return Value{}
 }
 
@@ -440,10 +418,7 @@ value_neg :: proc(value: Value) -> Value {
         return Value(-float_value)
     }
 
-    runtime_error(fmt.tprintf(
-        "invalid unary `-`; expected number, got `%s`",
-        value_type_to_string(value),
-    ))
+    runtime_error(fmt.tprintf("invalid unary `-`; expected number, got `%s`", value_type_to_string(value)))
     return Value{}
 }
 
@@ -553,11 +528,7 @@ value_less :: proc(lhs, rhs: Value) -> bool {
         }
     }
 
-    runtime_error(fmt.tprintf(
-        "invalid `<`; expected numbers, got `%s` and `%s`",
-        value_type_to_string(lhs),
-        value_type_to_string(rhs),
-    ))
+    runtime_error(fmt.tprintf("invalid `<`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
     return false
 }
 
@@ -588,11 +559,7 @@ value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
         }
     }
 
-    runtime_error(fmt.tprintf(
-        "invalid `<=`; expected numbers, got `%s` and `%s`",
-        value_type_to_string(lhs),
-        value_type_to_string(rhs),
-    ))
+    runtime_error(fmt.tprintf("invalid `<='; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
     return false
 }
 
@@ -720,10 +687,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             container_header, is_object := state.slots[container_slot].(^Object)
             if !is_object {
-                return Value{}, runtime_error(fmt.tprintf(
-                    "invalid index read; expected `array` or `map`, got `%s`",
-                    value_type_to_string(state.slots[container_slot]),
-                ))
+                return Value{}, runtime_error(fmt.tprintf("invalid index read; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
             switch container_header.kind {
@@ -732,26 +696,15 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 index_i64, is_i64 := state.slots[key_slot].(i64)
                 if !is_i64 {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "invalid array index; expected `int`, got `%s`",
-                        value_type_to_string(state.slots[key_slot]),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("invalid array index; expected `int`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 if index_i64 < 0 {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "array index out of range: index %d, length %d",
-                        index_i64,
-                        len(array_object.data),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
 
                 index := int(index_i64)
                 if index >= len(array_object.data) {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "array index out of range: index %d, length %d",
-                        index_i64,
-                        len(array_object.data),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
                 state.slots[dst] = array_object.data[index]
 
@@ -760,10 +713,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 key_header, is_key_object := state.slots[key_slot].(^Object)
                 if !is_key_object || key_header.kind != .STRING {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "invalid map key; expected `string`, got `%s`",
-                        value_type_to_string(state.slots[key_slot]),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("invalid map key; expected `string`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 key_object := cast(^StringObject)key_header
 
@@ -775,10 +725,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 }
 
             case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
-                return Value{}, runtime_error(fmt.tprintf(
-                    "invalid index read; expected `array` or `map`, got `%s`",
-                    value_type_to_string(state.slots[container_slot]),
-                ))
+                return Value{}, runtime_error(fmt.tprintf("invalid index read; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
         // Writes slot C into container A at key/index B.
@@ -792,10 +739,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             container_header, is_object := state.slots[container_slot].(^Object)
             if !is_object {
-                return Value{}, runtime_error(fmt.tprintf(
-                    "invalid index assignment; expected `array` or `map`, got `%s`",
-                    value_type_to_string(state.slots[container_slot]),
-                ))
+                return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
             switch container_header.kind {
@@ -804,26 +748,15 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 index_i64, is_i64 := state.slots[key_slot].(i64)
                 if !is_i64 {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "invalid array index; expected `int`, got `%s`",
-                        value_type_to_string(state.slots[key_slot]),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("invalid array index; expected `int`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 if index_i64 < 0 {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "array index out of range: index %d, length %d",
-                        index_i64,
-                        len(array_object.data),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
 
                 index := int(index_i64)
                 if index >= len(array_object.data) {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "array index out of range: index %d, length %d",
-                        index_i64,
-                        len(array_object.data),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
                 array_object.data[index] = value
 
@@ -832,10 +765,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 key_header, is_key_object := state.slots[key_slot].(^Object)
                 if !is_key_object || key_header.kind != .STRING {
-                    return Value{}, runtime_error(fmt.tprintf(
-                        "invalid map key; expected `string`, got `%s`",
-                        value_type_to_string(state.slots[key_slot]),
-                    ))
+                    return Value{}, runtime_error(fmt.tprintf("invalid map key; expected `string`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 key_object := cast(^StringObject)key_header
 
@@ -846,10 +776,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 }
 
             case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
-                return Value{}, runtime_error(fmt.tprintf(
-                    "invalid index assignment; expected `array` or `map`, got `%s`",
-                    value_type_to_string(state.slots[container_slot]),
-                ))
+                return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
         // Appends slot B to array in slot A.
@@ -1010,10 +937,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
             callee_header, is_object := state.slots[call_base].(^Object)
             if !is_object {
-                message := fmt.tprintf(
-                    "invalid function call; expected `function`, got `%s`",
-                    value_type_to_string(state.slots[call_base]),
-                )
+                message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
             }
 
@@ -1069,10 +993,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
 
                 // Extra fixed args are rejected; missing params filled with nil.
                 if arg_count > callee_proto.param_count {
-                    message := fmt.tprintf(
-                        "too many arguments for `%s()`: expected %d, got %d",
-                        proto_function.name, callee_proto.param_count, arg_count,
-                    )
+                    message := fmt.tprintf("too many arguments for `%s()`: expected %d, got %d", proto_function.name, callee_proto.param_count, arg_count)
                     return Value{}, runtime_error(message)
                 }
 
@@ -1093,10 +1014,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 state.frame_count += 1
 
             case .STRING, .ARRAY, .MAP:
-                message := fmt.tprintf(
-                    "invalid function call; expected `function`, got `%s`",
-                    value_type_to_string(state.slots[call_base]),
-                )
+                message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
             }
 
