@@ -300,6 +300,13 @@ emit_div :: proc(proto_state: ^ProtoState, dst, lhs, rhs: int) {
     append(&proto_state.bytecode, inst)
 }
 
+emit_mod :: proc(proto_state: ^ProtoState, dst, lhs, rhs: int) {
+    record_slots(proto_state, dst, lhs, rhs)
+
+    inst := u32(InstABC{ op= .MOD, a= u8(dst), b= u8(lhs), c= u8(rhs) })
+    append(&proto_state.bytecode, inst)
+}
+
 emit_neg :: proc(proto_state: ^ProtoState, dst, src: int) {
     record_slots(proto_state, dst, src)
 

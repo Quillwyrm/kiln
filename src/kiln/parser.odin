@@ -779,8 +779,8 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     left := parse_unary_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    // mulOp = "*" | "/".
-    for Parser.current_token.kind == .STAR || Parser.current_token.kind == .SLASH {
+    // mulOp = "*" | "/" | "%".
+    for Parser.current_token.kind == .STAR || Parser.current_token.kind == .SLASH || Parser.current_token.kind == .MOD {
         op_token := advance_token()
 
         right := parse_unary_expr(proto_state)
@@ -800,8 +800,10 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         if op_token.kind == .STAR {
             emit_mul(proto_state, lhs_slot, lhs_slot, rhs_slot)
-        } else {
+        } else if op_token.kind == .SLASH {
             emit_div(proto_state, lhs_slot, lhs_slot, rhs_slot)
+        } else {
+            emit_mod(proto_state, lhs_slot, lhs_slot, rhs_slot)
         }
 
         // Only the accumulated left result remains live after the binary op.

@@ -48,6 +48,7 @@ TokenKind :: enum {
     MINUS,
     STAR,
     SLASH,
+    MOD,
 
     // Comparison / Logical Operators
     EQUAL,
@@ -414,6 +415,8 @@ scan_symbol :: proc() -> Token {
         return make_token(.STAR)
     case '/':
         return make_token(.SLASH)
+    case '%':
+        return make_token(.MOD)
 
     case '(':
         return make_token(.LEFT_PAREN)

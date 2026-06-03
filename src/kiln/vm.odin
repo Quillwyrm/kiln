@@ -34,6 +34,7 @@ Opcode :: enum u8 {
     SUB,           // ABC: A=dst, B=lhs, C=rhs
     MUL,           // ABC: A=dst, B=lhs, C=rhs
     DIV,           // ABC: A=dst, B=lhs, C=rhs
+    MOD,           // ABC: A=dst, B=lhs, C=rhs
     NEG,           // ABx: A=dst, B=src
 
     // Comparison and Boolean Operations
@@ -404,6 +405,24 @@ value_div :: proc(lhs, rhs: Value) -> Value {
     }
 
     runtime_error(fmt.tprintf("invalid `/`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
+    return Value{}
+}
+
+value_mod :: proc(lhs, rhs: Value) -> Value {
+    left_int, is_int := lhs.(i64)
+    if is_int {
+        right_int, is_int := rhs.(i64)
+        if is_int {
+            if right_int == 0 {
+                runtime_error("invalid `%`; divisor cannot be zero")
+                return Value{}
+            }
+
+            return Value(left_int % right_int)
+        }
+    }
+
+    runtime_error(fmt.tprintf("invalid `%`; expected ints, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
     return Value{}
 }
 
@@ -869,6 +888,16 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = value_div(state.slots[lhs], state.slots[rhs])
+            if state.has_error {
+                return Value{}, &state.error
+            }
+
+        case .MOD:
+            inst := InstABC(word)
+            dst := frame.slot_base + int(inst.a)
+            lhs := frame.slot_base + int(inst.b)
+            rhs := frame.slot_base + int(inst.c)
+            state.slots[dst] = value_mod(state.slots[lhs], state.slots[rhs])
             if state.has_error {
                 return Value{}, &state.error
             }
