@@ -231,6 +231,33 @@ case 1 + 5: print("comparison switch")
 else:       print("comparison switch failed")
 }
 
+// Compound assignment reads the target once, computes, then writes back.
+print("--- compound assignment ---")
+
+compound := 10
+compound += 5
+print(compound)
+compound -= 3
+print(compound)
+compound *= 2
+print(compound)
+compound /= 4
+print(compound)
+compound = 10
+compound %= 4
+print(compound)
+
+shared_count += 1
+print(shared_count)
+
+compound_items := [10]
+compound_items[0] += 5
+print(compound_items[0])
+
+compound_map := map { score: 10 }
+compound_map["score"] += 7
+print(compound_map["score"])
+
 // Native globals installed by the host standard environment.
 print("--- builtins ---")
 

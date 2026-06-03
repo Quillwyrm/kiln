@@ -42,6 +42,11 @@ TokenKind :: enum {
     DECL,           // :=
     IMMUTABLE_DECL, // ::
     ASSIGN,         // =
+    PLUS_ASSIGN,    // +=
+    MINUS_ASSIGN,   // -=
+    STAR_ASSIGN,    // *=
+    SLASH_ASSIGN,   // /=
+    MOD_ASSIGN,     // %=
 
     // Arithmetic Operators
     PLUS,
@@ -408,14 +413,29 @@ scan_symbol :: proc() -> Token {
         }
 
     case '+':
+        if match_next('=') {
+            return make_token(.PLUS_ASSIGN)
+        }
         return make_token(.PLUS)
     case '-':
+        if match_next('=') {
+            return make_token(.MINUS_ASSIGN)
+        }
         return make_token(.MINUS)
     case '*':
+        if match_next('=') {
+            return make_token(.STAR_ASSIGN)
+        }
         return make_token(.STAR)
     case '/':
+        if match_next('=') {
+            return make_token(.SLASH_ASSIGN)
+        }
         return make_token(.SLASH)
     case '%':
+        if match_next('=') {
+            return make_token(.MOD_ASSIGN)
+        }
         return make_token(.MOD)
 
     case '(':

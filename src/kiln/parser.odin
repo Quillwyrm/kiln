@@ -1434,47 +1434,71 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     }
 }
 
+resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, target: ExprDesc) -> ExprDesc {
+    // Assignment target resolution checks mutability; normal expression reads do not.
+    #partial switch t in target {
+    case ExprUnresolvedBinding:
+        ident_text := t.token.value.(string)
+
+        local_index := local_binding_find(proto_state, ident_text)
+        if local_index >= 0 {
+            if !proto_state.local_bindings[local_index].is_mutable {
+                parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
+                return ExprInvalid{}
+            }
+
+            return ExprLocal{local_index}
+        }
+
+        global_index := binding_table_find(&Active_State.global_env, ident_text)
+        if global_index < 0 {
+            parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
+            return ExprInvalid{}
+        }
+
+        if !Active_State.global_env.is_mutable[global_index] {
+            parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
+            return ExprInvalid{}
+        }
+
+        return ExprGlobal{BindingId(global_index)}
+
+    case ExprLocal, ExprGlobal, ExprIndex:
+        return target
+
+    case ExprCall:
+        parser_error(proto_state, source_token, fmt.tprintf("call expression `%s` is not an assignment target; expected identifier or indexed expression", source_token.value.(string)))
+        return ExprInvalid{}
+    }
+
+    panic("assignment target resolution reached non-assignable expression descriptor")
+}
+
+set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprDesc) {
+    #partial switch t in target {
+    case ExprLocal:
+        dst_slot := proto_state.local_bindings[t.local_index].frame_slot
+        if dst_slot != src_slot {
+            emit_move(proto_state, dst_slot, src_slot)
+        }
+
+    case ExprGlobal:
+        emit_set_global(proto_state, src_slot, t.binding_id)
+
+    case ExprIndex:
+        emit_index_set(proto_state, t.container_slot, t.key_slot, src_slot)
+
+    case:
+        panic("assignment lowering reached non-assignable expression descriptor")
+    }
+}
+
 finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, targets: []ExprDesc) {
     target_count := len(targets)
 
     for target_index := 0; target_index < target_count; target_index += 1 {
-        // Resolve bare identifier targets here, because assignment must check
-        // mutability while normal identifier reads do not.
-        #partial switch target in targets[target_index] {
-        case ExprUnresolvedBinding:
-            ident_text := target.token.value.(string)
-
-            local_index := local_binding_find(proto_state, ident_text)
-            if local_index >= 0 {
-                if !proto_state.local_bindings[local_index].is_mutable {
-                    parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
-                    return
-                }
-
-                targets[target_index] = ExprLocal{local_index}
-            } else {
-                global_index := binding_table_find(&Active_State.global_env, ident_text)
-                if global_index < 0 {
-                    parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
-                    return
-                }
-
-                if !Active_State.global_env.is_mutable[global_index] {
-                    parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
-                    return
-                }
-
-                targets[target_index] = ExprGlobal{BindingId(global_index)}
-            }
-
-        case:
-        }
-
-        #partial switch target in targets[target_index] {
-        case ExprCall:
-            parser_error(proto_state, lhs_tokens[target_index], fmt.tprintf("call expression `%s` is not an assignment target; expected identifier or indexed expression", lhs_tokens[target_index].value.(string)))
-            return
-        }
+        targets[target_index] = resolve_assign_target(proto_state, lhs_tokens[target_index], targets[target_index])
+        if Parser.failed { return }
     }
 
     advance_token()
@@ -1496,24 +1520,52 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
     // Write temps into targets after all RHS values are ready.
     for target_index := 0; target_index < target_count; target_index += 1 {
         src_slot := rhs_base + target_index
-
-        #partial switch target in targets[target_index] {
-        case ExprLocal:
-            dst_slot := proto_state.local_bindings[target.local_index].frame_slot
-            if dst_slot != src_slot {
-                emit_move(proto_state, dst_slot, src_slot)
-            }
-
-        case ExprGlobal:
-            emit_set_global(proto_state, src_slot, target.binding_id)
-
-        case ExprIndex:
-            emit_index_set(proto_state, target.container_slot, target.key_slot, src_slot)
-
-        case:
-            panic("assignment lowering reached non-assignable expression descriptor")
-        }
+        set_assign_target(proto_state, src_slot, targets[target_index])
     }
+}
+
+finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, target: ExprDesc) {
+    resolved_target := resolve_assign_target(proto_state, lhs_token, target)
+    if Parser.failed { return }
+
+    op_token := advance_token()
+
+    value_slot := claim_temp_slot(proto_state)
+    if Parser.failed { return }
+
+    lower_expr_desc(proto_state, resolved_target, value_slot)
+    if Parser.failed { return }
+
+    rhs_slot := claim_temp_slot(proto_state)
+    if Parser.failed { return }
+
+    rhs_expr := parse_expr(proto_state)
+    if Parser.failed { return }
+
+    lower_expr_desc(proto_state, rhs_expr, rhs_slot)
+    if Parser.failed { return }
+
+    #partial switch op_token.kind {
+    case .PLUS_ASSIGN:
+        emit_add(proto_state, value_slot, value_slot, rhs_slot)
+
+    case .MINUS_ASSIGN:
+        emit_sub(proto_state, value_slot, value_slot, rhs_slot)
+
+    case .STAR_ASSIGN:
+        emit_mul(proto_state, value_slot, value_slot, rhs_slot)
+
+    case .SLASH_ASSIGN:
+        emit_div(proto_state, value_slot, value_slot, rhs_slot)
+
+    case .MOD_ASSIGN:
+        emit_mod(proto_state, value_slot, value_slot, rhs_slot)
+
+    case:
+        panic("compound assignment reached non-compound operator")
+    }
+
+    set_assign_target(proto_state, value_slot, resolved_target)
 }
 
 parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
@@ -1700,6 +1752,20 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
     if Parser.current_token.kind == .ASSIGN {
         finish_assign_stmt(proto_state, lhs_tokens[:lhs_count], targets[:lhs_count])
+        return
+    }
+
+    if Parser.current_token.kind == .PLUS_ASSIGN ||
+       Parser.current_token.kind == .MINUS_ASSIGN ||
+       Parser.current_token.kind == .STAR_ASSIGN ||
+       Parser.current_token.kind == .SLASH_ASSIGN ||
+       Parser.current_token.kind == .MOD_ASSIGN {
+        if lhs_count != 1 {
+            parser_error(proto_state, Parser.current_token, "compound assignment expects one target")
+            return
+        }
+
+        finish_compound_assign_stmt(proto_state, lhs_tokens[0], targets[0])
         return
     }
 
