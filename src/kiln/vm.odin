@@ -1120,7 +1120,7 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             if produced_results == RETURN_OPEN_RESULTS {
                 fixed_prefix_count := frame.open_result_base - produced_slot_base
                 if fixed_prefix_count < 0 {
-                    return Value{}, runtime_error("invalid open return")
+                    panic("open return result base is before produced slot base")
                 }
                 produced_results = fixed_prefix_count + frame.open_result_count
             }

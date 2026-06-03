@@ -36,6 +36,10 @@ ExprString :: struct {
     value: string,
 }
 
+ExprUnresolvedBinding :: struct {
+    token: Token,
+}
+
 ExprLocal :: struct {
     local_index: int,
 }
@@ -65,6 +69,7 @@ ExprDesc :: union {
     ExprInt,
     ExprFloat,
     ExprString,
+    ExprUnresolvedBinding,
     ExprLocal,
     ExprGlobal,
     ExprSlot,
@@ -269,6 +274,26 @@ lower_expr_to_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: i
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
+    case ExprUnresolvedBinding:
+        // Resolve bare identifier reads at the point they become values.
+        ident_name := e.token.value.(string)
+        local_index := local_binding_find(proto_state, ident_name)
+        if local_index >= 0 {
+            src_slot := proto_state.local_bindings[local_index].frame_slot
+            if src_slot != dst_slot {
+                emit_move(proto_state, dst_slot, src_slot)
+            }
+            return
+        }
+
+        binding_index := binding_table_find(&Active_State.global_env, ident_name)
+        if binding_index < 0 {
+            parser_error(proto_state, e.token, fmt.tprintf("unknown name `%s`", ident_name))
+            return
+        }
+
+        emit_get_global(proto_state, dst_slot, BindingId(binding_index))
+
     case ExprLocal:
         src_slot := proto_state.local_bindings[e.local_index].frame_slot
         if src_slot != dst_slot {
@@ -292,27 +317,6 @@ lower_expr_to_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: i
 
     case ExprIndex:
         emit_index_get(proto_state, dst_slot, e.container_slot, e.key_slot)
-    }
-}
-
-// lower_slot_to_assignment_target writes the value in src_slot into an assignable
-// expression descriptor.
-lower_slot_to_assignment_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprDesc) {
-    #partial switch t in target {
-    case ExprLocal:
-        dst_slot := proto_state.local_bindings[t.local_index].frame_slot
-        if dst_slot != src_slot {
-            emit_move(proto_state, dst_slot, src_slot)
-        }
-
-    case ExprGlobal:
-        emit_set_global(proto_state, src_slot, t.binding_id)
-
-    case ExprIndex:
-        emit_index_set(proto_state, t.container_slot, t.key_slot, src_slot)
-
-    case:
-        parser_error(proto_state, current_token(), "expected assignment target")
     }
 }
 
@@ -440,44 +444,6 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
 // Expression parsers ==============================================================================
 // Each returns an ExprDesc. No slot destination is passed in.
-
-resolve_ident_expr :: proc(proto_state: ^ProtoState, token: Token) -> ExprDesc {
-    ident_name := token.value.(string)
-    local_index := local_binding_find(proto_state, ident_name)
-    if local_index >= 0 {
-        return ExprLocal{local_index}
-    }
-
-    binding_index := binding_table_find(&Active_State.global_env, ident_name)
-    if binding_index < 0 {
-        parser_error(proto_state, token, fmt.tprintf("unknown name `%s`", ident_name))
-        return ExprInvalid{}
-    }
-
-    return ExprGlobal{BindingId(binding_index)}
-}
-
-parse_basic_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    token := advance_token()
-
-    #partial switch token.kind {
-    case .INT:
-        return ExprInt{token.value.(i64)}
-    case .FLOAT:
-        return ExprFloat{token.value.(f64)}
-    case .STRING:
-        return ExprString{token.value.(string)}
-    case .TRUE:
-        return ExprBool{true}
-    case .FALSE:
-        return ExprBool{false}
-    case .NIL:
-        return ExprNil{}
-    case:
-        parser_error(proto_state, token, fmt.tprintf("expected literal, got `%s`", token_text_for_error(token)))
-        return ExprInvalid{}
-    }
-}
 
 parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .LEFT_BRACKET, "expected '[' to start array literal")
@@ -611,12 +577,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             if Parser.failed { return ExprInvalid{} }
 
             value_token := current_token()
-
-            value_expr := parse_expr(proto_state)
-            if Parser.failed { return ExprInvalid{} }
-
-            #partial switch e in value_expr {
-            case ExprNil:
+            if value_token.kind == .NIL {
                 parser_error(
                     proto_state,
                     value_token,
@@ -624,6 +585,9 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 )
                 return ExprInvalid{}
             }
+
+            value_expr := parse_expr(proto_state)
+            if Parser.failed { return ExprInvalid{} }
 
             lower_expr_to_slot(proto_state, value_expr, value_slot)
             if Parser.failed { return ExprInvalid{} }
@@ -673,8 +637,7 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
 parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if at_token(.IDENT) {
-        token := advance_token()
-        return resolve_ident_expr(proto_state, token)
+        return ExprUnresolvedBinding{advance_token()}
     }
 
     if at_token(.FUNCTION) {
@@ -820,8 +783,24 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
 parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     #partial switch current_token().kind {
-    case .INT, .FLOAT, .STRING, .TRUE, .FALSE, .NIL:
-        return parse_basic_literal(proto_state)
+    case .INT:
+        token := advance_token()
+        return ExprInt{token.value.(i64)}
+    case .FLOAT:
+        token := advance_token()
+        return ExprFloat{token.value.(f64)}
+    case .STRING:
+        token := advance_token()
+        return ExprString{token.value.(string)}
+    case .TRUE:
+        advance_token()
+        return ExprBool{true}
+    case .FALSE:
+        advance_token()
+        return ExprBool{false}
+    case .NIL:
+        advance_token()
+        return ExprNil{}
     case .LEFT_PAREN:
         return parse_grouped_expr(proto_state)
     case .IDENT, .FUNCTION, .LEFT_BRACKET, .MAP:
@@ -944,8 +923,7 @@ finish_expr_list_to_slots :: proc(
     call_expr, final_is_call := last_expr.(ExprCall)
     if final_is_call {
         if call_expr.base_slot != last_dst {
-            parser_error(proto_state, current_token(), "internal error: call result base does not match expression-list destination")
-            return
+            panic("call result base does not match expression-list destination")
         }
 
         set_call_requested_results(proto_state, call_expr.call_index, wanted_from_last)
@@ -1275,8 +1253,7 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
         prefix_count := expr_count - 1
         return_base := call_expr.base_slot - prefix_count
         if return_base < 0 {
-            parser_error(proto_state, current_token(), "internal error: open return call overlaps fixed return prefix")
-            return
+            panic("open return call overlaps fixed return prefix")
         }
 
         // If evaluating the final callee used temp slots, compact the already
@@ -1304,24 +1281,20 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
 // the parser knows whether :=, =, or a call statement follows.
 
 // Parses one identifier-rooted prefix from a simple statement.
-// Bare identifiers stay unresolved until := or = decides declaration vs assignment.
+// Bare identifiers stay as ExprUnresolvedBinding until the statement context
+// decides declaration, assignment, read, or call behavior.
 parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (
     ident_token: Token,
     expr: ExprDesc,
-    plain_ident: bool,
 ) {
     ident_token = consume_token(proto_state, .IDENT, "expected identifier")
     if Parser.failed { return }
 
-    plain_ident = true
+    expr = ExprUnresolvedBinding{ident_token}
 
     if !at_token(.LEFT_PAREN) && !at_token(.LEFT_BRACKET) && !at_token(.DOT) {
         return
     }
-
-    plain_ident = false
-    expr = resolve_ident_expr(proto_state, ident_token)
-    if Parser.failed { return }
 
     for {
         if at_token(.LEFT_PAREN) {
@@ -1434,13 +1407,15 @@ finish_assign_stmt :: proc(
     proto_state: ^ProtoState,
     lhs_tokens: []Token,
     targets: []ExprDesc,
-    is_plain_ident: []bool,
 ) {
     target_count := len(targets)
 
     for target_index := 0; target_index < target_count; target_index += 1 {
-        if is_plain_ident[target_index] {
-            ident_text := lhs_tokens[target_index].value.(string)
+        // Resolve bare identifier targets here, because assignment must check
+        // mutability while normal identifier reads do not.
+        #partial switch target in targets[target_index] {
+        case ExprUnresolvedBinding:
+            ident_text := target.token.value.(string)
 
             local_index := local_binding_find(proto_state, ident_text)
             if local_index >= 0 {
@@ -1454,11 +1429,17 @@ finish_assign_stmt :: proc(
                 }
 
                 targets[target_index] = ExprLocal{local_index}
-                continue
-            }
+            } else {
+                global_index := binding_table_find(&Active_State.global_env, ident_text)
+                if global_index < 0 {
+                    parser_error(
+                        proto_state,
+                        lhs_tokens[target_index],
+                        fmt.tprintf("assignment target `%s` is not a declared binding", ident_text),
+                    )
+                    return
+                }
 
-            global_index := binding_table_find(&Active_State.global_env, ident_text)
-            if global_index >= 0 {
                 if !Active_State.global_env.is_mutable[global_index] {
                     parser_error(
                         proto_state,
@@ -1469,21 +1450,21 @@ finish_assign_stmt :: proc(
                 }
 
                 targets[target_index] = ExprGlobal{BindingId(global_index)}
-                continue
             }
 
-            parser_error(
-                proto_state,
-                lhs_tokens[target_index],
-                fmt.tprintf("assignment target `%s` is not a declared binding", ident_text),
-            )
-            return
+        case:
         }
 
         #partial switch target in targets[target_index] {
-        case ExprIndex:
-        case:
-            parser_error(proto_state, lhs_tokens[target_index], "expected assignment target")
+        case ExprCall:
+            parser_error(
+                proto_state,
+                lhs_tokens[target_index],
+                fmt.tprintf(
+                    "call expression `%s` is not an assignment target; expected identifier or indexed expression",
+                    lhs_tokens[target_index].value.(string),
+                ),
+            )
             return
         }
     }
@@ -1510,8 +1491,24 @@ finish_assign_stmt :: proc(
 
     // Write temps into targets after all RHS values are ready.
     for target_index := 0; target_index < target_count; target_index += 1 {
-        lower_slot_to_assignment_target(proto_state, rhs_base + target_index, targets[target_index])
-        if Parser.failed { return }
+        src_slot := rhs_base + target_index
+
+        #partial switch target in targets[target_index] {
+        case ExprLocal:
+            dst_slot := proto_state.local_bindings[target.local_index].frame_slot
+            if dst_slot != src_slot {
+                emit_move(proto_state, dst_slot, src_slot)
+            }
+
+        case ExprGlobal:
+            emit_set_global(proto_state, src_slot, target.binding_id)
+
+        case ExprIndex:
+            emit_index_set(proto_state, target.container_slot, target.key_slot, src_slot)
+
+        case:
+            panic("assignment lowering reached non-assignable expression descriptor")
+        }
     }
 }
 
@@ -1666,11 +1663,10 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     // These arrays are one local table: index i describes the same comma-separated
-    // prefix entry in all three arrays. plain_ident delays name resolution until
-    // the parser knows whether this is a declaration or assignment.
+    // prefix entry in both arrays. lhs_tokens keeps the source anchor; targets
+    // carries the descriptor state.
     lhs_tokens: [MAX_FRAME_SLOTS]Token
     targets: [MAX_FRAME_SLOTS]ExprDesc
-    plain_ident: [MAX_FRAME_SLOTS]bool
     lhs_count := 0
 
     for {
@@ -1679,7 +1675,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             return
         }
 
-        lhs_tokens[lhs_count], targets[lhs_count], plain_ident[lhs_count] = parse_simple_stmt_prefix(proto_state)
+        lhs_tokens[lhs_count], targets[lhs_count] = parse_simple_stmt_prefix(proto_state)
         if Parser.failed { return }
         lhs_count += 1
 
@@ -1692,7 +1688,9 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
     if at_token(.DECL) {
         for target_index := 0; target_index < lhs_count; target_index += 1 {
-            if !plain_ident[target_index] {
+            #partial switch target in targets[target_index] {
+            case ExprUnresolvedBinding:
+            case:
                 parser_error(proto_state, lhs_tokens[target_index], "declaration target must be an identifier")
                 return
             }
@@ -1704,7 +1702,9 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
     if at_token(.IMMUTABLE_DECL) {
         for target_index := 0; target_index < lhs_count; target_index += 1 {
-            if !plain_ident[target_index] {
+            #partial switch target in targets[target_index] {
+            case ExprUnresolvedBinding:
+            case:
                 parser_error(proto_state, lhs_tokens[target_index], "declaration target must be an identifier")
                 return
             }
@@ -1715,7 +1715,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if at_token(.ASSIGN) {
-        finish_assign_stmt(proto_state, lhs_tokens[:lhs_count], targets[:lhs_count], plain_ident[:lhs_count])
+        finish_assign_stmt(proto_state, lhs_tokens[:lhs_count], targets[:lhs_count])
         return
     }
 
@@ -1726,11 +1726,29 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             return
         }
 
-        parser_error(
-            proto_state,
-            lhs_tokens[0],
-            fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)),
-        )
+        #partial switch target in targets[0] {
+        case ExprUnresolvedBinding:
+            parser_error(
+                proto_state,
+                lhs_tokens[0],
+                fmt.tprintf(
+                    "bare expression `%s` is not a statement; expected declaration, assignment, or call",
+                    lhs_tokens[0].value.(string),
+                ),
+            )
+        case ExprIndex:
+            parser_error(
+                proto_state,
+                lhs_tokens[0],
+                fmt.tprintf("indexed expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)),
+            )
+        case:
+            parser_error(
+                proto_state,
+                lhs_tokens[0],
+                fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)),
+            )
+        }
         return
     }
 

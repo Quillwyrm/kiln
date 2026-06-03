@@ -445,7 +445,11 @@ emit_call :: proc(proto_state: ^ProtoState, call_base, arg_count, requested_resu
 // set_call_requested_results rewrites the requested-result operand of a previously emitted CALL.
 // It enforces the u8 operand limit for the CALL result count.
 set_call_requested_results :: proc(proto_state: ^ProtoState, call_index, result_count: int) {
-    if result_count < 0 || result_count >= CALL_OPEN_RESULTS {
+    if result_count < 0 {
+        panic("CALL requested result count cannot be negative")
+    }
+
+    if result_count >= CALL_OPEN_RESULTS {
         set_error(proto_state.origin, "too many call results")
         Parser.failed = true
         return
