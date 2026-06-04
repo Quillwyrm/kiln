@@ -19,21 +19,10 @@ Parser := struct {
 ExprInvalid :: struct {}
 ExprNil     :: struct {}
 
-ExprUnresolvedBinding :: struct {
-    token: Token,
-}
-
-ExprLocal :: struct {
-    local_index: int,
-}
-
-ExprGlobal :: struct {
-    binding_id: BindingId,
-}
-
-ExprSlot :: struct {
-    slot: int,
-}
+ExprUnresolvedBinding :: distinct Token
+ExprLocalBinding      :: distinct int
+ExprGlobalBinding     :: distinct int
+ExprSlot              :: distinct int
 
 ExprCall :: struct {
     base_slot:  int,
@@ -53,8 +42,8 @@ ExprDesc :: union {
     f64,
     string,
     ExprUnresolvedBinding,
-    ExprLocal,
-    ExprGlobal,
+    ExprLocalBinding,
+    ExprGlobalBinding,
     ExprSlot,
     ExprCall,
     ExprIndex,
@@ -191,7 +180,7 @@ local_binding_find :: proc(proto_state: ^ProtoState, ident_name: string) -> int 
 // lower_expr_desc lowers an expression descriptor so that the value lands
 // in dst_slot at runtime.
 lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int) {
-    switch e in expr {
+    switch desc in expr {
     case ExprInvalid:
         return
 
@@ -199,30 +188,30 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
         emit_load_nil(proto_state, dst_slot)
 
     case bool:
-        if e {
+        if desc {
             emit_load_true(proto_state, dst_slot)
         } else {
             emit_load_false(proto_state, dst_slot)
         }
 
     case i64:
-        const_index := const_int(proto_state, e)
+        const_index := const_int(proto_state, desc)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
     case f64:
-        const_index := const_float(proto_state, e)
+        const_index := const_float(proto_state, desc)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
     case string:
-        const_index := const_string(proto_state, e)
+        const_index := const_string(proto_state, desc)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
     case ExprUnresolvedBinding:
         // Resolve bare identifier reads at the point they become values.
-        ident_name := e.token.value.(string)
+        ident_name := desc.value.(string)
         local_index := local_binding_find(proto_state, ident_name)
         if local_index >= 0 {
             src_slot := proto_state.local_bindings[local_index].frame_slot
@@ -235,37 +224,37 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
         binding_index := binding_table_find(&Active_State.global_env, ident_name)
         if binding_index < 0 {
             if proto_state.function_depth > 0 {
-                parser_error(proto_state, e.token, fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
+                parser_error(proto_state, Token(desc), fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
             } else {
-                parser_error(proto_state, e.token, fmt.tprintf("binding `%s` is not declared", ident_name))
+                parser_error(proto_state, Token(desc), fmt.tprintf("binding `%s` is not declared", ident_name))
             }
             return
         }
 
-        emit_get_global(proto_state, dst_slot, BindingId(binding_index))
+        emit_get_global_bind(proto_state, dst_slot, binding_index)
 
-    case ExprLocal:
-        src_slot := proto_state.local_bindings[e.local_index].frame_slot
+    case ExprLocalBinding:
+        src_slot := proto_state.local_bindings[int(desc)].frame_slot
         if src_slot != dst_slot {
             emit_move(proto_state, dst_slot, src_slot)
         }
 
-    case ExprGlobal:
-        emit_get_global(proto_state, dst_slot, e.binding_id)
+    case ExprGlobalBinding:
+        emit_get_global_bind(proto_state, dst_slot, int(desc))
 
     case ExprSlot:
-        if e.slot != dst_slot {
-            emit_move(proto_state, dst_slot, e.slot)
+        if int(desc) != dst_slot {
+            emit_move(proto_state, dst_slot, int(desc))
         }
 
     case ExprCall:
-        set_call_requested_results(proto_state, e.call_index, 1)
-        if e.base_slot != dst_slot {
-            emit_move(proto_state, dst_slot, e.base_slot)
+        set_call_requested_results(proto_state, desc.call_index, 1)
+        if desc.base_slot != dst_slot {
+            emit_move(proto_state, dst_slot, desc.base_slot)
         }
 
     case ExprIndex:
-        emit_index_get(proto_state, dst_slot, e.container_slot, e.key_slot)
+        emit_index_get(proto_state, dst_slot, desc.container_slot, desc.key_slot)
     }
 }
 
@@ -310,7 +299,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after array literal")
     if Parser.failed { return ExprInvalid{} }
 
-    return ExprSlot{array_slot}
+    return ExprSlot(array_slot)
 }
 
 // mapLiteral = "map" "{" [mapEntryList [","]] "}".
@@ -419,7 +408,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .RIGHT_BRACE, "expected '}' after map literal")
     if Parser.failed { return ExprInvalid{} }
 
-    return ExprSlot{map_slot}
+    return ExprSlot(map_slot)
 }
 
 // groupedExpr = "(" expr ")".
@@ -444,7 +433,7 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 // rootExpr = ident | functionLiteral | arrayLiteral | mapLiteral.
 parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind == .IDENT {
-        return ExprUnresolvedBinding{advance_token()}
+        return ExprUnresolvedBinding(advance_token())
     }
 
     if Parser.current_token.kind == .FUNCTION {
@@ -453,7 +442,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         parse_function_literal(proto_state, slot, "<function>", Parser.current_token)
         if Parser.failed { return ExprInvalid{} }
-        return ExprSlot{slot}
+        return ExprSlot(slot)
     }
 
     if Parser.current_token.kind == .LEFT_BRACKET {
@@ -479,7 +468,7 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
     base_slot: int
     slot_expr, callee_is_slot := callee.(ExprSlot)
     if callee_is_slot {
-        base_slot = slot_expr.slot
+        base_slot = int(slot_expr)
         reserve_slots_until(proto_state, base_slot + 1)
         if Parser.failed { return ExprInvalid{} }
     } else {
@@ -536,7 +525,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     container_slot: int
     slot_expr, container_is_slot := container.(ExprSlot)
     if container_is_slot {
-        container_slot = slot_expr.slot
+        container_slot = int(slot_expr)
         reserve_slots_until(proto_state, container_slot + 1)
         if Parser.failed { return ExprInvalid{} }
     } else {
@@ -644,7 +633,7 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         if Parser.failed { return ExprInvalid{} }
 
         emit_not(proto_state, result_slot, operand_slot)
-        return ExprSlot{result_slot}
+        return ExprSlot(result_slot)
     }
 
     if Parser.current_token.kind == .MINUS {
@@ -663,7 +652,7 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         if Parser.failed { return ExprInvalid{} }
 
         emit_neg(proto_state, result_slot, operand_slot)
-        return ExprSlot{result_slot}
+        return ExprSlot(result_slot)
     }
 
     return parse_primary_expr(proto_state)
@@ -703,7 +692,7 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the accumulated left result remains live after the binary op.
         proto_state.next_temp_slot = lhs_slot + 1
-        left = ExprSlot{lhs_slot}
+        left = ExprSlot(lhs_slot)
     }
 
     return left
@@ -741,7 +730,7 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the accumulated left result remains live after the binary op.
         proto_state.next_temp_slot = lhs_slot + 1
-        left = ExprSlot{lhs_slot}
+        left = ExprSlot(lhs_slot)
     }
 
     return left
@@ -796,7 +785,7 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the accumulated left result remains live after the binary op.
         proto_state.next_temp_slot = lhs_slot + 1
-        left = ExprSlot{lhs_slot}
+        left = ExprSlot(lhs_slot)
 
         // compareExpr allows one compareOp, not a chain.
         #partial switch Parser.current_token.kind {
@@ -850,7 +839,7 @@ parse_and_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the accumulated bool result remains live after the logical op.
         proto_state.next_temp_slot = result_slot + 1
-        left = ExprSlot{result_slot}
+        left = ExprSlot(result_slot)
     }
 
     return left
@@ -903,7 +892,7 @@ parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the accumulated bool result remains live after the logical op.
         proto_state.next_temp_slot = result_slot + 1
-        left = ExprSlot{result_slot}
+        left = ExprSlot(result_slot)
     }
 
     return left
@@ -936,7 +925,7 @@ parse_fallback_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the fallback result remains live after the nil test.
         proto_state.next_temp_slot = result_slot + 1
-        return ExprSlot{result_slot}
+        return ExprSlot(result_slot)
     }
 
     return left
@@ -1481,7 +1470,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
     ident_token = consume_token(proto_state, .IDENT, "expected identifier")
     if Parser.failed { return }
 
-    expr = ExprUnresolvedBinding{ident_token}
+    expr = ExprUnresolvedBinding(ident_token)
 
     if Parser.current_token.kind != .LEFT_PAREN && Parser.current_token.kind != .LEFT_BRACKET && Parser.current_token.kind != .DOT {
         return
@@ -1584,7 +1573,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
     // Assignment target resolution checks mutability; normal expression reads do not.
     #partial switch t in target {
     case ExprUnresolvedBinding:
-        ident_text := t.token.value.(string)
+        ident_text := t.value.(string)
 
         local_index := local_binding_find(proto_state, ident_text)
         if local_index >= 0 {
@@ -1593,7 +1582,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
                 return ExprInvalid{}
             }
 
-            return ExprLocal{local_index}
+            return ExprLocalBinding(local_index)
         }
 
         global_index := binding_table_find(&Active_State.global_env, ident_text)
@@ -1611,9 +1600,9 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
             return ExprInvalid{}
         }
 
-        return ExprGlobal{BindingId(global_index)}
+        return ExprGlobalBinding(global_index)
 
-    case ExprLocal, ExprGlobal, ExprIndex:
+    case ExprLocalBinding, ExprGlobalBinding, ExprIndex:
         return target
 
     case ExprCall:
@@ -1626,14 +1615,14 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
 set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprDesc) {
     #partial switch t in target {
-    case ExprLocal:
-        dst_slot := proto_state.local_bindings[t.local_index].frame_slot
+    case ExprLocalBinding:
+        dst_slot := proto_state.local_bindings[int(t)].frame_slot
         if dst_slot != src_slot {
             emit_move(proto_state, dst_slot, src_slot)
         }
 
-    case ExprGlobal:
-        emit_set_global(proto_state, src_slot, t.binding_id)
+    case ExprGlobalBinding:
+        emit_set_global_bind(proto_state, src_slot, int(t))
 
     case ExprIndex:
         emit_index_set(proto_state, t.container_slot, t.key_slot, src_slot)
@@ -1727,7 +1716,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     global_token := advance_token()
 
     lhs_tokens: [MAX_BINDINGS]Token
-    binding_ids: [MAX_BINDINGS]BindingId
+    binding_indexes: [MAX_BINDINGS]int
     lhs_count := 0
 
     for {
@@ -1797,7 +1786,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     global_count_before := Active_State.global_env.count
     for target_index := 0; target_index < lhs_count; target_index += 1 {
-        binding_ids[target_index] = binding_table_append(&Active_State.global_env, lhs_tokens[target_index].value.(string), is_mutable)
+        binding_indexes[target_index] = binding_table_append(&Active_State.global_env, lhs_tokens[target_index].value.(string), is_mutable)
     }
 
     rhs_base := proto_state.next_temp_slot
@@ -1830,7 +1819,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     for target_index := 0; target_index < lhs_count; target_index += 1 {
-        emit_set_global(proto_state, rhs_base + target_index, binding_ids[target_index])
+        emit_set_global_bind(proto_state, rhs_base + target_index, binding_indexes[target_index])
     }
 }
 

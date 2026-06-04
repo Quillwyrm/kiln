@@ -340,6 +340,60 @@ That syntax is real Odin, but it is not automatically the clearest shape for
 Kiln VM value logic.
 
 
+## Aliases, Distinct Types, And Union Variants
+
+`Name :: Existing_Type` creates an alias:
+
+```odin
+TokenAlias :: Token
+```
+
+An alias is interchangeable with the original type. In a union, this compiles:
+
+```odin
+ExprUnresolvedBinding :: Token
+
+ExprDesc :: union {
+    ExprUnresolvedBinding,
+}
+```
+
+But `ExprUnresolvedBinding` is still only an alias for `Token`. Use this only
+when that interchangeability is acceptable.
+
+`distinct` creates a real named type with the same backing shape:
+
+```odin
+ExprUnresolvedBinding :: distinct Token
+
+ExprDesc :: union {
+    ExprUnresolvedBinding,
+}
+```
+
+For distinct struct-backed types, field access still works directly:
+
+```odin
+expr := ExprUnresolvedBinding(token)
+name := expr.value.(string)
+```
+
+Project rule:
+
+- use an alias when the new name is only documentation
+- use `distinct` when the union variant or domain value needs a real separate type
+- do not wrap a single payload in a struct unless the wrapper adds real structure
+
+This is useful for parser `ExprDesc` variants. A single-token expression payload
+can be a distinct token-backed type instead of:
+
+```odin
+ExprUnresolvedBinding :: struct {
+    token: Token,
+}
+```
+
+
 ## `if` Initial Statements
 
 Odin supports `if` with an initial statement:

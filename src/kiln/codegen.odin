@@ -509,16 +509,16 @@ emit_return :: proc(proto_state: ^ProtoState, first_slot, result_count: int) {
 
 // Global binding instructions ====================================================================
 
-emit_get_global :: proc(proto_state: ^ProtoState, dst: int, binding_id: BindingId) {
+emit_get_global_bind :: proc(proto_state: ^ProtoState, dst: int, binding_index: int) {
     record_slots(proto_state, dst)
 
-    inst := u32(InstABx{ op= .GET_GLOBAL, a= u8(dst), b= u16(int(binding_id)) })
+    inst := u32(InstABx{ op= .GET_GLOBAL_BIND, a= u8(dst), b= u16(binding_index) })
     append(&proto_state.bytecode, inst)
 }
 
-emit_set_global :: proc(proto_state: ^ProtoState, src: int, binding_id: BindingId) {
+emit_set_global_bind :: proc(proto_state: ^ProtoState, src: int, binding_index: int) {
     record_slots(proto_state, src)
 
-    inst := u32(InstABx{ op= .SET_GLOBAL, a= u8(src), b= u16(int(binding_id)) })
+    inst := u32(InstABx{ op= .SET_GLOBAL_BIND, a= u8(src), b= u16(binding_index) })
     append(&proto_state.bytecode, inst)
 }

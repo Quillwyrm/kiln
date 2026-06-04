@@ -54,8 +54,8 @@ Opcode :: enum u8 {
     RETURN,        // ABx: A=first_return, B=produced_results
 
     // Global Bindings
-    GET_GLOBAL,    // ABx: A=dst, B=binding_id
-    SET_GLOBAL,    // ABx: A=src, B=binding_id
+    GET_GLOBAL_BIND, // ABx: A=dst, B=binding_index
+    SET_GLOBAL_BIND, // ABx: A=src, B=binding_index
 }
 
 // Count operand sentinels.
@@ -176,10 +176,8 @@ NativeFunctionObject :: struct {
 
 MAX_BINDINGS :: 256
 
-BindingId :: distinct int
-
 // BindingTable is a named value namespace.
-// BindingId values are indexes into one specific BindingTable.
+// Binding indexes are indexes into one specific BindingTable.
 BindingTable :: struct {
     names:      [MAX_BINDINGS]string,
     values:     [MAX_BINDINGS]Value,
@@ -238,12 +236,12 @@ binding_table_find :: proc(table: ^BindingTable, name: string) -> int {
 }
 
 // binding_table_append appends a new binding. Caller owns duplicate and capacity policy.
-binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: bool) -> BindingId {
-    binding_id := BindingId(table.count)
+binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: bool) -> int {
+    binding_index := table.count
     table.names[table.count] = name
     table.is_mutable[table.count] = is_mutable
     table.count += 1
-    return binding_id
+    return binding_index
 }
 
 
@@ -255,24 +253,23 @@ binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: boo
 bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     binding_index := binding_table_find(&Active_State.global_env, name)
 
-    binding_id: BindingId
     if binding_index >= 0 {
-        binding_id = BindingId(binding_index)
+        // Existing builtin binding is being refreshed during host setup.
     } else {
         if Active_State.global_env.count >= MAX_BINDINGS {
             set_error(SourceLocation{}, "too many global bindings")
             return
         }
 
-        binding_id = binding_table_append(&Active_State.global_env, name, false)
+        binding_index = binding_table_append(&Active_State.global_env, name, false)
     }
-    Active_State.global_env.is_mutable[int(binding_id)] = false
+    Active_State.global_env.is_mutable[binding_index] = false
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION
     native_function.impl = native_proc
 
-    Active_State.global_env.values[int(binding_id)] = Value(cast(^Object)native_function)
+    Active_State.global_env.values[binding_index] = Value(cast(^Object)native_function)
 }
 
 
@@ -1053,17 +1050,17 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 return Value{}, runtime_error(message)
             }
 
-        case .GET_GLOBAL:
+        case .GET_GLOBAL_BIND:
             inst := InstABx(word)
             dst := frame.slot_base + int(inst.a)
-            binding_id := int(inst.b)
-            state.slots[dst] = state.global_env.values[binding_id]
+            binding_index := int(inst.b)
+            state.slots[dst] = state.global_env.values[binding_index]
 
-        case .SET_GLOBAL:
+        case .SET_GLOBAL_BIND:
             inst := InstABx(word)
             src := frame.slot_base + int(inst.a)
-            binding_id := int(inst.b)
-            state.global_env.values[binding_id] = state.slots[src]
+            binding_index := int(inst.b)
+            state.global_env.values[binding_index] = state.slots[src]
 
         case .RETURN:
             inst := InstABx(word)
