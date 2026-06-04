@@ -12,8 +12,8 @@ MAX_BREAK_FIXUPS :: 1024
 MAX_CONST_POOL_ENTRIES :: 65536 // u16 const index in LOAD_CONST
 MAX_CHILD_PROTOS :: 65536      // u16 child proto index in LOAD_FUNC
 
-MIN_JUMP_FALSE_OFFSET :: -32768 // i16 operand
-MAX_JUMP_FALSE_OFFSET :: 32767
+MIN_COND_JUMP_OFFSET :: -32768 // i16 operand
+MAX_COND_JUMP_OFFSET :: 32767
 MIN_JUMP_OFFSET :: -8388608     // signed 24-bit operand
 MAX_JUMP_OFFSET :: 8388607
 
@@ -212,10 +212,10 @@ emit_move :: proc(proto_state: ^ProtoState, dst, src: int) {
 // Array operations ===============================================================================
 // Stub — wired when the parser parses corresponding syntax.
 
-emit_new_array :: proc(proto_state: ^ProtoState, dst, array_cap: int) {
+emit_new_array :: proc(proto_state: ^ProtoState, dst: int) {
     record_slots(proto_state, dst)
 
-    inst := u32(InstABx{ op= .NEW_ARRAY, a= u8(dst), b= u16(array_cap) })
+    inst := u32(InstAx{ op= .NEW_ARRAY, a= u32(dst) })
     append(&proto_state.bytecode, inst)
 }
 
@@ -378,7 +378,7 @@ emit_jump_false :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: 
     offset := 0
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
-        if offset < MIN_JUMP_FALSE_OFFSET || offset > MAX_JUMP_FALSE_OFFSET {
+        if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
             set_error(proto_state.origin, "conditional jump is too far")
             Parser.failed = true
             return jump_index
@@ -386,6 +386,26 @@ emit_jump_false :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: 
     }
 
     inst := u32(InstAsBx{ op= .JUMP_FALSE, a= u8(cond_slot), sb= i16(offset) })
+    append(&proto_state.bytecode, inst)
+
+    return jump_index
+}
+
+emit_jump_not_nil :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: int = -1) -> int {
+    record_slots(proto_state, cond_slot)
+
+    jump_index := next_inst_index(proto_state)
+    offset := 0
+    if target_index >= 0 {
+        offset = target_index - (jump_index + 1)
+        if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
+            set_error(proto_state.origin, "conditional jump is too far")
+            Parser.failed = true
+            return jump_index
+        }
+    }
+
+    inst := u32(InstAsBx{ op= .JUMP_NOT_NIL, a= u8(cond_slot), sb= i16(offset) })
     append(&proto_state.bytecode, inst)
 
     return jump_index
@@ -410,20 +430,20 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
         return
     }
 
-    if op == .JUMP_FALSE {
-        if offset < MIN_JUMP_FALSE_OFFSET || offset > MAX_JUMP_FALSE_OFFSET {
+    if op == .JUMP_FALSE || op == .JUMP_NOT_NIL {
+        if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
             set_error(proto_state.origin, "conditional jump is too far")
             Parser.failed = true
             return
         }
 
         old_inst := InstAsBx(word)
-        inst := u32(InstAsBx{ op= .JUMP_FALSE, a= old_inst.a, sb= i16(offset) })
+        inst := u32(InstAsBx{ op= op, a= old_inst.a, sb= i16(offset) })
         proto_state.bytecode[jump_index] = inst
         return
     }
 
-    panic("patch_jump expected JUMP or JUMP_FALSE")
+    panic("patch_jump expected JUMP or conditional jump")
 }
 
 // Calls and returns ==============================================================================

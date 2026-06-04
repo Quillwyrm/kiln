@@ -15,6 +15,7 @@ Parser := struct {
 // Expression descriptors decouple parsing from slot emission.
 // parse_expr returns an ExprDesc; surrounding context emits or adjusts it.
 
+// ExprInvalid only unwinds after Parser.failed already holds the real error.
 ExprInvalid :: struct {}
 ExprNil     :: struct {}
 
@@ -259,7 +260,6 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
 
     case ExprCall:
         set_call_requested_results(proto_state, e.call_index, 1)
-        if Parser.failed { return }
         if e.base_slot != dst_slot {
             emit_move(proto_state, dst_slot, e.base_slot)
         }
@@ -280,9 +280,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     array_slot := claim_temp_slot(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    emit_new_array(proto_state, array_slot, 0)
-    reserve_slots_until(proto_state, array_slot + 1)
-    if Parser.failed { return ExprInvalid{} }
+    emit_new_array(proto_state, array_slot)
 
     if Parser.current_token.kind != .RIGHT_BRACKET {
         for {
@@ -327,8 +325,6 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.failed { return ExprInvalid{} }
 
     emit_new_map(proto_state, map_slot)
-    reserve_slots_until(proto_state, map_slot + 1)
-    if Parser.failed { return ExprInvalid{} }
 
     key_texts := make([dynamic]string)
     defer delete(key_texts)
@@ -828,7 +824,6 @@ parse_and_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         if Parser.failed { return ExprInvalid{} }
 
         left_false_jump := emit_jump_false(proto_state, result_slot)
-        if Parser.failed { return ExprInvalid{} }
 
         right := parse_compare_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
@@ -840,11 +835,9 @@ parse_and_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         if Parser.failed { return ExprInvalid{} }
 
         right_false_jump := emit_jump_false(proto_state, rhs_slot)
-        if Parser.failed { return ExprInvalid{} }
 
         emit_load_true(proto_state, result_slot)
         end_jump := emit_jump(proto_state)
-        if Parser.failed { return ExprInvalid{} }
 
         patch_jump(proto_state, left_false_jump)
         if Parser.failed { return ExprInvalid{} }
@@ -878,11 +871,9 @@ parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         if Parser.failed { return ExprInvalid{} }
 
         left_false_jump := emit_jump_false(proto_state, result_slot)
-        if Parser.failed { return ExprInvalid{} }
 
         emit_load_true(proto_state, result_slot)
         end_jump := emit_jump(proto_state)
-        if Parser.failed { return ExprInvalid{} }
 
         patch_jump(proto_state, left_false_jump)
         if Parser.failed { return ExprInvalid{} }
@@ -897,11 +888,9 @@ parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         if Parser.failed { return ExprInvalid{} }
 
         right_false_jump := emit_jump_false(proto_state, rhs_slot)
-        if Parser.failed { return ExprInvalid{} }
 
         emit_load_true(proto_state, result_slot)
         end_jump_from_right := emit_jump(proto_state)
-        if Parser.failed { return ExprInvalid{} }
 
         patch_jump(proto_state, right_false_jump)
         if Parser.failed { return ExprInvalid{} }
@@ -920,10 +909,42 @@ parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return left
 }
 
-// expr = orExpr.
-// fallbackExpr belongs above orExpr when implemented.
+// fallbackExpr = orExpr ["else" fallbackExpr].
+parse_fallback_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    left := parse_or_expr(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    if Parser.current_token.kind == .ELSE {
+        advance_token()
+
+        result_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, left, result_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        end_jump := emit_jump_not_nil(proto_state, result_slot)
+
+        right := parse_fallback_expr(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, right, result_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        patch_jump(proto_state, end_jump)
+        if Parser.failed { return ExprInvalid{} }
+
+        // Only the fallback result remains live after the nil test.
+        proto_state.next_temp_slot = result_slot + 1
+        return ExprSlot{result_slot}
+    }
+
+    return left
+}
+
+// expr = fallbackExpr.
 parse_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    return parse_or_expr(proto_state)
+    return parse_fallback_expr(proto_state)
 }
 
 
@@ -1314,7 +1335,6 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         }
 
         false_jump := emit_jump_false(proto_state, cond_slot)
-        if Parser.failed { return }
 
         parse_switch_arm_body(proto_state)
         if Parser.failed { return }
@@ -1325,7 +1345,6 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         }
         end_jumps[end_jump_count] = emit_jump(proto_state)
         end_jump_count += 1
-        if Parser.failed { return }
 
         patch_jump(proto_state, false_jump)
         if Parser.failed { return }

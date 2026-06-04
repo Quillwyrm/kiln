@@ -262,6 +262,29 @@ print(1 < 2 and 3 < 4)
 print(false or 1 + 2 == 3)
 print(true or false and false)
 
+// Fallback else is nil-only coalescing.
+print("--- fallback else ---")
+
+print(nil else "fallback")
+print(false else true)
+print(0 else 99)
+print("value" else "fallback")
+print(nil else nil else "final")
+
+global fallback_hits := 0
+fallback_mark :: function() {
+    fallback_hits += 1
+    return "used"
+}
+
+print("kept" else fallback_mark())
+print(fallback_hits)
+print(nil else fallback_mark())
+print(fallback_hits)
+
+print(nil else false or true)
+print(false or nil else "x")
+
 // Compound assignment reads the target once, computes, then writes back.
 print("--- compound assignment ---")
 

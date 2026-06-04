@@ -16,7 +16,7 @@ Opcode :: enum u8 {
     MOVE,          // ABx: A=dst, B=src
 
     // Array Operations
-    NEW_ARRAY,     // ABx: A=dst,       B=initial capacity
+    NEW_ARRAY,     // Ax: A=dst
     ARRAY_LEN,     // ABx: A=dst,       B=src_array
     ARRAY_PUSH,    // ABx: A=dst_array, B=src
     ARRAY_POP,     // ABx: A=dst,       B=src_array
@@ -46,6 +46,7 @@ Opcode :: enum u8 {
     // Control Flow
     JUMP,          // Jump: offset (relative to post-fetch instruction_index)
     JUMP_FALSE,    // AsBx: A=cond, B=offset; jump if slot[A] is falsey
+    JUMP_NOT_NIL,  // AsBx: A=cond, B=offset; jump if slot[A] is not nil
     HALT,          // ABC: no operands used; stop VM and return nil. Currently unused — reserved for debug/tool use.
 
     // Calls and Returns
@@ -676,14 +677,12 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             src := frame.slot_base + int(inst.b)
             state.slots[dst] = state.slots[src]
 
-        // B = initial backing capacity for future pushes.
         case .NEW_ARRAY:
-            inst := InstABx(word)
+            inst := InstAx(word)
             dst := frame.slot_base + int(inst.a)
-            array_cap := int(inst.b)
             array_object := new(ArrayObject)
             array_object.header.kind = .ARRAY
-            array_object.data = make([dynamic]Value, 0, array_cap)
+            array_object.data = make([dynamic]Value)
             state.slots[dst] = Value(cast(^Object)array_object)
 
         case .ARRAY_LEN:
@@ -952,6 +951,13 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             inst := InstAsBx(word)
             condition := frame.slot_base + int(inst.a)
             if value_is_falsey(state.slots[condition]) {
+                frame.instruction_index += int(inst.sb)
+            }
+
+        case .JUMP_NOT_NIL:
+            inst := InstAsBx(word)
+            condition := frame.slot_base + int(inst.a)
+            if state.slots[condition] != nil {
                 frame.instruction_index += int(inst.sb)
             }
 
