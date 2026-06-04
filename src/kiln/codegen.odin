@@ -37,6 +37,8 @@ ProtoState :: struct {
     name:        string,
     param_count: int,
     function_depth: int,
+    is_module: bool,
+    module_index: int,
 
     bytecode:     [dynamic]u32,
     const_pool:   [dynamic]Value,
@@ -534,6 +536,13 @@ emit_get_module_bind :: proc(proto_state: ^ProtoState, dst, module_index, bindin
     record_slots(proto_state, dst)
 
     inst := u32(InstABC{ op= .GET_MODULE_BIND, a= u8(dst), b= u8(module_index), c= u8(binding_index) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_set_module_bind :: proc(proto_state: ^ProtoState, src, module_index, binding_index: int) {
+    record_slots(proto_state, src)
+
+    inst := u32(InstABC{ op= .SET_MODULE_BIND, a= u8(src), b= u8(module_index), c= u8(binding_index) })
     append(&proto_state.bytecode, inst)
 }
 

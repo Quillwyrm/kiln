@@ -23,7 +23,7 @@ run_source :: proc(state: ^State, source, source_name: string) -> (Value, ^Error
         return Value{}, compile_error
     }
 
-    vm_result, vm_error := run_vm(state)
+    vm_result, vm_error := run_proto(state, state.entry_proto)
     if vm_error != nil {
         return vm_result, vm_error
     }

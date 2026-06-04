@@ -59,6 +59,7 @@ Opcode :: enum u8 {
 
     // Module Bindings
     GET_MODULE_BIND, // ABC: A=dst, B=module_index, C=binding_index
+    SET_MODULE_BIND, // ABC: A=src, B=module_index, C=binding_index
 
     // Global Bindings
     GET_GLOBAL_BIND, // ABx: A=dst, B=binding_index
@@ -218,7 +219,7 @@ MAX_MODULES :: 256
 State :: struct {
     has_error:        bool,
     error:            Error,
-    entry_function:   ^ProtoFunctionObject,
+    entry_proto:      ^Proto,
     slots:            [MAX_VM_SLOTS]Value,
     slot_count:       int,
 
@@ -655,13 +656,11 @@ runtime_error :: proc(message: string) -> ^Error {
 
 // VM runner ======================================================================================
 
-run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
-    entry_proto := state.entry_function.impl
-
+run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) {
     // Seed the first frame at slot window base 0.
-    state.slot_count = entry_proto.frame_slot_count
+    state.slot_count = proto.frame_slot_count
     state.frame_stack[0] = CallFrame {
-        proto                    = entry_proto,
+        proto                    = proto,
         instruction_index        = 0,
         slot_base                = 0,
         return_slot_base         = 0,
@@ -1121,6 +1120,13 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             module_index := int(inst.b)
             binding_index := int(inst.c)
             state.slots[dst] = state.module_envs[module_index].values[binding_index]
+
+        case .SET_MODULE_BIND:
+            inst := InstABC(word)
+            src := frame.slot_base + int(inst.a)
+            module_index := int(inst.b)
+            binding_index := int(inst.c)
+            state.module_envs[module_index].values[binding_index] = state.slots[src]
 
         case .GET_GLOBAL_BIND:
             inst := InstABx(word)
