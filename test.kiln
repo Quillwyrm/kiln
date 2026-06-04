@@ -1,6 +1,9 @@
 // Kiln surface test.
 // Covers scanner -> parser -> codegen -> VM behavior for the implemented language core.
 
+import "debug"
+import "array"
+
 // Basic literal forms.
 print("--- literals ---")
 
@@ -96,6 +99,23 @@ print(shadow_name)
 global layered_name := "global binding"
 layered_name := "main binding"
 print(layered_name)
+
+// Imported native modules are explicit namespaces.
+print("--- native modules ---")
+
+print(debug.echo("module echo"))
+
+echo_from_function :: function() {
+    print(debug.echo("module in function"))
+}
+echo_from_function()
+
+module_items := []
+array.push(module_items, "first")
+array.push(module_items, "second")
+print(module_items[0], module_items[1])
+print(array.pop(module_items))
+print(array.pop(module_items))
 
 // `::` makes the binding immutable, not the referenced object.
 // The array binding is fixed, but its indexed contents can still change.

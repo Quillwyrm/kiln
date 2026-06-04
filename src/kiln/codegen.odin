@@ -11,6 +11,7 @@ MAX_LOOP_DEPTH :: 64
 MAX_BREAK_FIXUPS :: 1024
 MAX_CONST_POOL_ENTRIES :: 65536 // u16 const index in LOAD_CONST
 MAX_CHILD_PROTOS :: 65536      // u16 child proto index in LOAD_FUNC
+MAX_IMPORTS :: 64
 
 MIN_COND_JUMP_OFFSET :: -32768 // i16 operand
 MAX_COND_JUMP_OFFSET :: 32767
@@ -47,6 +48,10 @@ ProtoState :: struct {
     next_temp_slot:   int,
     scope_depth:      int,
     scope_local_counts: [MAX_FRAME_SLOTS]int,
+
+    import_names:          [MAX_IMPORTS]string,
+    import_module_indexes: [MAX_IMPORTS]int,
+    import_count:          int,
 
     // break_fixups stores instruction indexes for unresolved `break` jumps.
     break_fixups: [MAX_BREAK_FIXUPS]int,
@@ -520,6 +525,15 @@ emit_set_main_bind :: proc(proto_state: ^ProtoState, src: int, binding_index: in
     record_slots(proto_state, src)
 
     inst := u32(InstABx{ op= .SET_MAIN_BIND, a= u8(src), b= u16(binding_index) })
+    append(&proto_state.bytecode, inst)
+}
+
+// Module binding instructions ====================================================================
+
+emit_get_module_bind :: proc(proto_state: ^ProtoState, dst, module_index, binding_index: int) {
+    record_slots(proto_state, dst)
+
+    inst := u32(InstABC{ op= .GET_MODULE_BIND, a= u8(dst), b= u8(module_index), c= u8(binding_index) })
     append(&proto_state.bytecode, inst)
 }
 

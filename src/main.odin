@@ -79,7 +79,8 @@ main :: proc() {
     kstate := kiln.new_state()
     defer kiln.delete_state(kstate)
 
-    kiln.bind_global_env(kstate)
+    kiln.bind_core_env(kstate)
+    kiln.bind_core_modules(kstate)
 
     if command == "check" {
         err := kiln.check_file(kstate, source_path)

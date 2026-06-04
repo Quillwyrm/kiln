@@ -35,6 +35,11 @@ ExprIndex :: struct {
     key_slot:       int,
 }
 
+ExprModuleBinding :: struct {
+    module_index:  int,
+    binding_index: int,
+}
+
 ExprDesc :: union {
     ExprInvalid,
     ExprNil,
@@ -49,6 +54,7 @@ ExprDesc :: union {
     ExprSlot,
     ExprCall,
     ExprIndex,
+    ExprModuleBinding,
 }
 
 // Token cursor ===================================================================================
@@ -175,6 +181,40 @@ local_binding_find :: proc(proto_state: ^ProtoState, ident_name: string) -> int 
     return -1
 }
 
+import_namespace_find :: proc(proto_state: ^ProtoState, name: string) -> int {
+    for import_index := 0; import_index < proto_state.import_count; import_index += 1 {
+        if proto_state.import_names[import_index] == name {
+            return import_index
+        }
+    }
+    return -1
+}
+
+registered_module_find :: proc(name: string) -> int {
+    for module_index := 0; module_index < Active_State.module_count; module_index += 1 {
+        if Active_State.module_names[module_index] == name {
+            return module_index
+        }
+    }
+    return -1
+}
+
+module_namespace_from_path :: proc(path: string) -> string {
+    start := 0
+    for index := 0; index < len(path); index += 1 {
+        if path[index] == '/' || path[index] == '\\' {
+            start = index + 1
+        }
+    }
+
+    end := len(path)
+    if end - start > 5 && path[end - 5:] == ".kiln" {
+        end -= 5
+    }
+
+    return path[start:end]
+}
+
 
 // ExprDesc lowering =======================================================================
 // These translate descriptors into concrete bytecode.
@@ -266,6 +306,9 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
 
     case ExprIndex:
         emit_index_get(proto_state, dst_slot, desc.container_slot, desc.key_slot)
+
+    case ExprModuleBinding:
+        emit_get_module_bind(proto_state, dst_slot, desc.module_index, desc.binding_index)
     }
 }
 
@@ -562,6 +605,39 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     return ExprIndex{container_slot, key_slot}
 }
 
+// fieldPostfix = "." ident.
+// Current implementation supports imported module namespace access only.
+parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDesc {
+    dot_token := consume_token(proto_state, .DOT, "expected '.' to start access expression")
+    if Parser.failed { return ExprInvalid{} }
+
+    member_token := consume_token(proto_state, .IDENT, "expected identifier after '.'")
+    if Parser.failed { return ExprInvalid{} }
+
+    namespace_token, is_namespace_candidate := left.(ExprUnresolvedBinding)
+    if !is_namespace_candidate {
+        parser_error(proto_state, dot_token, "invalid access expression; expected imported namespace before '.'")
+        return ExprInvalid{}
+    }
+
+    namespace_name := namespace_token.value.(string)
+    import_index := import_namespace_find(proto_state, namespace_name)
+    if import_index < 0 {
+        parser_error(proto_state, Token(namespace_token), fmt.tprintf("invalid access expression; namespace `%s` not found", namespace_name))
+        return ExprInvalid{}
+    }
+
+    module_index := proto_state.import_module_indexes[import_index]
+    member_name := member_token.value.(string)
+    binding_index := binding_table_find(&Active_State.module_envs[module_index], member_name)
+    if binding_index < 0 {
+        parser_error(proto_state, member_token, fmt.tprintf("invalid access expression; module `%s` has no binding `%s`", namespace_name, member_name))
+        return ExprInvalid{}
+    }
+
+    return ExprModuleBinding{module_index, binding_index}
+}
+
 // chainExpr = rootExpr {postfix}.
 parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     expr := parse_root_expr(proto_state)
@@ -581,8 +657,9 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         }
 
         if Parser.current_token.kind == .DOT {
-            parser_error(proto_state, Parser.current_token, "field access is not implemented yet")
-            return ExprInvalid{}
+            expr = parse_field_postfix(proto_state, expr)
+            if Parser.failed { return ExprInvalid{} }
+            continue
         }
 
         break
@@ -1094,6 +1171,11 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
         column      = origin_token.column,
     }
     child_proto_state := begin_proto(child_origin, function_name, param_count, parent_proto_state.function_depth + 1)
+    for import_index := 0; import_index < parent_proto_state.import_count; import_index += 1 {
+        child_proto_state.import_names[import_index] = parent_proto_state.import_names[import_index]
+        child_proto_state.import_module_indexes[import_index] = parent_proto_state.import_module_indexes[import_index]
+    }
+    child_proto_state.import_count = parent_proto_state.import_count
 
     // Parameters are local slots starting at slot 0.
     // The VM call path places arguments directly into those slots.
@@ -1141,6 +1223,70 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
 
 // Statements =====================================================================================
+
+// importStmt = "import" [ident] stringLiteral.
+parse_import_stmt :: proc(proto_state: ^ProtoState) {
+    import_token := consume_token(proto_state, .IMPORT, "expected 'import'")
+    if Parser.failed { return }
+
+    alias_token := Token{}
+    has_alias := false
+    if Parser.current_token.kind == .IDENT {
+        alias_token = advance_token()
+        has_alias = true
+    }
+
+    path_token := consume_token(proto_state, .STRING, "expected module path string after import")
+    if Parser.failed { return }
+
+    module_path := path_token.value.(string)
+    namespace_name := module_namespace_from_path(module_path)
+    namespace_token := path_token
+    if has_alias {
+        namespace_name = alias_token.value.(string)
+        namespace_token = alias_token
+    }
+
+    if namespace_name == "" {
+        parser_error(proto_state, path_token, "import namespace invalid; expected non-empty module name or explicit alias")
+        return
+    }
+
+    if proto_state.import_count >= MAX_IMPORTS {
+        parser_error(proto_state, import_token, "too many imports")
+        return
+    }
+
+    import_index := import_namespace_find(proto_state, namespace_name)
+    if import_index >= 0 {
+        parser_error(proto_state, namespace_token, fmt.tprintf("import namespace `%s` is already declared", namespace_name))
+        return
+    }
+
+    main_index := binding_table_find(&Active_State.main_env, namespace_name)
+    if main_index >= 0 {
+        parser_error(proto_state, namespace_token, fmt.tprintf("import namespace `%s` conflicts with top-level binding", namespace_name))
+        return
+    }
+
+    module_index := registered_module_find(module_path)
+    if module_index < 0 {
+        parser_error(proto_state, path_token, fmt.tprintf("module `%s` is not registered", module_path))
+        return
+    }
+
+    for existing_import := 0; existing_import < proto_state.import_count; existing_import += 1 {
+        if proto_state.import_module_indexes[existing_import] == module_index {
+            existing_namespace := proto_state.import_names[existing_import]
+            parser_error(proto_state, path_token, fmt.tprintf("module `%s` is already imported as `%s`", module_path, existing_namespace))
+            return
+        }
+    }
+
+    proto_state.import_names[proto_state.import_count] = namespace_name
+    proto_state.import_module_indexes[proto_state.import_count] = module_index
+    proto_state.import_count += 1
+}
 
 // block = "{" {stmt} "}".
 parse_block_stmt :: proc(proto_state: ^ProtoState) {
@@ -1501,8 +1647,9 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
         }
 
         if Parser.current_token.kind == .DOT {
-            parser_error(proto_state, Parser.current_token, "field/namespace access is not implemented yet")
-            return
+            expr = parse_field_postfix(proto_state, expr)
+            if Parser.failed { return }
+            continue
         }
 
         break
@@ -1533,6 +1680,12 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
             main_index := binding_table_find(&Active_State.main_env, check_name)
             if main_index >= 0 {
                 parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` is already declared", check_name))
+                return
+            }
+
+            import_index := import_namespace_find(proto_state, check_name)
+            if import_index >= 0 {
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` conflicts with imported namespace", check_name))
                 return
             }
         }
@@ -1676,6 +1829,10 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
     case ExprCall:
         parser_error(proto_state, source_token, fmt.tprintf("call expression `%s` is not an assignment target; expected identifier or indexed expression", source_token.value.(string)))
+        return ExprInvalid{}
+
+    case ExprModuleBinding:
+        parser_error(proto_state, source_token, "invalid assignment target; module binding is not assignable")
         return ExprInvalid{}
     }
 
@@ -2039,6 +2196,11 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
+    if Parser.current_token.kind == .IMPORT {
+        parser_error(proto_state, Parser.current_token, "import statements must appear before other top-level statements")
+        return
+    }
+
     if Parser.current_token.kind == .IDENT || Parser.current_token.kind == .FUNCTION || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .MAP {
         parse_simple_stmt(proto_state)
         return
@@ -2051,6 +2213,11 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
 // sourceFile = {stmt} EOF.
 // Top-level statement temps die at statement end.
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
+    for !Parser.failed && Parser.current_token.kind == .IMPORT {
+        parse_import_stmt(proto_state)
+        if Parser.failed { return }
+    }
+
     for !Parser.failed && Parser.current_token.kind != .EOF {
         parse_stmt(proto_state)
         if Parser.failed { return }

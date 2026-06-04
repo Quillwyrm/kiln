@@ -37,6 +37,8 @@ TokenKind :: enum {
     // Binding / Construction Keywords
     GLOBAL,
     MAP,
+    IMPORT,
+    EXPORT,
 
     // Binding Operators
     DECL,           // :=
@@ -246,6 +248,10 @@ scan_ident_or_keyword :: proc() -> Token {
         return make_token(.GLOBAL)
     case "map":
         return make_token(.MAP)
+    case "import":
+        return make_token(.IMPORT)
+    case "export":
+        return make_token(.EXPORT)
     case:
         return make_token(.IDENT, TokenValue(token_text))
     }

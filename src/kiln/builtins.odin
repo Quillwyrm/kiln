@@ -270,16 +270,3 @@ native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
     kiln_state.slots[return_slot_base] = Value{}
     return 1
 }
-
-
-// Builtin binding ================================================================================
-
-bind_global_env :: proc(state: ^State) {
-    Active_State = state
-    bind_native_global("print", native_print)
-    bind_native_global("type", native_type)
-    bind_native_global("length", native_length)
-    bind_native_global("assert", native_assert)
-    bind_native_global("to_string", native_to_string)
-    bind_native_global("to_number", native_to_number)
-}

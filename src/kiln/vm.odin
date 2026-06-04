@@ -57,6 +57,9 @@ Opcode :: enum u8 {
     GET_MAIN_BIND,   // ABx: A=dst, B=binding_index
     SET_MAIN_BIND,   // ABx: A=src, B=binding_index
 
+    // Module Bindings
+    GET_MODULE_BIND, // ABC: A=dst, B=module_index, C=binding_index
+
     // Global Bindings
     GET_GLOBAL_BIND, // ABx: A=dst, B=binding_index
     SET_GLOBAL_BIND, // ABx: A=src, B=binding_index
@@ -210,6 +213,7 @@ CallFrame :: struct {
 // VM state =======================================================================================
 MAX_VM_SLOTS :: 4096
 MAX_CALLFRAMES :: 256
+MAX_MODULES :: 256
 // Host-owned runtime instance. Stores active frames, slots, bindings, and error state.
 State :: struct {
     has_error:        bool,
@@ -222,6 +226,9 @@ State :: struct {
     frame_count:      int,
     main_env:         BindingTable,
     global_env:       BindingTable,
+    module_names:     [MAX_MODULES]string,
+    module_envs:      [MAX_MODULES]BindingTable,
+    module_count:     int,
 }
 
 Active_State: ^State
@@ -275,6 +282,47 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     native_function.impl = native_proc
 
     Active_State.global_env.values[binding_index] = Value(cast(^Object)native_function)
+}
+
+// Module bindings ================================================================================
+
+bind_native_module :: proc(state: ^State, name: string) -> int {
+    for module_index := 0; module_index < state.module_count; module_index += 1 {
+        if state.module_names[module_index] == name {
+            return module_index
+        }
+    }
+
+    if state.module_count >= MAX_MODULES {
+        set_error(SourceLocation{}, "too many native modules")
+        return 0
+    }
+
+    module_index := state.module_count
+    state.module_names[module_index] = name
+    state.module_count += 1
+    return module_index
+}
+
+bind_native_module_function :: proc(state: ^State, module_index: int, name: string, native_proc: NativeFunction) {
+    table := &state.module_envs[module_index]
+    binding_index := binding_table_find(table, name)
+
+    if binding_index < 0 {
+        if table.count >= MAX_BINDINGS {
+            set_error(SourceLocation{}, "too many native module bindings")
+            return
+        }
+
+        binding_index = binding_table_append(table, name, false)
+    }
+    table.is_mutable[binding_index] = false
+
+    native_function := new(NativeFunctionObject)
+    native_function.header.kind = .NATIVE_FUNCTION
+    native_function.impl = native_proc
+
+    table.values[binding_index] = Value(cast(^Object)native_function)
 }
 
 
@@ -1066,6 +1114,13 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
             src := frame.slot_base + int(inst.a)
             binding_index := int(inst.b)
             state.main_env.values[binding_index] = state.slots[src]
+
+        case .GET_MODULE_BIND:
+            inst := InstABC(word)
+            dst := frame.slot_base + int(inst.a)
+            module_index := int(inst.b)
+            binding_index := int(inst.c)
+            state.slots[dst] = state.module_envs[module_index].values[binding_index]
 
         case .GET_GLOBAL_BIND:
             inst := InstABx(word)
