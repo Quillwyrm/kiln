@@ -3,11 +3,11 @@ package kiln
 import "core:fmt"
 
 // Parser state ===================================================================================
-// Token cursor and failure latch for one compile operation.
+// Token cursor and error latch for one compile operation.
 
 Parser := struct {
     current_token: Token,
-    failed:        bool, // global error latch — every mutating operation sets it, callers check and return immediately
+    failed:        bool, // mutating parser operations set this, callers check and return immediately
 }{}
 
 
@@ -266,126 +266,9 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
 }
 
 
-// Function literals ==============================================================================
+// Expression roots and chains =====================================================================
 
-// Function bodies consume braces but do not create an extra root scope.
-// Parameters and top-level body locals live together in the function's root scope.
-// Blocks inside the body still create scopes through normal statement parsing.
-parse_function_body :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
-    if Parser.failed { return }
-
-    for !Parser.failed && Parser.current_token.kind != .RIGHT_BRACE && Parser.current_token.kind != .EOF {
-        parse_stmt(proto_state)
-        if Parser.failed { return }
-        proto_state.next_temp_slot = proto_state.local_count
-    }
-
-    if Parser.current_token.kind == .EOF {
-        parser_error(proto_state, Parser.current_token, "expected '}' to close function body")
-        return
-    }
-
-    consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close function body")
-}
-
-// The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
-parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
-    consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
-    if Parser.failed { return }
-
-    consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
-    if Parser.failed { return }
-
-    // Parse parameters first while still compiling the parent.
-    // The child proto is not created until the function signature is known.
-    param_tokens: [MAX_FRAME_SLOTS]Token
-    param_count := 0
-    if Parser.current_token.kind != .RIGHT_PAREN {
-        for {
-            if param_count >= MAX_FRAME_SLOTS {
-                parser_error(parent_proto_state, Parser.current_token, "too many function parameters")
-                return
-            }
-
-            param_tokens[param_count] = consume_token(parent_proto_state, .IDENT, "expected parameter name")
-            if Parser.failed {
-                return
-            }
-            param_count += 1
-
-            if Parser.current_token.kind != .COMMA {
-                break
-            }
-
-            advance_token()
-            if Parser.current_token.kind == .RIGHT_PAREN {
-                break
-            }
-        }
-    }
-
-    consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
-    if Parser.failed { return }
-
-    // Build a fresh proto state for the function body.
-    // Parent proto state stays alive so the finished child can be appended to it.
-    child_origin := SourceLocation{
-        source_name = parent_proto_state.origin.source_name,
-        line        = origin_token.line,
-        column      = origin_token.column,
-    }
-    child_proto_state := begin_proto(child_origin, function_name, param_count)
-
-    // Parameters are local slots starting at slot 0.
-    // The VM call path places arguments directly into those slots.
-    for param_index := 0; param_index < param_count; param_index += 1 {
-        param_name := param_tokens[param_index].value.(string)
-
-        for prev_index := 0; prev_index < param_index; prev_index += 1 {
-            if param_tokens[prev_index].value.(string) == param_name {
-                parser_error(&child_proto_state, param_tokens[param_index], fmt.tprintf("parameter `%s` is already declared in this function", param_name))
-                delete_proto_state(&child_proto_state)
-                return
-            }
-        }
-
-        local_binding_append(&child_proto_state, param_name, true)
-    }
-
-    parse_function_body(&child_proto_state)
-    if Parser.failed {
-        delete_proto_state(&child_proto_state)
-        return
-    }
-
-    // A function that reaches the closing brace returns nil.
-    return_slot := claim_temp_slot(&child_proto_state)
-    if Parser.failed {
-        delete_proto_state(&child_proto_state)
-        return
-    }
-    emit_load_nil(&child_proto_state, return_slot)
-    emit_return(&child_proto_state, return_slot, 1)
-
-    // Store the compiled child proto on the parent, then emit LOAD_FUNC.
-    // LOAD_FUNC creates the runtime function object when the parent executes.
-    if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
-        delete_proto_state(&child_proto_state)
-        parser_error(parent_proto_state, origin_token, "too many functions in function")
-        return
-    }
-
-    child_proto := end_proto(&child_proto_state)
-    child_proto_index := len(parent_proto_state.child_protos)
-    append(&parent_proto_state.child_protos, child_proto)
-    emit_load_func(parent_proto_state, dst, child_proto_index)
-}
-
-
-// Expression parsers ==============================================================================
-// Each returns an ExprDesc. No slot destination is passed in.
-
+// arrayLiteral = "[" [exprList [","]] "]".
 parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .LEFT_BRACKET, "expected '[' to start array literal")
     if Parser.failed { return ExprInvalid{} }
@@ -428,6 +311,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return ExprSlot{array_slot}
 }
 
+// mapLiteral = "map" "{" [mapEntryList [","]] "}".
 parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .MAP, "expected 'map' to start map literal")
     if Parser.failed { return ExprInvalid{} }
@@ -538,6 +422,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return ExprSlot{map_slot}
 }
 
+// groupedExpr = "(" expr ")".
 parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .LEFT_PAREN, "expected '(' to start grouped expression")
     if Parser.failed { return ExprInvalid{} }
@@ -556,6 +441,7 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return expr
 }
 
+// rootExpr = ident | functionLiteral | arrayLiteral | mapLiteral.
 parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind == .IDENT {
         return ExprUnresolvedBinding{advance_token()}
@@ -583,8 +469,9 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return ExprInvalid{}
 }
 
+// callPostfix = "(" [exprList [","]] ")".
 // Layout: callee_slot, arg0, arg1, ...
-// Arguments are single-valued (no call expansion in call args).
+// Arguments are single-valued; call expansion only happens in return/assignment lists.
 parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDesc {
     consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
     if Parser.failed { return ExprInvalid{} }
@@ -641,6 +528,7 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
     return ExprCall{base_slot, call_index}
 }
 
+// indexPostfix = "[" expr "]".
 parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> ExprDesc {
     consume_token(proto_state, .LEFT_BRACKET, "expected '[' to start index expression")
     if Parser.failed { return ExprInvalid{} }
@@ -674,6 +562,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     return ExprIndex{container_slot, key_slot}
 }
 
+// chainExpr = rootExpr {postfix}.
 parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     expr := parse_root_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
@@ -702,6 +591,10 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return expr
 }
 
+// Expression parsers ==============================================================================
+// Each returns an ExprDesc. No slot destination is passed in.
+
+// primaryExpr = chainExpr | basicLiteral | groupedExpr.
 parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     #partial switch Parser.current_token.kind {
     case .INT:
@@ -733,6 +626,7 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 }
 
+// unaryExpr = unaryOp unaryExpr | primaryExpr.
 parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind == .NOT {
         advance_token()
@@ -775,6 +669,7 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return parse_primary_expr(proto_state)
 }
 
+// mulExpr = unaryExpr {mulOp unaryExpr}.
 parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     left := parse_unary_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
@@ -814,6 +709,7 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return left
 }
 
+// addExpr = mulExpr {addOp mulExpr}.
 parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     left := parse_mul_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
@@ -851,6 +747,7 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return left
 }
 
+// compareExpr = addExpr [compareOp addExpr].
 parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     left := parse_add_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
@@ -890,6 +787,7 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
             emit_less_or_equal(proto_state, lhs_slot, lhs_slot, rhs_slot)
 
         case .GREATER:
+            // a > b is emitted as b < a because the VM has LESS, not GREATER.
             emit_less(proto_state, lhs_slot, rhs_slot, lhs_slot)
 
         case .GREATER_OR_EQUAL:
@@ -911,6 +809,8 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return left
 }
 
+// expr = compareExpr.
+// fallbackExpr/orExpr/andExpr belong above compareExpr when implemented.
 parse_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return parse_compare_expr(proto_state)
 }
@@ -918,12 +818,10 @@ parse_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
 // Expression lists ================================================================================
 
-// Parses: expr { "," expr }
-//
+// exprList = expr {"," expr}.
 // Every expression before the final one is emitted as one value,
-// starting at base_slot. The final expression is returned as ExprDesc
-// so the caller can expand a final call or materialize it normally.
-//
+// starting at base_slot. The final expression stays as ExprDesc so
+// callers can choose fixed results or final-call expansion.
 // Invariant: base_slot must equal proto_state.next_temp_slot at entry.
 parse_expr_list :: proc(proto_state: ^ProtoState, base_slot: int) -> (expr_count: int, last_expr: ExprDesc) {
     expr_count = 1
@@ -995,9 +893,124 @@ finish_expr_list_to_slots :: proc(proto_state: ^ProtoState, base_slot: int, expr
 }
 
 
+// Function literals ==============================================================================
+
+// functionBody = "{" {stmt} "}".
+// Parameters and body-root locals share the function root scope.
+// Nested blocks still create scopes through normal statement parsing.
+parse_function_body :: proc(proto_state: ^ProtoState) {
+    consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
+    if Parser.failed { return }
+
+    for !Parser.failed && Parser.current_token.kind != .RIGHT_BRACE && Parser.current_token.kind != .EOF {
+        parse_stmt(proto_state)
+        if Parser.failed { return }
+        proto_state.next_temp_slot = proto_state.local_count
+    }
+
+    if Parser.current_token.kind == .EOF {
+        parser_error(proto_state, Parser.current_token, "expected '}' to close function body")
+        return
+    }
+
+    consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close function body")
+}
+
+// functionLiteral = "function" "(" [paramList [","]] ")" block.
+// The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
+parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
+    consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
+    if Parser.failed { return }
+
+    consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
+    if Parser.failed { return }
+
+    // Parameters are collected before creating the child proto so its arity is known.
+    param_tokens: [MAX_FRAME_SLOTS]Token
+    param_count := 0
+    if Parser.current_token.kind != .RIGHT_PAREN {
+        for {
+            if param_count >= MAX_FRAME_SLOTS {
+                parser_error(parent_proto_state, Parser.current_token, "too many function parameters")
+                return
+            }
+
+            param_tokens[param_count] = consume_token(parent_proto_state, .IDENT, "expected parameter name")
+            if Parser.failed {
+                return
+            }
+            param_count += 1
+
+            if Parser.current_token.kind != .COMMA {
+                break
+            }
+
+            advance_token()
+            if Parser.current_token.kind == .RIGHT_PAREN {
+                break
+            }
+        }
+    }
+
+    consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
+    if Parser.failed { return }
+
+    // Parent proto state stays alive so the finished child can be appended to it.
+    child_origin := SourceLocation{
+        source_name = parent_proto_state.origin.source_name,
+        line        = origin_token.line,
+        column      = origin_token.column,
+    }
+    child_proto_state := begin_proto(child_origin, function_name, param_count)
+
+    // Parameters are local slots starting at slot 0.
+    // The VM call path places arguments directly into those slots.
+    for param_index := 0; param_index < param_count; param_index += 1 {
+        param_name := param_tokens[param_index].value.(string)
+
+        for prev_index := 0; prev_index < param_index; prev_index += 1 {
+            if param_tokens[prev_index].value.(string) == param_name {
+                parser_error(&child_proto_state, param_tokens[param_index], fmt.tprintf("parameter `%s` is already declared in this function", param_name))
+                delete_proto_state(&child_proto_state)
+                return
+            }
+        }
+
+        local_binding_append(&child_proto_state, param_name, true)
+    }
+
+    parse_function_body(&child_proto_state)
+    if Parser.failed {
+        delete_proto_state(&child_proto_state)
+        return
+    }
+
+    // Function fallthrough is an implicit nil return.
+    return_slot := claim_temp_slot(&child_proto_state)
+    if Parser.failed {
+        delete_proto_state(&child_proto_state)
+        return
+    }
+    emit_load_nil(&child_proto_state, return_slot)
+    emit_return(&child_proto_state, return_slot, 1)
+
+    // LOAD_FUNC creates the runtime function object when the parent executes.
+    if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
+        delete_proto_state(&child_proto_state)
+        parser_error(parent_proto_state, origin_token, "too many functions in function")
+        return
+    }
+
+    child_proto := end_proto(&child_proto_state)
+    child_proto_index := len(parent_proto_state.child_protos)
+    append(&parent_proto_state.child_protos, child_proto)
+    emit_load_func(parent_proto_state, dst, child_proto_index)
+}
+
+
 // Statements =====================================================================================
 
-// Parses a braced block { ... } with a new lexical scope.
+// block = "{" {stmt} "}".
 parse_block_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' to start block")
     if Parser.failed { return }
@@ -1022,7 +1035,7 @@ parse_block_stmt :: proc(proto_state: ^ProtoState) {
     end_scope(proto_state)
 }
 
-// if <expression> { <statements> } [else if ...] [else { <statements> }]
+// ifStmt = "if" expr block ["else" (ifStmt | block)].
 parse_if_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .IF, "expected 'if'")
     if Parser.failed { return }
@@ -1038,6 +1051,7 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     false_jump := emit_jump_false(proto_state, condition_slot)
+    // Condition is dead after the branch; reclaim its temp slots.
     proto_state.next_temp_slot = temp_save
     parse_block_stmt(proto_state)
     if Parser.failed { return }
@@ -1065,8 +1079,7 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 }
 
-// Condition form evaluates each iteration.
-// Braced form is infinite-loop sugar with no condition-exit jump.
+// forStmt = "for" expr block | "for" block.
 parse_for_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .FOR, "expected 'for'")
     if Parser.failed { return }
@@ -1075,6 +1088,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
         parser_error(proto_state, Parser.current_token, "too many nested loops")
         return
     }
+    // Break fixups added after this point belong to this loop.
     proto_state.loop_break_fixup_base[proto_state.loop_depth] = proto_state.break_fixup_count
     proto_state.loop_depth += 1
 
@@ -1096,6 +1110,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
         if Parser.failed { return }
 
         exit_jump = emit_jump_false(proto_state, condition_slot)
+        // Condition is dead after the branch; reclaim its temp slots.
         proto_state.next_temp_slot = temp_save
         has_exit_jump = true
     }
@@ -1113,6 +1128,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
 
     proto_state.loop_depth -= 1
     break_fixup_base := proto_state.loop_break_fixup_base[proto_state.loop_depth]
+    // Patch breaks from this loop body only.
     for fixup_index := break_fixup_base; fixup_index < proto_state.break_fixup_count; fixup_index += 1 {
         patch_jump(proto_state, proto_state.break_fixups[fixup_index])
         if Parser.failed { return }
@@ -1122,16 +1138,18 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
 
 // Switch parsing ==================================================================================
 
-// Subject or subjectless statement switch. Subject evaluated once. No fallthrough.
+// switchStmt = "switch" expr switchBody | "switch" switchBody.
 parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .SWITCH, "expected 'switch'")
     if Parser.failed { return }
 
+    // Keep the subject slot live across arms. Arms restore next_temp_slot
+    // to subject_live_cursor (past the subject), not to temp_save.
     temp_save := proto_state.next_temp_slot
     subject_slot := -1
     subject_live_cursor := temp_save
 
-    // Subject switch: evaluate subject expression into a temp slot.
+    // Subject switch: evaluate subject expression once.
     if Parser.current_token.kind != .LEFT_BRACE {
         subject_slot = claim_temp_slot(proto_state)
         if Parser.failed { return }
@@ -1149,7 +1167,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .LEFT_BRACE, "expected '{' after switch subject")
     if Parser.failed { return }
 
-    // Reject empty switch body and unexpected tokens.
+    // Empty switch bodies are valid; any other first token must start an arm.
     if Parser.current_token.kind != .CASE && Parser.current_token.kind != .ELSE && Parser.current_token.kind != .RIGHT_BRACE {
         parser_error(proto_state, Parser.current_token, "expected 'case', 'else', or '}' in switch")
         return
@@ -1160,7 +1178,6 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     for Parser.current_token.kind == .CASE {
         advance_token()
 
-        // Compile the case expression.
         case_slot := claim_temp_slot(proto_state)
         if Parser.failed { return }
 
@@ -1235,7 +1252,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     proto_state.next_temp_slot = temp_save
 }
 
-// Parses a switch arm body as a scoped statement list terminated by case/else/}/EOF.
+// switchArmBody = ":" {stmt}. Parsed until case/else/}/EOF.
 parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
     begin_scope(proto_state)
     if Parser.failed { return }
@@ -1257,7 +1274,7 @@ parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
     end_scope(proto_state)
 }
 
-// Only valid inside loop bodies.
+// breakStmt = "break".
 parse_break_stmt :: proc(proto_state: ^ProtoState) {
     break_token := consume_token(proto_state, .BREAK, "expected 'break'")
     if Parser.failed { return }
@@ -1277,8 +1294,7 @@ parse_break_stmt :: proc(proto_state: ^ProtoState) {
     proto_state.break_fixup_count += 1
 }
 
-// return, return expr, or return a, b, c.
-// Non-final expressions produce one value. A final call returns its open result range.
+// returnStmt = "return" [exprList].
 parse_return_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RETURN, "expected 'return'")
     if Parser.failed { return }
@@ -1327,12 +1343,10 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
 
 // Simple statements ==============================================================================
 // simpleStmt = declStmt | assignStmt | compoundAssignStmt | callStmt.
-// Identifier-started simple statements share a comma-separated prefix before
-// the parser knows whether :=, =, or a call statement follows.
+// Identifier-started forms share a comma-separated prefix until the parser sees
+// :=, ::, =, a compound assignment operator, or statement end.
 
-// Parses one identifier-rooted prefix from a simple statement.
-// Bare identifiers stay as ExprUnresolvedBinding until the statement context
-// decides declaration, assignment, read, or call behavior.
+// simpleStmtPrefix = ident {postfix}.
 parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Token, expr: ExprDesc) {
     ident_token = consume_token(proto_state, .IDENT, "expected identifier")
     if Parser.failed { return }
@@ -1367,6 +1381,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
     return
 }
 
+// declStmt = ["global"] identList declOp exprList.
 finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutable: bool) {
     advance_token()
 
@@ -1434,6 +1449,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     }
 }
 
+// assignTarget = ident | ident {postfix} accessPostfix.
 resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, target: ExprDesc) -> ExprDesc {
     // Assignment target resolution checks mutability; normal expression reads do not.
     #partial switch t in target {
@@ -1493,6 +1509,7 @@ set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprD
     }
 }
 
+// assignStmt = assignTarget {"," assignTarget} "=" exprList.
 finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, targets: []ExprDesc) {
     target_count := len(targets)
 
@@ -1524,6 +1541,7 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
     }
 }
 
+// compoundAssignStmt = assignTarget compoundAssignOp expr.
 finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, target: ExprDesc) {
     resolved_target := resolve_assign_target(proto_state, lhs_token, target)
     if Parser.failed { return }
@@ -1533,6 +1551,8 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     value_slot := claim_temp_slot(proto_state)
     if Parser.failed { return }
 
+    // ExprIndex already holds the container and key slots, so arr[i] += rhs
+    // reads and writes the same resolved target.
     lower_expr_desc(proto_state, resolved_target, value_slot)
     if Parser.failed { return }
 
@@ -1568,6 +1588,7 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     set_assign_target(proto_state, value_slot, resolved_target)
 }
 
+// globalDecl = "global" identList declOp exprList.
 parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     global_token := advance_token()
 
@@ -1679,6 +1700,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     }
 }
 
+// callStmt = rootExpr {postfix} callPostfix.
 parse_call_stmt :: proc(proto_state: ^ProtoState) {
     expr := parse_chain_expr(proto_state)
     if Parser.failed { return }
@@ -1722,6 +1744,8 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
         advance_token()
     }
 
+    // Dispatch in decreasing specificity: declare (:=), imm declare (::),
+    // assign (=), compound assign (+= etc), then call or error.
     if Parser.current_token.kind == .DECL {
         for target_index := 0; target_index < lhs_count; target_index += 1 {
             #partial switch target in targets[target_index] {
@@ -1790,7 +1814,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
     parser_error(proto_state, Parser.current_token, "expected declaration or assignment after target list")
 }
 
-// Supported forms: block, if/for/break/return/switch, decl, assign, call.
+// stmt = block | simpleStmt | ifStmt | forStmt | switchStmt | returnStmt | breakStmt.
 parse_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.current_token.kind == .RETURN {
         parse_return_stmt(proto_state)
@@ -1845,7 +1869,8 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", error_token_text(token)))
 }
 
-// Parses top-level statements until EOF. After each statement, next_temp_slot resets to local_count so temp slots are reused across statements.
+// sourceFile = {stmt} EOF.
+// Top-level statement temps die at statement end.
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
     for !Parser.failed && Parser.current_token.kind != .EOF {
         parse_stmt(proto_state)
