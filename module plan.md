@@ -1,38 +1,188 @@
-# Kiln Module / File Environment Refactor Plan
+# Kiln Module / File Environment Plan
 
-## Core Direction
+## Current Settled Model
 
-Shift Kiln from:
+Kiln has moved from:
 
 ```txt
-file = proto
+top-level declarations = entry proto locals
 ```
 
 to:
 
 ```txt
-file = persistent BindingTable + init proto
+top-level declarations = main_env bindings
+entry proto            = init bytecode for the main file
 ```
 
-A source file has:
+Current persistent binding tables on `State`:
 
 ```txt
-file environment
-    persistent BindingTable for top-level bindings
+main_env
+    top-level bindings from the main source file
 
-init proto
-    executable bytecode that initializes that file environment
+global_env
+    host/builtin bindings and explicit `global` declarations
 ```
 
-This removes the discrepancy between entry files and imported modules.
+Current resolution order:
 
-Top-level file declarations are no longer root-frame locals. They are persistent file bindings.
+```txt
+local bindings -> main_env -> global_env
+```
 
-Nested function/block declarations stay frame locals.
+This is intentional. `main_env` gives same-file/top-level visibility without closures or upvalues.
 
-## Why This Exists
+Example:
 
-This case should work:
+```kiln
+scale := 10
+
+mul :: function(x) {
+    return x * scale
+}
+
+print(mul(3))
+```
+
+`scale` is not captured. It is loaded from `main_env`.
+
+## Shadowing Rule
+
+Kiln should use normal language shadowing:
+
+```txt
+same scope/table duplicate = error
+shadowing across scopes/env layers = allowed
+assignment resolves the nearest mutable binding
+```
+
+So these are valid:
+
+```kiln
+name := "main"
+
+show :: function(name) {
+    print(name)
+}
+```
+
+```kiln
+global debug := "global"
+debug := "main"
+
+print(debug) // main binding
+```
+
+Same-scope duplicates are still errors:
+
+```kiln
+x := 1
+x := 2 // duplicate top-level binding
+```
+
+```kiln
+f := function(x, x) {} // duplicate parameter binding
+```
+
+## Declaration-Before-Use
+
+Kiln is declaration-before-use.
+
+This is not a bug or missing module feature:
+
+```kiln
+call_later :: function() {
+    later()
+}
+
+later :: function() {}
+```
+
+`later` is not visible while `call_later` is compiled.
+
+That fits the one-pass parser-lowerer design and keeps Kiln simpler. If order-independent top-level functions are ever wanted, that would require a deliberate predeclare pass. Do not add that accidentally.
+
+## Current Bytecode Shape
+
+Do not replace this with generic env refs yet.
+
+Current concrete opcodes:
+
+```txt
+GET_MAIN_BIND
+SET_MAIN_BIND
+GET_GLOBAL_BIND
+SET_GLOBAL_BIND
+```
+
+This is the right current shape. It keeps the VM direct and avoids a fake generic environment abstraction before modules exist.
+
+Future module support may add:
+
+```txt
+GET_MODULE_BIND
+SET_MODULE_BIND
+```
+
+or may later justify a generic binding instruction. Do not decide that until module envs exist in code.
+
+## Current BindingTable Meaning
+
+`BindingTable` is persistent named storage:
+
+```txt
+names[]
+values[]
+is_mutable[]
+count
+```
+
+It is used for:
+
+```txt
+main_env
+global_env
+future module envs
+```
+
+Binding indexes are only meaningful inside one specific `BindingTable`.
+
+## Runtime / Host API Boundary
+
+Do not over-design runtime/load/check semantics yet.
+
+Current rule:
+
+```txt
+State is the active mutable Kiln runtime/program container.
+compile_source may mutate it.
+After compile failure, the active State is not guaranteed meaningful.
+```
+
+The CLI creates a fresh `State` for each command, which is enough for now.
+
+Do not add rollback, lifecycle preservation, "loaded program" management, or embedding policy until the runtime API becomes the active task.
+
+## Why Modules Still Need File Environments
+
+For modules, the same idea generalizes:
+
+```txt
+source file = persistent file/module BindingTable + init proto
+```
+
+A module file has:
+
+```txt
+module_env
+    persistent BindingTable for top-level module bindings
+
+init proto
+    executable bytecode that initializes module_env
+```
+
+Example:
 
 ```kiln
 scale := 10
@@ -44,142 +194,36 @@ mul :: function(x) {
 export { mul }
 ```
 
-`mul` must be able to use `scale` later, after the file init proto has finished.
+`mul` must be able to read `scale` after the module init proto has finished.
 
-Because Kiln has no closures/upvalues, `scale` cannot live in the parent proto frame. It must live in persistent file/module storage.
+Because Kiln has no closures/upvalues, `scale` cannot live in the module init proto frame. It must live in persistent module storage.
 
-So:
+## Future Module Storage Shape
 
-```txt
-scale
-    file BindingTable binding
+Keep storage role-readable until the code earns a more generic shape.
 
-mul
-    file BindingTable binding holding a function value
-
-mul body
-    resolves scale through same-file BindingTable lookup
-```
-
-This is not closure capture. It is same-file binding access.
-
-## BindingTable Meaning
-
-A `BindingTable` is persistent named storage:
-
-```txt
-BindingTable
-    names[]
-    values[]
-    is_mutable[]
-    count
-```
-
-It holds all bindings for that environment, not only exports.
-
-Examples:
-
-```txt
-global_env
-    core builtins and explicit global declarations
-
-entry_env
-    top-level bindings from the entry file
-
-module_env
-    top-level bindings from one imported source/native/bundle module
-```
-
-A module BindingTable contains private and exported bindings.
-
-Export is visibility over existing bindings. It does not copy values.
-
-```txt
-module BindingTable
-    scale    private
-    mul      exported
-```
-
-## Storage Shape
-
-Do not flatten everything into a vague `binding_tables[]` unless the code earns it.
-
-Prefer role-readable storage:
+Likely future `State` direction:
 
 ```txt
 State
+    main_env:   BindingTable
     global_env: BindingTable
-    entry_env: BindingTable
+
     module_envs: fixed/dynamic collection of BindingTable
-    module_count: number of used module envs
+    module_count: int
 ```
 
-`global_env` and `entry_env` are distinct because they have distinct language roles.
+No `EnvRef` enum or generic environment registry yet.
 
-`module_envs` stores imported source modules, native modules, and later bundle namespaces.
+If module lookup needs a compact handle later, add the smallest handle that the actual implementation needs.
 
-## Access Shape
+## Future Lookup Rules
 
-Storage can stay role-based, while bytecode access becomes generic.
-
-Use a compact environment reference:
-
-```txt
-env_ref
-    identifies one BindingTable
-
-binding_id
-    identifies one binding inside that BindingTable
-```
-
-Conceptually:
-
-```txt
-env_ref 0
-    global_env
-
-env_ref 1
-    entry_env
-
-env_ref 2 + n
-    module_envs[n]
-```
-
-Then bytecode can use generic binding-table operations:
-
-```txt
-GET_BINDING dst, env_ref, binding_id
-SET_BINDING src, env_ref, binding_id
-```
-
-This replaces source-shaped opcodes like:
-
-```txt
-GET_GLOBAL
-SET_GLOBAL
-GET_FILE
-SET_FILE
-GET_MODULE
-SET_MODULE
-```
-
-The VM does not need to know whether the source name came from globals, the entry file, a source module, or a native module.
-
-The VM only needs:
-
-```txt
-which BindingTable?
-which binding inside it?
-read or write?
-```
-
-## Lookup Rules
-
-Inside code compiled from a file:
+Inside code compiled from a file/module:
 
 ```txt
 1. locals / params
-2. current file environment
+2. current file/module environment
 3. global environment
 ```
 
@@ -212,23 +256,22 @@ math.mul(3)   // ok if exported
 math.scale    // error if private
 ```
 
-## ProtoState Context
+## ProtoState Context Later
 
-`ProtoState` should keep the compile context needed to resolve names.
+Child function protos must know which persistent file/module environment they belong to.
 
-Likely needed:
+Current main-file implementation can hard-code `main_env`.
+
+For modules, `ProtoState` will probably need a small compile context:
 
 ```txt
-current_env_ref
-    current file environment for this proto
-
-import namespace table
-    namespace name -> env_ref
+current module/file env
+imported namespace table
 ```
 
-Do not add a stored `is_module_top_level` flag.
+Do not add that until modules exist.
 
-File-root declaration can be inferred from existing compile state:
+Top-level declaration is still inferred from existing compile state:
 
 ```txt
 function_depth == 0
@@ -238,110 +281,13 @@ scope_depth == 0
 So:
 
 ```txt
-if function_depth == 0 and scope_depth == 0:
-    declaration goes into current file environment
-else:
-    declaration goes into frame locals
-```
-
-Child function protos keep the same `current_env_ref` as the file they are compiled from. That lets function bodies resolve same-file bindings without closures.
-
-## ExprDesc Direction
-
-Current `ExprGlobal` can collapse into a more general binding descriptor.
-
-Conceptual descriptor:
-
-```txt
-ExprBinding
-    env_ref
-    binding_id
-```
-
-Then these all become the same lowerable shape:
-
-```txt
-same-file binding
-    current_env_ref + binding_id
-
-global binding
-    global env_ref + binding_id
-
-imported namespace member
-    imported env_ref + exported binding_id
-```
-
-The compile-time resolution rules differ, but the VM access is the same.
-
-## Top-Level Declaration Lowering
-
-At file root:
-
-```kiln
-x := 10
-```
-
-declares `x` in the current file environment.
-
-At nested scope:
-
-```kiln
-function() {
-    x := 10
-}
-```
-
-declares `x` as a frame local.
-
-For file-root declarations:
-
-```txt
-1. validate names
-2. create/reserve BindingTable entries
-3. lower RHS into temp slots
-4. SET_BINDING into the file environment
-```
-
-The exact self-reference policy can be decided during implementation, but the key storage rule is settled:
-
-```txt
-file-root declarations are file environment bindings, not frame locals
-```
-
-## Global Declarations
-
-`global` remains explicit.
-
-```kiln
-global debug := true
-```
-
-declares into `global_env`.
-
-Normal file-root declaration:
-
-```kiln
-debug := true
-```
-
-declares into the current file environment.
-
-So the storage classes are:
-
-```txt
-local
-    frame slot
-
-file binding
-    current file BindingTable
-
-global binding
-    global_env BindingTable
+top-level declaration -> current file/module BindingTable
+nested declaration    -> frame local slot
 ```
 
 ## Export Semantics
 
-A module BindingTable holds all top-level bindings.
+A module `BindingTable` holds all top-level module bindings.
 
 Export only controls external visibility.
 
@@ -373,7 +319,7 @@ Export does not:
 copy values
 create a map
 create a module object
-move bindings into entry_env
+move bindings into main_env
 merge bindings into globals
 ```
 
@@ -385,7 +331,7 @@ other files may resolve this binding through namespace access
 
 ## Native Modules First
 
-After the binding-table/file-env refactor, implement native modules before source-file modules.
+Implement native modules before source-file modules.
 
 Reason:
 
@@ -394,7 +340,7 @@ native modules test namespace access and BindingTable module storage
 without needing path resolution, source loading, cycle detection, bundles, or export manifests
 ```
 
-A native module is just a host-filled BindingTable.
+A native module is just a host-filled module BindingTable.
 
 Example conceptual host setup:
 
@@ -403,16 +349,7 @@ bind_native_module(state, "array")
 bind_native_module(state, "math")
 ```
 
-The module environment contains native function values:
-
-```txt
-array module env
-    push     NativeFunctionObject
-    pop      NativeFunctionObject
-    length   NativeFunctionObject
-```
-
-Kiln source still imports it normally:
+Kiln source imports it normally:
 
 ```kiln
 import "array"
@@ -422,14 +359,6 @@ array.push(items, value)
 
 Do not make native module functions global by default.
 
-The point is to prove:
-
-```txt
-import -> namespace name -> env_ref
-namespace.member -> binding_id
-call -> native function value
-```
-
 ## Minimal Native Module Import
 
 First import resolver can be tiny:
@@ -437,7 +366,7 @@ First import resolver can be tiny:
 ```txt
 parse import "array"
     check registered native module envs
-    bind namespace name "array" to env_ref
+    bind namespace name "array" to that module env
 ```
 
 No filesystem yet.
@@ -460,32 +389,26 @@ with import
 
 After native module imports work, source modules become another provider for the same namespace mechanism.
 
-Source module load flow:
+Source module load flow later:
 
 ```txt
 resolve path
 if already loaded:
-    return module env_ref
+    return module env
 
 if currently loading:
     cyclic import error
 
 create module BindingTable
-compile source file with current_env_ref = module env_ref
-load imports first
+compile source file against that module env
 run module init proto once
 mark loaded
-return module env_ref
+return module env
 ```
 
-Source lookup policy can follow the existing module plan:
+Source lookup policy can be decided then.
 
-```txt
-user source files/directories first
-core/host native modules as fallback
-```
-
-So a source file can override a core module name if resolution rules allow that.
+Do not build path resolution, source loading, cycles, or caching into the first native-module import pass.
 
 ## Bundles Later
 
@@ -511,60 +434,18 @@ duplicate exported names are errors
 
 Do not implement bundles before plain source modules.
 
-## Suggested Milestones
+## Remaining Milestones
 
-### Phase 1: Generic Binding Access
-
-Replace or route `GET_GLOBAL` / `SET_GLOBAL` through generic binding access.
-
-Goal:
-
-```txt
-globals still work
-VM now knows how to read/write BindingTable by env_ref + binding_id
-```
-
-No language behavior change required yet.
-
-### Phase 2: Entry File Environment
-
-Add `entry_env`.
-
-Change file-root declarations to use `entry_env`.
-
-Nested locals remain frame slots.
-
-Test:
-
-```kiln
-scale := 10
-
-mul :: function(x) {
-    return x * scale
-}
-
-print(mul(3))
-```
-
-Expected:
-
-```txt
-30
-```
-
-This proves persistent file-scope bindings work without closures.
-
-### Phase 3: Native Module Environments
+### Phase 1: Native Module Namespaces
 
 Add host-filled native module envs.
 
-Import native module namespaces:
+Implement:
 
-```kiln
+```txt
 import "array"
-
-items := []
-array.push(items, 10)
+namespace.member access
+call native function through namespace
 ```
 
 Goal:
@@ -575,25 +456,11 @@ native functions work through module envs
 no source loader yet
 ```
 
-### Phase 4: Source File Modules
+### Phase 2: Export Visibility
 
-Add `.kiln` source file loading.
+Add export state for module env bindings.
 
-Each source module gets its own file env and init proto.
-
-Goal:
-
-```kiln
-import "math"
-
-print(math.mul(3))
-```
-
-where `math.kiln` defines and exports `mul`.
-
-### Phase 5: Export Visibility
-
-Add final export forms:
+Possible forms:
 
 ```kiln
 export
@@ -606,17 +473,33 @@ export {
 
 No export means exports nothing.
 
-Bare export means export all top-level file bindings.
+Bare export means export all top-level module bindings.
 
-Manifest exports listed top-level file bindings.
+Manifest export lists specific top-level module bindings.
 
-### Phase 6: Bundles
+### Phase 3: Source File Modules
+
+Add `.kiln` source file loading.
+
+Each source module gets its own module env and init proto.
+
+Goal:
+
+```kiln
+import "math"
+
+print(math.mul(3))
+```
+
+where `math.kiln` defines and exports `mul`.
+
+### Phase 4: Bundles
 
 Add directory bundle imports after file modules are stable.
 
 Bundles merge exported child bindings into one namespace.
 
-## Non-Goals For This Pass
+## Non-Goals For The Next Pass
 
 Do not add:
 
@@ -631,6 +514,10 @@ bundles before file modules
 dynamic native plugins
 manifest files
 package manager behavior
+generic env_ref abstraction
+generic GET_BINDING / SET_BINDING
+runtime/check/load lifecycle policy
+order-independent forward references
 ```
 
 ## Core Model Summary
@@ -639,32 +526,23 @@ package manager behavior
 BindingTable
     persistent named storage
 
+main_env
+    main source file BindingTable
+
 global_env
-    global BindingTable
+    host/builtin/global BindingTable
 
-entry_env
-    entry file BindingTable
+module_envs
+    future imported source/native/bundle BindingTables
 
-module_envs[]
-    imported source/native/bundle BindingTables
-
-env_ref
-    compact reference to one BindingTable
-
-binding_id
-    index inside that BindingTable
-
-GET_BINDING / SET_BINDING
-    VM primitive for persistent binding access
-
-file root declaration
-    current file BindingTable
+top-level declaration
+    current file/module BindingTable
 
 nested declaration
     frame local slot
 
 same-file lookup
-    locals -> current file env -> globals
+    locals -> current file/module env -> globals
 
 namespace lookup
     imported namespace -> module env -> exported binding
@@ -673,35 +551,35 @@ native module
     host-filled module env
 
 source module
-    file env + init proto
+    module env + init proto
 
 export
-    visibility over existing file env bindings
+    visibility over existing module env bindings
 ```
 
 ## Main Design Win
 
 Modules do not add a new namespace mechanism.
 
-They reveal the real primitive:
+They use the primitive Kiln already has:
 
 ```txt
 BindingTable is persistent namespace storage.
 ```
 
-Files, globals, native modules, and source modules all use that primitive.
-
-The VM stays simple:
-
-```txt
-read/write indexed BindingTable values
-```
-
 The parser/codegen owns meaning:
 
 ```txt
-which env?
-which binding?
+which binding table?
+which binding index?
 is it visible?
 is it mutable?
+```
+
+The VM stays simple and concrete:
+
+```txt
+GET_MAIN_BIND / SET_MAIN_BIND
+GET_GLOBAL_BIND / SET_GLOBAL_BIND
+future module binding ops only when modules exist
 ```

@@ -53,6 +53,10 @@ Opcode :: enum u8 {
     CALL,          // ABC: A=callee/result base, B=arg_count, C=requested_results
     RETURN,        // ABx: A=first_return, B=produced_results
 
+    // Main Bindings
+    GET_MAIN_BIND,   // ABx: A=dst, B=binding_index
+    SET_MAIN_BIND,   // ABx: A=src, B=binding_index
+
     // Global Bindings
     GET_GLOBAL_BIND, // ABx: A=dst, B=binding_index
     SET_GLOBAL_BIND, // ABx: A=src, B=binding_index
@@ -206,7 +210,7 @@ CallFrame :: struct {
 // VM state =======================================================================================
 MAX_VM_SLOTS :: 4096
 MAX_CALLFRAMES :: 256
-// Host-owned runtime instance. Stores active frames, slots, globals, and error state.
+// Host-owned runtime instance. Stores active frames, slots, bindings, and error state.
 State :: struct {
     has_error:        bool,
     error:            Error,
@@ -216,6 +220,7 @@ State :: struct {
 
     frame_stack:      [MAX_CALLFRAMES]CallFrame,
     frame_count:      int,
+    main_env:         BindingTable,
     global_env:       BindingTable,
 }
 
@@ -1049,6 +1054,18 @@ run_vm :: proc(state: ^State) -> (result: Value, err: ^Error) {
                 message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
             }
+
+        case .GET_MAIN_BIND:
+            inst := InstABx(word)
+            dst := frame.slot_base + int(inst.a)
+            binding_index := int(inst.b)
+            state.slots[dst] = state.main_env.values[binding_index]
+
+        case .SET_MAIN_BIND:
+            inst := InstABx(word)
+            src := frame.slot_base + int(inst.a)
+            binding_index := int(inst.b)
+            state.main_env.values[binding_index] = state.slots[src]
 
         case .GET_GLOBAL_BIND:
             inst := InstABx(word)

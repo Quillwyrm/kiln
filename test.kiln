@@ -58,6 +58,45 @@ set_shared_count :: function() {
 set_shared_count()
 print(shared_count)
 
+// File-root declarations live in main_env.
+// Functions can read and assign them without closures or upvalues.
+// Locals and parameters may shadow outer names; resolution uses the nearest binding.
+print("--- main env and shadowing ---")
+
+main_label := "file root"
+
+read_main_label :: function() {
+    print(main_label)
+}
+read_main_label()
+
+main_counter := 1
+
+bump_main_counter :: function() {
+    main_counter += 1
+}
+bump_main_counter()
+print(main_counter)
+
+shadow_name := "main binding"
+
+show_local_shadow :: function() {
+    shadow_name := "local binding"
+    print(shadow_name)
+}
+show_local_shadow()
+print(shadow_name)
+
+show_param_shadow :: function(shadow_name) {
+    print(shadow_name)
+}
+show_param_shadow("parameter binding")
+print(shadow_name)
+
+global layered_name := "global binding"
+layered_name := "main binding"
+print(layered_name)
+
 // `::` makes the binding immutable, not the referenced object.
 // The array binding is fixed, but its indexed contents can still change.
 print("--- immutable bindings ---")

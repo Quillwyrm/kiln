@@ -21,6 +21,7 @@ ExprNil     :: struct {}
 
 ExprUnresolvedBinding :: distinct Token
 ExprLocalBinding      :: distinct int
+ExprMainBinding       :: distinct int
 ExprGlobalBinding     :: distinct int
 ExprSlot              :: distinct int
 
@@ -43,6 +44,7 @@ ExprDesc :: union {
     string,
     ExprUnresolvedBinding,
     ExprLocalBinding,
+    ExprMainBinding,
     ExprGlobalBinding,
     ExprSlot,
     ExprCall,
@@ -221,8 +223,14 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
             return
         }
 
-        binding_index := binding_table_find(&Active_State.global_env, ident_name)
-        if binding_index < 0 {
+        main_index := binding_table_find(&Active_State.main_env, ident_name)
+        if main_index >= 0 {
+            emit_get_main_bind(proto_state, dst_slot, main_index)
+            return
+        }
+
+        global_index := binding_table_find(&Active_State.global_env, ident_name)
+        if global_index < 0 {
             if proto_state.function_depth > 0 {
                 parser_error(proto_state, Token(desc), fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
             } else {
@@ -231,13 +239,16 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
             return
         }
 
-        emit_get_global_bind(proto_state, dst_slot, binding_index)
+        emit_get_global_bind(proto_state, dst_slot, global_index)
 
     case ExprLocalBinding:
         src_slot := proto_state.local_bindings[int(desc)].frame_slot
         if src_slot != dst_slot {
             emit_move(proto_state, dst_slot, src_slot)
         }
+
+    case ExprMainBinding:
+        emit_get_main_bind(proto_state, dst_slot, int(desc))
 
     case ExprGlobalBinding:
         emit_get_global_bind(proto_state, dst_slot, int(desc))
@@ -1506,6 +1517,60 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
     lhs_count := len(lhs_tokens)
 
+    if proto_state.function_depth == 0 && proto_state.scope_depth == 0 {
+        binding_indexes: [MAX_BINDINGS]int
+
+        for check_index := 0; check_index < lhs_count; check_index += 1 {
+            check_name := lhs_tokens[check_index].value.(string)
+
+            for prev_index := 0; prev_index < check_index; prev_index += 1 {
+                if lhs_tokens[prev_index].value.(string) == check_name {
+                    parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in top-level declaration", check_name))
+                    return
+                }
+            }
+
+            main_index := binding_table_find(&Active_State.main_env, check_name)
+            if main_index >= 0 {
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` is already declared", check_name))
+                return
+            }
+        }
+
+        if Active_State.main_env.count + lhs_count > MAX_BINDINGS {
+            parser_error(proto_state, lhs_tokens[0], "too many top-level bindings")
+            return
+        }
+
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            binding_indexes[target_index] = binding_table_append(&Active_State.main_env, lhs_tokens[target_index].value.(string), is_mutable)
+        }
+
+        rhs_base := proto_state.next_temp_slot
+
+        if lhs_count == 1 && Parser.current_token.kind == .FUNCTION {
+            ident_text := lhs_tokens[0].value.(string)
+            parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
+            if Parser.failed { return }
+        } else {
+            expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
+            if Parser.failed { return }
+
+            if expr_count > lhs_count {
+                parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
+                return
+            }
+
+            finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
+            if Parser.failed { return }
+        }
+
+        for target_index := 0; target_index < lhs_count; target_index += 1 {
+            emit_set_main_bind(proto_state, rhs_base + target_index, binding_indexes[target_index])
+        }
+        return
+    }
+
     // Validate all declared bindings before RHS emission.
     for check_index := 0; check_index < lhs_count; check_index += 1 {
         check_name := lhs_tokens[check_index].value.(string)
@@ -1515,12 +1580,6 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
                 parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in local declaration", check_name))
                 return
             }
-        }
-
-        global_index := binding_table_find(&Active_State.global_env, check_name)
-        if global_index >= 0 {
-            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local binding `%s` cannot shadow global binding", check_name))
-            return
         }
 
         scope_start := 0
@@ -1585,6 +1644,16 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
             return ExprLocalBinding(local_index)
         }
 
+        main_index := binding_table_find(&Active_State.main_env, ident_text)
+        if main_index >= 0 {
+            if !Active_State.main_env.is_mutable[main_index] {
+                parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
+                return ExprInvalid{}
+            }
+
+            return ExprMainBinding(main_index)
+        }
+
         global_index := binding_table_find(&Active_State.global_env, ident_text)
         if global_index < 0 {
             if proto_state.function_depth > 0 {
@@ -1602,7 +1671,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
         return ExprGlobalBinding(global_index)
 
-    case ExprLocalBinding, ExprGlobalBinding, ExprIndex:
+    case ExprLocalBinding, ExprMainBinding, ExprGlobalBinding, ExprIndex:
         return target
 
     case ExprCall:
@@ -1620,6 +1689,9 @@ set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprD
         if dst_slot != src_slot {
             emit_move(proto_state, dst_slot, src_slot)
         }
+
+    case ExprMainBinding:
+        emit_set_main_bind(proto_state, src_slot, int(t))
 
     case ExprGlobalBinding:
         emit_set_global_bind(proto_state, src_slot, int(t))
@@ -1772,11 +1844,6 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             return
         }
 
-        local_index := local_binding_find(proto_state, check_name)
-        if local_index >= 0 {
-            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` conflicts with local binding", check_name))
-            return
-        }
     }
 
     if Active_State.global_env.count + lhs_count > MAX_BINDINGS {
@@ -1784,7 +1851,6 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    global_count_before := Active_State.global_env.count
     for target_index := 0; target_index < lhs_count; target_index += 1 {
         binding_indexes[target_index] = binding_table_append(&Active_State.global_env, lhs_tokens[target_index].value.(string), is_mutable)
     }
@@ -1794,28 +1860,18 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     if lhs_count == 1 && Parser.current_token.kind == .FUNCTION {
         ident_text := lhs_tokens[0].value.(string)
         parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
-        if Parser.failed {
-            Active_State.global_env.count = global_count_before
-            return
-        }
+        if Parser.failed { return }
     } else {
         expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
-        if Parser.failed {
-            Active_State.global_env.count = global_count_before
-            return
-        }
+        if Parser.failed { return }
 
         if expr_count > lhs_count {
-            Active_State.global_env.count = global_count_before
             parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
             return
         }
 
         finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
-        if Parser.failed {
-            Active_State.global_env.count = global_count_before
-            return
-        }
+        if Parser.failed { return }
     }
 
     for target_index := 0; target_index < lhs_count; target_index += 1 {

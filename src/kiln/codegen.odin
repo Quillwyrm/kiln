@@ -507,6 +507,22 @@ emit_return :: proc(proto_state: ^ProtoState, first_slot, result_count: int) {
     append(&proto_state.bytecode, inst)
 }
 
+// Main binding instructions ======================================================================
+
+emit_get_main_bind :: proc(proto_state: ^ProtoState, dst: int, binding_index: int) {
+    record_slots(proto_state, dst)
+
+    inst := u32(InstABx{ op= .GET_MAIN_BIND, a= u8(dst), b= u16(binding_index) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_set_main_bind :: proc(proto_state: ^ProtoState, src: int, binding_index: int) {
+    record_slots(proto_state, src)
+
+    inst := u32(InstABx{ op= .SET_MAIN_BIND, a= u8(src), b= u16(binding_index) })
+    append(&proto_state.bytecode, inst)
+}
+
 // Global binding instructions ====================================================================
 
 emit_get_global_bind :: proc(proto_state: ^ProtoState, dst: int, binding_index: int) {
