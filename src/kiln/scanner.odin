@@ -58,6 +58,8 @@ TokenKind :: enum {
     // Comparison / Logical Operators
     EQUAL,
     NOT,
+    AND,
+    OR,
     NOT_EQUAL,
     LESS,
     LESS_OR_EQUAL,
@@ -220,6 +222,10 @@ scan_ident_or_keyword :: proc() -> Token {
         return make_token(.FALSE)
     case "nil":
         return make_token(.NIL)
+    case "and":
+        return make_token(.AND)
+    case "or":
+        return make_token(.OR)
     case "if":
         return make_token(.IF)
     case "else":

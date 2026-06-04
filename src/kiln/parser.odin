@@ -809,10 +809,117 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return left
 }
 
-// expr = compareExpr.
-// fallbackExpr/orExpr/andExpr belong above compareExpr when implemented.
+// andExpr = compareExpr {"and" compareExpr}.
+parse_and_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    left := parse_compare_expr(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    for Parser.current_token.kind == .AND {
+        advance_token()
+
+        result_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, left, result_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        left_false_jump := emit_jump_false(proto_state, result_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        right := parse_compare_expr(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        rhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, right, rhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        right_false_jump := emit_jump_false(proto_state, rhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        emit_load_true(proto_state, result_slot)
+        end_jump := emit_jump(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        patch_jump(proto_state, left_false_jump)
+        if Parser.failed { return ExprInvalid{} }
+        patch_jump(proto_state, right_false_jump)
+        if Parser.failed { return ExprInvalid{} }
+        emit_load_false(proto_state, result_slot)
+
+        patch_jump(proto_state, end_jump)
+        if Parser.failed { return ExprInvalid{} }
+
+        // Only the accumulated bool result remains live after the logical op.
+        proto_state.next_temp_slot = result_slot + 1
+        left = ExprSlot{result_slot}
+    }
+
+    return left
+}
+
+// orExpr = andExpr {"or" andExpr}.
+parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
+    left := parse_and_expr(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    for Parser.current_token.kind == .OR {
+        advance_token()
+
+        result_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, left, result_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        left_false_jump := emit_jump_false(proto_state, result_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        emit_load_true(proto_state, result_slot)
+        end_jump := emit_jump(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        patch_jump(proto_state, left_false_jump)
+        if Parser.failed { return ExprInvalid{} }
+
+        right := parse_and_expr(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        rhs_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        lower_expr_desc(proto_state, right, rhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        right_false_jump := emit_jump_false(proto_state, rhs_slot)
+        if Parser.failed { return ExprInvalid{} }
+
+        emit_load_true(proto_state, result_slot)
+        end_jump_from_right := emit_jump(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        patch_jump(proto_state, right_false_jump)
+        if Parser.failed { return ExprInvalid{} }
+        emit_load_false(proto_state, result_slot)
+
+        patch_jump(proto_state, end_jump)
+        if Parser.failed { return ExprInvalid{} }
+        patch_jump(proto_state, end_jump_from_right)
+        if Parser.failed { return ExprInvalid{} }
+
+        // Only the accumulated bool result remains live after the logical op.
+        proto_state.next_temp_slot = result_slot + 1
+        left = ExprSlot{result_slot}
+    }
+
+    return left
+}
+
+// expr = orExpr.
+// fallbackExpr belongs above orExpr when implemented.
 parse_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    return parse_compare_expr(proto_state)
+    return parse_or_expr(proto_state)
 }
 
 

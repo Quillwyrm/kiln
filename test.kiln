@@ -231,6 +231,37 @@ case 1 + 5: print("comparison switch")
 else:       print("comparison switch failed")
 }
 
+// Logical operators short-circuit and return bool.
+print("--- and/or ---")
+
+print(true and true)
+print(true and false)
+print(false and true)
+print(false or true)
+print(nil or false)
+print(0 and "text")
+print(false or 0)
+print([] and map{})
+
+global logical_hits := 0
+logical_mark :: function() {
+    logical_hits += 1
+    return true
+}
+
+print(false and logical_mark())
+print(logical_hits)
+print(true or logical_mark())
+print(logical_hits)
+print(true and logical_mark())
+print(logical_hits)
+print(false or logical_mark())
+print(logical_hits)
+
+print(1 < 2 and 3 < 4)
+print(false or 1 + 2 == 3)
+print(true or false and false)
+
 // Compound assignment reads the target once, computes, then writes back.
 print("--- compound assignment ---")
 
