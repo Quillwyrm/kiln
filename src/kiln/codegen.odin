@@ -35,6 +35,7 @@ ProtoState :: struct {
     origin: SourceLocation,
     name:        string,
     param_count: int,
+    function_depth: int,
 
     bytecode:     [dynamic]u32,
     const_pool:   [dynamic]Value,
@@ -72,11 +73,12 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
 
 // origin identifies where this proto originated for diagnostics.
 // name is cloned because it can come from source token text.
-begin_proto :: proc(origin: SourceLocation, name: string, param_count: int) -> ProtoState {
+begin_proto :: proc(origin: SourceLocation, name: string, param_count, function_depth: int) -> ProtoState {
     return ProtoState{
         origin           = origin,
         name             = strings.clone(name),
         param_count      = param_count,
+        function_depth   = function_depth,
         bytecode         = make([dynamic]u32),
         const_pool       = make([dynamic]Value),
         child_protos     = make([dynamic]^Proto),

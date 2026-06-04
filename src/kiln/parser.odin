@@ -233,7 +233,11 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
 
         binding_index := binding_table_find(&Active_State.global_env, ident_name)
         if binding_index < 0 {
-            parser_error(proto_state, e.token, fmt.tprintf("unknown name `%s`", ident_name))
+            if proto_state.function_depth > 0 {
+                parser_error(proto_state, e.token, fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
+            } else {
+                parser_error(proto_state, e.token, fmt.tprintf("binding `%s` is not declared", ident_name))
+            }
             return
         }
 
@@ -1042,7 +1046,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
                 return
             }
 
-            param_tokens[param_count] = consume_token(parent_proto_state, .IDENT, "expected parameter name")
+            param_tokens[param_count] = consume_token(parent_proto_state, .IDENT, "expected parameter identifier")
             if Parser.failed {
                 return
             }
@@ -1068,7 +1072,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
         line        = origin_token.line,
         column      = origin_token.column,
     }
-    child_proto_state := begin_proto(child_origin, function_name, param_count)
+    child_proto_state := begin_proto(child_origin, function_name, param_count, parent_proto_state.function_depth + 1)
 
     // Parameters are local slots starting at slot 0.
     // The VM call path places arguments directly into those slots.
@@ -1077,7 +1081,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
         for prev_index := 0; prev_index < param_index; prev_index += 1 {
             if param_tokens[prev_index].value.(string) == param_name {
-                parser_error(&child_proto_state, param_tokens[param_index], fmt.tprintf("parameter `%s` is already declared in this function", param_name))
+                parser_error(&child_proto_state, param_tokens[param_index], fmt.tprintf("parameter binding `%s` is already declared in this function", param_name))
                 delete_proto_state(&child_proto_state)
                 return
             }
@@ -1494,20 +1498,20 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
     lhs_count := len(lhs_tokens)
 
-    // Validate all declaration names before RHS emission.
+    // Validate all declared bindings before RHS emission.
     for check_index := 0; check_index < lhs_count; check_index += 1 {
         check_name := lhs_tokens[check_index].value.(string)
 
         for prev_index := 0; prev_index < check_index; prev_index += 1 {
             if lhs_tokens[prev_index].value.(string) == check_name {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate declaration name `%s`", check_name))
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in local declaration", check_name))
                 return
             }
         }
 
         global_index := binding_table_find(&Active_State.global_env, check_name)
         if global_index >= 0 {
-            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local variable `%s` cannot shadow global binding", check_name))
+            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local binding `%s` cannot shadow global binding", check_name))
             return
         }
 
@@ -1518,14 +1522,14 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
         for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
             if proto_state.local_bindings[local_index].name == check_name {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local variable `%s` is already declared in this scope", check_name))
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local binding `%s` is already declared in this scope", check_name))
                 return
             }
         }
     }
 
     if proto_state.local_count + lhs_count > MAX_FRAME_SLOTS {
-        parser_error(proto_state, lhs_tokens[0], "too many local variables in function")
+        parser_error(proto_state, lhs_tokens[0], "too many local bindings in function")
         return
     }
 
@@ -1550,7 +1554,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
         if Parser.failed { return }
     }
 
-    // Commit names to the slots that already hold the RHS values.
+    // Commit local bindings to the slots that already hold the RHS values.
     for target_index := 0; target_index < lhs_count; target_index += 1 {
         local_binding_append(proto_state, lhs_tokens[target_index].value.(string), is_mutable)
     }
@@ -1575,7 +1579,11 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
         global_index := binding_table_find(&Active_State.global_env, ident_text)
         if global_index < 0 {
-            parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
+            if proto_state.function_depth > 0 {
+                parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is not a declared binding in this function; Kiln does not support closures or upvalues", ident_text))
+            } else {
+                parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
+            }
             return ExprInvalid{}
         }
 
@@ -1705,7 +1713,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     for {
         if lhs_count >= MAX_BINDINGS {
-            parser_error(proto_state, Parser.current_token, "too many global declaration names")
+            parser_error(proto_state, Parser.current_token, "too many global bindings in declaration")
             return
         }
 
@@ -1735,7 +1743,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     } else if Parser.current_token.kind == .IMMUTABLE_DECL {
         is_mutable = false
     } else {
-        parser_error(proto_state, Parser.current_token, "expected ':=' or '::' after global declaration name list")
+        parser_error(proto_state, Parser.current_token, "expected ':=' or '::' after global binding list")
         return
     }
     advance_token()
@@ -1745,7 +1753,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
         for prev_index := 0; prev_index < check_index; prev_index += 1 {
             if lhs_tokens[prev_index].value.(string) == check_name {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate global declaration name `%s`", check_name))
+                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in global declaration", check_name))
                 return
             }
         }
@@ -1758,7 +1766,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
         local_index := local_binding_find(proto_state, check_name)
         if local_index >= 0 {
-            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` conflicts with local variable", check_name))
+            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` conflicts with local binding", check_name))
             return
         }
     }
@@ -1892,7 +1900,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
        Parser.current_token.kind == .SLASH_ASSIGN ||
        Parser.current_token.kind == .MOD_ASSIGN {
         if lhs_count != 1 {
-            parser_error(proto_state, Parser.current_token, "compound assignment expects one target")
+            parser_error(proto_state, Parser.current_token, "compound assignment expects one assignment target")
             return
         }
 
@@ -2006,7 +2014,7 @@ compile_source :: proc(source, source_name: string) -> ^Error {
         line        = 1,
         column      = 1,
     }
-    entry_proto_state := begin_proto(entry_origin, "entry", 0)
+    entry_proto_state := begin_proto(entry_origin, "entry", 0, 0)
     parse_top_level_statements(&entry_proto_state)
     if Parser.failed {
         delete_proto_state(&entry_proto_state)
