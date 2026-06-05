@@ -271,7 +271,7 @@ emit_index_set :: proc(proto_state: ^ProtoState, container, key, src: int) {
     append(&proto_state.bytecode, inst)
 }
 
-// Numeric operations =============================================================================
+// Arithmetic and concatenation operations ========================================================
 
 emit_add :: proc(proto_state: ^ProtoState, dst, lhs, rhs: int) {
     record_slots(proto_state, dst, lhs, rhs)
@@ -284,6 +284,13 @@ emit_sub :: proc(proto_state: ^ProtoState, dst, lhs, rhs: int) {
     record_slots(proto_state, dst, lhs, rhs)
 
     inst := u32(InstABC{ op= .SUB, a= u8(dst), b= u8(lhs), c= u8(rhs) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_concat :: proc(proto_state: ^ProtoState, dst, lhs, rhs: int) {
+    record_slots(proto_state, dst, lhs, rhs)
+
+    inst := u32(InstABC{ op= .CONCAT, a= u8(dst), b= u8(lhs), c= u8(rhs) })
     append(&proto_state.bytecode, inst)
 }
 

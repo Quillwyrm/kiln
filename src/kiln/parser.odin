@@ -888,8 +888,10 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     left := parse_mul_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    // addOp = "+" | "-".
-    for Parser.current_token.kind == .PLUS || Parser.current_token.kind == .MINUS {
+    // addOp = "+" | "-" | "..".
+    for Parser.current_token.kind == .PLUS ||
+        Parser.current_token.kind == .MINUS ||
+        Parser.current_token.kind == .CONCAT {
         op_token := advance_token()
 
         right := parse_mul_expr(proto_state)
@@ -909,8 +911,10 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         if op_token.kind == .PLUS {
             emit_add(proto_state, lhs_slot, lhs_slot, rhs_slot)
-        } else {
+        } else if op_token.kind == .MINUS {
             emit_sub(proto_state, lhs_slot, lhs_slot, rhs_slot)
+        } else {
+            emit_concat(proto_state, lhs_slot, lhs_slot, rhs_slot)
         }
 
         // Only the accumulated left result remains live after the binary op.

@@ -1,10 +1,49 @@
 math
 
-array
+array.
+    pack(...values) -> array
+        captures values into an array, preserving nils
 
-map
+    unpack(array) -> multiple values
+        expands array elements into multiple results
 
-string
+    push(array, value)
+        appends value to the end of array
+
+    pop(array) -> value
+        removes and returns the final element
+
+    insert(array, index, value)
+        inserts value at index, shifting existing elements right
+
+    remove(array, index) -> value
+        removes and returns element at index, shifting later elements left
+
+    clear(array)
+        removes all elements
+
+    copy(array) -> array
+        returns a shallow copy
+
+    slice(array, start, count) -> array
+        returns a shallow copied sub-array
+
+
+map.
+    clear(map)
+        removes all entries
+
+    copy(map) -> map
+        returns a shallow copy
+
+    get_keys(map) -> array
+        returns an array of keys
+
+    get_values(map) -> array
+        returns an array of values
+        
+
+string.
     format(format, ...values) -> string
         returns formatted text
 
@@ -42,7 +81,7 @@ string
         returns array of byte ints
 
 
-system
+system.
     args() -> array
         returns user script arguments, excluding executable/script path
 
@@ -65,7 +104,7 @@ system
         returns host architecture name, e.g. "x64", "arm64"
 
 
-filesystem
+filesystem.
     read_file(path) -> string
         reads an entire text file
 
@@ -94,7 +133,7 @@ filesystem
         creates a directory
 
 
-path
+path.
     join(...) -> string
         joins path parts using host path rules
 
@@ -114,7 +153,7 @@ path
         lexically cleans path text without checking filesystem
 
 
-io
+io.
     read_all() -> string
         reads all remaining stdin until EOF
 

@@ -30,9 +30,10 @@ Opcode :: enum u8 {
     INDEX_GET,     // ABC: A=dst,       B=container, C=key
     INDEX_SET,     // ABC: A=container, B=key,       C=src
 
-    // Numeric Operations
+    // Arithmetic and Concatenation Operations
     ADD,           // ABC: A=dst, B=lhs, C=rhs
     SUB,           // ABC: A=dst, B=lhs, C=rhs
+    CONCAT,        // ABC: A=dst, B=lhs, C=rhs
     MUL,           // ABC: A=dst, B=lhs, C=rhs
     DIV,           // ABC: A=dst, B=lhs, C=rhs
     MOD,           // ABC: A=dst, B=lhs, C=rhs
@@ -389,6 +390,26 @@ decode_op :: proc(word: u32) -> Opcode {
 }
 
 // Value helpers ==================================================================================
+
+value_concat :: proc(lhs, rhs: Value) -> Value {
+    left_object, left_is_object := lhs.(^Object)
+    right_object, right_is_object := rhs.(^Object)
+
+    if !left_is_object || left_object.kind != .STRING ||
+       !right_is_object || right_object.kind != .STRING {
+        runtime_error(fmt.tprintf("failed to concatenate `%s` and `%s`; expected two strings", value_type_to_string(lhs), value_type_to_string(rhs)))
+        return Value{}
+    }
+
+    left_string := cast(^StringObject)left_object
+    right_string := cast(^StringObject)right_object
+    parts := [?]string{left_string.data, right_string.data}
+
+    result := new(StringObject)
+    result.header.kind = .STRING
+    result.data = strings.concatenate(parts[:])
+    return Value(cast(^Object)result)
+}
 
 value_add :: proc(lhs, rhs: Value) -> Value {
     left_int, is_int := lhs.(i64)
@@ -967,6 +988,16 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             lhs := frame.slot_base + int(inst.b)
             rhs := frame.slot_base + int(inst.c)
             state.slots[dst] = value_sub(state.slots[lhs], state.slots[rhs])
+            if state.has_error {
+                return Value{}, &state.error
+            }
+
+        case .CONCAT:
+            inst := InstABC(word)
+            dst := frame.slot_base + int(inst.a)
+            lhs := frame.slot_base + int(inst.b)
+            rhs := frame.slot_base + int(inst.c)
+            state.slots[dst] = value_concat(state.slots[lhs], state.slots[rhs])
             if state.has_error {
                 return Value{}, &state.error
             }

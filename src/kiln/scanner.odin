@@ -53,6 +53,7 @@ TokenKind :: enum {
     // Arithmetic Operators
     PLUS,
     MINUS,
+    CONCAT,
     STAR,
     SLASH,
     MOD,
@@ -472,6 +473,9 @@ scan_symbol :: proc() -> Token {
     case ',':
         return make_token(.COMMA)
     case '.':
+        if match_next('.') {
+            return make_token(.CONCAT)
+        }
         return make_token(.DOT)
     case ';':
         return make_token(.SEMICOLON)

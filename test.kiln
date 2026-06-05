@@ -301,6 +301,14 @@ case 1 + 5: print("comparison switch")
 else:       print("comparison switch failed")
 }
 
+// String concatenation shares additive precedence and requires explicit conversion.
+print("--- string concat ---")
+
+print("kiln" .. "vm")
+print("a" .. "b" .. "c")
+print("result: " .. to_string(42))
+print("a" .. "b" == "ab")
+
 // Logical operators short-circuit and return bool.
 print("--- and/or ---")
 
