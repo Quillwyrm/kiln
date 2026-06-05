@@ -186,14 +186,13 @@ Proto :: struct {
 }
 
 // NativeFunction reads arg_count values starting at args_base, writes produced values
-// starting at return_slot_base, and returns its produced result count. CALL shapes those
-// results to requested_results: missing values become nil and extras are ignored.
-NativeFunction :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int
+// starting at return_slot_base, and returns its produced result count.
+// CALL then shapes those results to its requested count.
+NativeFunction :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int
 
 // Runtime callable backed by one compiled Proto.
 ProtoFunctionObject :: struct {
     header: Object,
-    name:   string,
     impl:   ^Proto,
 }
 
@@ -233,8 +232,8 @@ CallFrame :: struct {
     slot_base:         int,
     caller_slot_count: int,
 
-    // Absolute caller result base and fixed count or CALL_OPEN_RESULTS.
-    return_slot_base:  int,
+    // Fixed caller result count or CALL_OPEN_RESULTS.
+    // The caller result base is one slot before this frame's slot_base.
     requested_results: int,
 
     // Latest open-result range in State.slots produced inside this frame.
@@ -740,8 +739,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
         proto                    = proto,
         instruction_index        = 0,
         slot_base                = 0,
-        return_slot_base         = 0,
-        requested_results   = 1,
+        requested_results        = 1,
         open_result_base         = 0,
         open_result_count        = 0,
         caller_slot_count        = 0,
@@ -790,7 +788,6 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
             function_object := new(ProtoFunctionObject)
             function_object.header.kind = .PROTO_FUNCTION
-            function_object.name = child_proto.name
             function_object.impl = child_proto
 
             state.slots[dst] = Value(cast(^Object)function_object)
@@ -1111,7 +1108,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             case .NATIVE_FUNCTION:
                 // Executes immediately in the caller frame. Writes results then shapes to requested.
                 native_function := cast(^NativeFunctionObject)callee_header
-                produced_results := native_function.impl(state, args_base, arg_count, call_base, requested_results)
+                produced_results := native_function.impl(state, args_base, arg_count, call_base)
                 if state.has_error {
                     return Value{}, &state.error
                 }
@@ -1158,7 +1155,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
                 // Extra fixed args are rejected; missing params filled with nil.
                 if arg_count > callee_proto.param_count {
-                    message := fmt.tprintf("too many arguments for `%s()`: expected %d, got %d", proto_function.name, callee_proto.param_count, arg_count)
+                    message := fmt.tprintf("too many arguments for `%s()`: expected %d, got %d", callee_proto.name, callee_proto.param_count, arg_count)
                     return Value{}, runtime_error(message)
                 }
 
@@ -1170,8 +1167,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                     proto                    = callee_proto,
                     instruction_index        = 0,
                     slot_base                = callee_slot_base,
-                    return_slot_base         = call_base,
-                    requested_results   = requested_results,
+                    requested_results        = requested_results,
                     open_result_base         = 0,
                     open_result_count        = 0,
                     caller_slot_count        = caller_slot_count,
@@ -1243,7 +1239,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 return Value{}, nil
             }
 
-            caller_result_base := frame.return_slot_base
+            caller_result_base := frame.slot_base - 1
             requested_results := frame.requested_results
 
             if requested_results == CALL_OPEN_RESULTS {

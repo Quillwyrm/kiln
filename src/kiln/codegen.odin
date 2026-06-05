@@ -4,10 +4,10 @@ import "core:strings"
 
 // Proto-local bindings ===========================================================================
 
-// LocalBinding maps an identifier name to a frame slot index.
+// LocalBinding stores the name and mutability of one local frame slot.
+// Its index in ProtoState.local_bindings is its frame slot.
 LocalBinding :: struct {
     name:       string,
-    frame_slot: int,
     is_mutable: bool,
 }
 
@@ -20,7 +20,7 @@ ProtoState :: struct {
     origin:         SourceLocation,
     name:           string,
     param_count:    int,
-    function_depth: int,
+    is_function:    bool,
     is_module:      bool,
     module_index:   int,
 
@@ -64,12 +64,12 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
 
 // origin identifies where this proto originated for diagnostics.
 // name is cloned because it can come from source token text.
-begin_proto :: proc(origin: SourceLocation, name: string, param_count, function_depth: int) -> ProtoState {
+begin_proto :: proc(origin: SourceLocation, name: string, param_count: int, is_function: bool) -> ProtoState {
     return ProtoState{
         origin                  = origin,
         name                    = strings.clone(name),
         param_count             = param_count,
-        function_depth          = function_depth,
+        is_function             = is_function,
         frame_slot_count        = param_count,
         bytecode                = make([dynamic]u32),
         const_pool              = make([dynamic]Value),

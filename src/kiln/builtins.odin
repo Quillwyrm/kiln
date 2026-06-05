@@ -157,7 +157,7 @@ value_to_string :: proc(value: Value) -> string {
 
 // Native builtin implementations =================================================================
 
-native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     for arg_index := 0; arg_index < arg_count; arg_index += 1 {
         if arg_index > 0 {
             fmt.print(" ")
@@ -171,7 +171,7 @@ native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_
 }
 
 
-native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `type()`: expected 1, got %d", arg_count))
         return 0
@@ -187,7 +187,7 @@ native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_s
 }
 
 
-native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `length()`: expected 1, got %d", arg_count))
         return 0
@@ -223,7 +223,7 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 }
 
 
-native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 2 {
         runtime_error(fmt.tprintf("too many arguments for `assert()`: expected 2, got %d", arg_count))
         return 0
@@ -257,7 +257,7 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 }
 
 
-native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `to_string()`: expected 1, got %d", arg_count))
         return 0
@@ -274,7 +274,7 @@ native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 
 
 // Returns nil on failure instead of erroring.
-native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `to_number()`: expected 1, got %d", arg_count))
         return 0

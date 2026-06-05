@@ -136,10 +136,14 @@ match_next :: proc(expected: u8) -> bool {
 
 // Scanner errors =================================================================================
 
-// Latch Scanner.failed and return ERROR token. Does not call set_error; parser handles that.
+// Latches scanner failure and returns an ERROR token for the parser to record.
 scanner_error :: proc(message: string) -> Token {
     Scanner.failed = true
-    return make_error_token(message)
+    return Token {
+        kind  = .ERROR,
+        value = TokenValue(message),
+        start = Scanner.token_start,
+    }
 }
 
 
@@ -152,16 +156,6 @@ make_token :: proc(kind: TokenKind, value: TokenValue = {}) -> Token {
         start = Scanner.token_start,
     }
 }
-
-// Constructs an ERROR token. Does not set Scanner.failed; scanner_error owns that.
-make_error_token :: proc(message: string) -> Token {
-    return Token {
-        kind  = .ERROR,
-        value = TokenValue(message),
-        start = Scanner.token_start,
-    }
-}
-
 
 // Character classes ==============================================================================
 is_alpha :: proc(ch: u8) -> bool {

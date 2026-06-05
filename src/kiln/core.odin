@@ -30,7 +30,7 @@ bind_core_modules :: proc(state: ^State) {
 
 // Debug module ===================================================================================
 
-native_debug_echo :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_debug_echo :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `debug.echo()`: expected 1, got %d", arg_count))
         return 0
@@ -48,7 +48,7 @@ native_debug_echo :: proc(kiln_state: ^State, args_base: int, arg_count: int, re
 
 // Array module ===================================================================================
 
-native_array_push :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_array_push :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 2 {
         runtime_error(fmt.tprintf("too many arguments for `array.push()`: expected 2, got %d", arg_count))
         return 0
@@ -75,7 +75,7 @@ native_array_push :: proc(kiln_state: ^State, args_base: int, arg_count: int, re
     return 0
 }
 
-native_array_pop :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+native_array_pop :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `array.pop()`: expected 1, got %d", arg_count))
         return 0
