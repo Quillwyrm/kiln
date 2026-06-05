@@ -2,23 +2,6 @@ package kiln
 
 import "core:strings"
 
-// Codegen limits =================================================================================
-
-// MAX_FRAME_SLOTS is the per-proto frame slot ceiling.
-// It must stay compatible with u8 slot operands in emitted bytecode layouts.
-MAX_FRAME_SLOTS :: 256
-MAX_LOOP_DEPTH :: 64
-MAX_BREAK_FIXUPS :: 1024
-MAX_CONST_POOL_ENTRIES :: 65536 // u16 const index in LOAD_CONST
-MAX_CHILD_PROTOS :: 65536      // u16 child proto index in LOAD_FUNC
-MAX_IMPORTS :: 64
-
-MIN_COND_JUMP_OFFSET :: -32768 // i16 operand
-MAX_COND_JUMP_OFFSET :: 32767
-MIN_JUMP_OFFSET :: -8388608     // signed 24-bit operand
-MAX_JUMP_OFFSET :: 8388607
-
-
 // Proto-local bindings ===========================================================================
 
 // LocalBinding maps an identifier name to a frame slot index.
@@ -30,38 +13,39 @@ LocalBinding :: struct {
 
 // Proto state ====================================================================================
 
-// ProtoState is the mutable compile target for one proto/chunk.
-// Parser and codegen both mutate this state while lowering source to bytecode.
+// ProtoState is the mutable compiler working state for one unfinished Proto.
+// begin_proto creates its dynamic arrays; end_proto or delete_proto_state releases them.
 ProtoState :: struct {
-    origin: SourceLocation,
-    name:        string,
-    param_count: int,
+    // Proto identity and current-file compile context.
+    origin:         SourceLocation,
+    name:           string,
+    param_count:    int,
     function_depth: int,
-    is_module: bool,
-    module_index: int,
+    is_module:      bool,
+    module_index:   int,
 
+    // Unfinished compiled output copied into Proto by end_proto.
     bytecode:     [dynamic]u32,
     const_pool:   [dynamic]Value,
     child_protos: [dynamic]^Proto,
 
-    frame_slot_count: int,
-    local_bindings:   [MAX_FRAME_SLOTS]LocalBinding,
-    local_count:      int,
-    next_temp_slot:   int,
-    scope_depth:      int,
-    scope_local_counts: [MAX_FRAME_SLOTS]int,
+    // Frame-slot and lexical-local working state.
+    frame_slot_count:  int,
+    local_bindings:    [MAX_FRAME_SLOTS]LocalBinding,
+    local_count:       int,
+    next_temp_slot:    int,
+    scope_local_marks: [dynamic]int,
 
-    import_names:          [MAX_IMPORTS]string,
-    import_module_indexes: [MAX_IMPORTS]int,
+    // Imported namespaces visible throughout this file and its child protos.
+    import_names:          [MAX_MODULES]string,
+    import_module_indexes: [MAX_MODULES]int,
     import_count:          int,
 
-    // break_fixups stores instruction indexes for unresolved `break` jumps.
-    break_fixups: [MAX_BREAK_FIXUPS]int,
-    break_fixup_count: int,
-
-    // loop_break_fixup_base marks, per active loop depth, where that loop's break fixups begin.
-    loop_break_fixup_base: [MAX_LOOP_DEPTH]int,
-    loop_depth: int,
+    // Unresolved control-flow jumps owned by active loops.
+    // Each break fixup is an unresolved jump instruction index.
+    break_jump_fixups:      [dynamic]int,
+    // Each active loop records where its entries begin in break_jump_fixups.
+    loop_break_fixup_bases: [dynamic]int,
 }
 
 // Frame slots ====================================================================================
@@ -82,14 +66,17 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
 // name is cloned because it can come from source token text.
 begin_proto :: proc(origin: SourceLocation, name: string, param_count, function_depth: int) -> ProtoState {
     return ProtoState{
-        origin           = origin,
-        name             = strings.clone(name),
-        param_count      = param_count,
-        function_depth   = function_depth,
-        bytecode         = make([dynamic]u32),
-        const_pool       = make([dynamic]Value),
-        child_protos     = make([dynamic]^Proto),
-        frame_slot_count = param_count,
+        origin                  = origin,
+        name                    = strings.clone(name),
+        param_count             = param_count,
+        function_depth          = function_depth,
+        frame_slot_count        = param_count,
+        bytecode                = make([dynamic]u32),
+        const_pool              = make([dynamic]Value),
+        child_protos            = make([dynamic]^Proto),
+        scope_local_marks       = make([dynamic]int),
+        break_jump_fixups       = make([dynamic]int),
+        loop_break_fixup_bases  = make([dynamic]int),
     }
 }
 
@@ -106,11 +93,15 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
     delete(proto_state.bytecode)
     delete(proto_state.const_pool)
     delete(proto_state.child_protos)
+    delete(proto_state.scope_local_marks)
+    delete(proto_state.break_jump_fixups)
+    delete(proto_state.loop_break_fixup_bases)
 
     proto := new(Proto)
     proto^ = Proto{
         origin           = proto_state.origin,
         name             = proto_state.name,
+        is_module        = proto_state.is_module,
         bytecode         = bytecode,
         const_pool       = const_pool,
         child_protos     = child_protos,
@@ -121,12 +112,15 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
     return proto
 }
 
-// Only call this on an unfinished ProtoState. end_proto moves data into a finished Proto instead.
+// Releases an unfinished ProtoState after compile failure. Successful compilation uses end_proto.
 delete_proto_state :: proc(proto_state: ^ProtoState) {
     delete(proto_state.name)
     delete(proto_state.bytecode)
     delete(proto_state.const_pool)
     delete(proto_state.child_protos)
+    delete(proto_state.scope_local_marks)
+    delete(proto_state.break_jump_fixups)
+    delete(proto_state.loop_break_fixup_bases)
 }
 
 // Constants ======================================================================================
@@ -217,8 +211,6 @@ emit_move :: proc(proto_state: ^ProtoState, dst, src: int) {
 }
 
 // Array operations ===============================================================================
-// Stub — wired when the parser parses corresponding syntax.
-
 emit_new_array :: proc(proto_state: ^ProtoState, dst: int) {
     record_slots(proto_state, dst)
 
@@ -226,12 +218,12 @@ emit_new_array :: proc(proto_state: ^ProtoState, dst: int) {
     append(&proto_state.bytecode, inst)
 }
 
-emit_array_len :: proc(proto_state: ^ProtoState, dst, src_array: int) {
-    record_slots(proto_state, dst, src_array)
-
-    inst := u32(InstABx{ op= .ARRAY_LEN, a= u8(dst), b= u16(src_array) })
-    append(&proto_state.bytecode, inst)
-}
+// emit_array_len :: proc(proto_state: ^ProtoState, dst, src_array: int) {
+//     record_slots(proto_state, dst, src_array)
+//
+//     inst := u32(InstABx{ op= .ARRAY_LEN, a= u8(dst), b= u16(src_array) })
+//     append(&proto_state.bytecode, inst)
+// }
 
 emit_array_push :: proc(proto_state: ^ProtoState, dst_array, src: int) {
     record_slots(proto_state, dst_array, src)
@@ -240,28 +232,28 @@ emit_array_push :: proc(proto_state: ^ProtoState, dst_array, src: int) {
     append(&proto_state.bytecode, inst)
 }
 
-emit_array_pop :: proc(proto_state: ^ProtoState, dst, src_array: int) {
-    record_slots(proto_state, dst, src_array)
-
-    inst := u32(InstABx{ op= .ARRAY_POP, a= u8(dst), b= u16(src_array) })
-    append(&proto_state.bytecode, inst)
-}
+// emit_array_pop :: proc(proto_state: ^ProtoState, dst, src_array: int) {
+//     record_slots(proto_state, dst, src_array)
+//
+//     inst := u32(InstABx{ op= .ARRAY_POP, a= u8(dst), b= u16(src_array) })
+//     append(&proto_state.bytecode, inst)
+// }
 
 // Map operations =================================================================================
 
 emit_new_map :: proc(proto_state: ^ProtoState, dst: int) {
     record_slots(proto_state, dst)
 
-    inst := u32(InstABx{ op= .NEW_MAP, a= u8(dst), b= 0 })
+    inst := u32(InstAx{ op= .NEW_MAP, a= u32(dst) })
     append(&proto_state.bytecode, inst)
 }
 
-emit_map_len :: proc(proto_state: ^ProtoState, dst, src_map: int) {
-    record_slots(proto_state, dst, src_map)
-
-    inst := u32(InstABx{ op= .MAP_LEN, a= u8(dst), b= u16(src_map) })
-    append(&proto_state.bytecode, inst)
-}
+// emit_map_len :: proc(proto_state: ^ProtoState, dst, src_map: int) {
+//     record_slots(proto_state, dst, src_map)
+//
+//     inst := u32(InstABx{ op= .MAP_LEN, a= u8(dst), b= u16(src_map) })
+//     append(&proto_state.bytecode, inst)
+// }
 
 // Indexed access ================================================================================
 
@@ -418,7 +410,6 @@ emit_jump_not_nil :: proc(proto_state: ^ProtoState, cond_slot: int, target_index
     return jump_index
 }
 
-// Offsets are relative to instruction index after jump fetch.
 patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
     word := proto_state.bytecode[jump_index]
     target_index := next_inst_index(proto_state)

@@ -3,6 +3,7 @@
 
 import "debug"
 import "array"
+import "foo"
 
 // Basic literal forms.
 print("--- literals ---")
@@ -116,6 +117,16 @@ array.push(module_items, "second")
 print(module_items[0], module_items[1])
 print(array.pop(module_items))
 print(array.pop(module_items))
+
+// Source modules compile and run during import loading.
+// Exported bindings are visible through the namespace; private top-level bindings stay module-local.
+print("--- source modules ---")
+
+print(foo.bar(31))
+print(foo.counter)
+foo.counter = 10
+foo.counter += 5
+print(foo.counter)
 
 // `::` makes the binding immutable, not the referenced object.
 // The array binding is fixed, but its indexed contents can still change.

@@ -1,6 +1,7 @@
 package kiln
 
 import "core:fmt"
+import "core:strings"
 
 
 // Opcodes ========================================================================================
@@ -17,13 +18,13 @@ Opcode :: enum u8 {
 
     // Array Operations
     NEW_ARRAY,     // Ax: A=dst
-    ARRAY_LEN,     // ABx: A=dst,       B=src_array
+    // ARRAY_LEN,  // ABx: A=dst,       B=src_array
     ARRAY_PUSH,    // ABx: A=dst_array, B=src
-    ARRAY_POP,     // ABx: A=dst,       B=src_array
+    // ARRAY_POP,  // ABx: A=dst,       B=src_array
 
     // Map Operations
-    NEW_MAP,       // ABx: A=dst,     B=reserved
-    MAP_LEN,       // ABx: A=dst,     B=src_map
+    NEW_MAP,       // Ax: A=dst
+    // MAP_LEN,    // ABx: A=dst,     B=src_map
 
     // Indexed Access
     INDEX_GET,     // ABC: A=dst,       B=container, C=key
@@ -47,7 +48,7 @@ Opcode :: enum u8 {
     JUMP,          // Jump: offset (relative to post-fetch instruction_index)
     JUMP_FALSE,    // AsBx: A=cond, B=offset; jump if slot[A] is falsey
     JUMP_NOT_NIL,  // AsBx: A=cond, B=offset; jump if slot[A] is not nil
-    HALT,          // ABC: no operands used; stop VM and return nil. Currently unused — reserved for debug/tool use.
+    // HALT,       // ABC: no operands used; stop VM and return nil. Reserved for debug/tool use.
 
     // Calls and Returns
     CALL,          // ABC: A=callee/result base, B=arg_count, C=requested_results
@@ -65,6 +66,19 @@ Opcode :: enum u8 {
     GET_GLOBAL_BIND, // ABx: A=dst, B=binding_index
     SET_GLOBAL_BIND, // ABx: A=src, B=binding_index
 }
+
+// Bytecode format limits =========================================================================
+// These limits are imposed by instruction operand widths.
+
+MAX_FRAME_SLOTS :: 256       // u8 slot operands
+MAX_CALL_ARGS :: 255         // u8 CALL argument count
+MAX_CONST_POOL_ENTRIES :: 65536 // u16 LOAD_CONST index
+MAX_CHILD_PROTOS :: 65536       // u16 LOAD_FUNC index
+
+MIN_COND_JUMP_OFFSET :: -32768 // i16 conditional jump offset
+MAX_COND_JUMP_OFFSET :: 32767
+MIN_JUMP_OFFSET :: -8388608     // signed 24-bit JUMP offset
+MAX_JUMP_OFFSET :: 8388607
 
 // Count operand sentinels.
 // CALL.C is u8. RETURN.B is u16.
@@ -150,42 +164,53 @@ MapObject :: struct {
 
 
 // Functions ======================================================================================
-// Proto stores compiled bytecode data. Function objects (ProtoFunctionObject,
-// NativeFunctionObject) are the runtime callable values that CALL dispatches.
 
+// Proto is one finished compiled file or function body executed by the VM.
+// Bytecode operands address frame-relative runtime slots and index this proto's
+// const-pool and child-proto tables.
 Proto :: struct {
-    origin: SourceLocation,
-    name:        string,
-    bytecode:    []u32,
-    const_pool:  []Value,
-    child_protos: []^Proto,
+    // Source identity used by runtime diagnostics.
+    origin:    SourceLocation,
+    name:      string,
+    is_module: bool,
+
+    // Execution shape.
     frame_slot_count: int,
-    param_count: int,
+    param_count:      int,
+
+    // Compiled data.
+    bytecode:     []u32,
+    const_pool:   []Value,
+    child_protos: []^Proto,
 }
 
-// Odin-backed function impl. CALL shapes produced results to requested: missing = nil, extras ignored.
+// NativeFunction reads arg_count values starting at args_base, writes produced values
+// starting at return_slot_base, and returns its produced result count. CALL shapes those
+// results to requested_results: missing values become nil and extras are ignored.
 NativeFunction :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int
 
-
+// Runtime callable backed by one compiled Proto.
 ProtoFunctionObject :: struct {
     header: Object,
     name:   string,
-    impl:  ^Proto,
+    impl:   ^Proto,
 }
 
+// Runtime callable backed by an Odin procedure.
 NativeFunctionObject :: struct {
     header: Object,
     impl:   NativeFunction,
 }
 
 
-// Binding tables ===============================================================================
-// Fixed-size namespaces. Globals use one BindingTable on State.
+// Binding tables ================================================================================
 
-MAX_BINDINGS :: 256
+MAX_BINDINGS :: 256 // module binding operands use u8 binding indexes
 
-// BindingTable is a named value namespace.
-// Binding indexes are indexes into one specific BindingTable.
+// BindingTable is one fixed-size named value namespace.
+// Entries occupy 0..<count. names[i], values[i], and is_mutable[i] describe
+// the same binding. Bytecode stores i and indexes the table directly.
+// Bindings are appended and never removed, so their indexes remain stable.
 BindingTable :: struct {
     names:      [MAX_BINDINGS]string,
     values:     [MAX_BINDINGS]Value,
@@ -196,42 +221,63 @@ BindingTable :: struct {
 
 // Call frames ====================================================================================
 
-// One active proto execution window. Slot operands are relative to slot_base.
+// CallFrame is one active Proto execution window.
+// Stored slot bases are absolute State.slots indexes; bytecode slot operands are frame-relative.
 CallFrame :: struct {
-    proto:                    ^Proto,
-    instruction_index:        int,
-    slot_base:                int,
+    // Current execution position.
+    proto:             ^Proto,
+    instruction_index: int,
 
-    return_slot_base:         int,
-    requested_results:   int,
-    open_result_base:         int,
-    open_result_count:        int,
-
+    // Frame-local slot window and caller slot high-water mark restored on return.
+    slot_base:         int,
     caller_slot_count: int,
+
+    // Absolute caller result base and fixed count or CALL_OPEN_RESULTS.
+    return_slot_base:  int,
+    requested_results: int,
+
+    // Latest open-result range in State.slots produced inside this frame.
+    open_result_base:  int,
+    open_result_count: int,
 }
 
 
 // VM state =======================================================================================
 MAX_VM_SLOTS :: 4096
-MAX_CALLFRAMES :: 256
-MAX_MODULES :: 256
-// Host-owned runtime instance. Stores active frames, slots, bindings, and error state.
-State :: struct {
-    has_error:        bool,
-    error:            Error,
-    entry_proto:      ^Proto,
-    slots:            [MAX_VM_SLOTS]Value,
-    slot_count:       int,
+MAX_CALL_FRAMES :: 256
+MAX_MODULES :: 256 // module binding operands use u8 module indexes
 
-    frame_stack:      [MAX_CALLFRAMES]CallFrame,
-    frame_count:      int,
-    main_env:         BindingTable,
-    global_env:       BindingTable,
-    module_names:     [MAX_MODULES]string,
+// State is one host-owned Kiln runtime instance.
+State :: struct {
+    // Current host-operation diagnostic.
+    has_error: bool,
+    error:     Error,
+
+    // Compiled entry file.
+    entry_proto: ^Proto,
+
+    // Active VM execution and current used slot high-water mark.
+    slots:       [MAX_VM_SLOTS]Value,
+    slot_count:  int,
+    frame_stack: [MAX_CALL_FRAMES]CallFrame,
+    frame_count: int,
+
+    // Program binding environments.
+    main_env:   BindingTable,
+    global_env: BindingTable,
+
+    // Loaded-module cache. One module index addresses every parallel array.
+    // Core module ids are host names; source module ids are resolved absolute paths.
+    // Module environments hold all bindings; module_exports controls outside visibility.
+    // An id with module_loading=true means the source module is in the active import chain.
+    module_ids:       [MAX_MODULES]string,
     module_envs:      [MAX_MODULES]BindingTable,
+    module_exports:   [MAX_MODULES][MAX_BINDINGS]bool,
+    module_loading:   [MAX_MODULES]bool,
     module_count:     int,
 }
 
+// Active_State is the host-selected State used by compiler and runtime internals.
 Active_State: ^State
 
 
@@ -248,10 +294,11 @@ binding_table_find :: proc(table: ^BindingTable, name: string) -> int {
     return -1
 }
 
-// binding_table_append appends a new binding. Caller owns duplicate and capacity policy.
+// binding_table_append appends a new binding. Caller owns duplicate-name and capacity policy.
+// Binding names are cloned because source module text can be freed after compile.
 binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: bool) -> int {
     binding_index := table.count
-    table.names[table.count] = name
+    table.names[table.count] = strings.clone(name)
     table.is_mutable[table.count] = is_mutable
     table.count += 1
     return binding_index
@@ -262,7 +309,6 @@ binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: boo
 // Global binding helpers operate on Active_State.global_env.
 // Public host entry points select Active_State before these helpers run.
 
-// bind_native_global installs one native callable into global_env by binding name.
 bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     binding_index := binding_table_find(&Active_State.global_env, name)
 
@@ -287,26 +333,33 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
 // Module bindings ================================================================================
 
-bind_native_module :: proc(state: ^State, name: string) -> int {
-    for module_index := 0; module_index < state.module_count; module_index += 1 {
-        if state.module_names[module_index] == name {
+module_find :: proc(id: string) -> int {
+    for module_index := 0; module_index < Active_State.module_count; module_index += 1 {
+        if Active_State.module_ids[module_index] == id {
             return module_index
         }
     }
 
-    if state.module_count >= MAX_MODULES {
-        set_error(SourceLocation{}, "too many native modules")
-        return 0
+    return -1
+}
+
+// Returns the existing module index for id or appends a new stable module index.
+// Caller must ensure capacity before creating a new module.
+bind_module :: proc(id: string) -> int {
+    existing_index := module_find(id)
+    if existing_index >= 0 {
+        return existing_index
     }
 
-    module_index := state.module_count
-    state.module_names[module_index] = name
-    state.module_count += 1
+    module_index := Active_State.module_count
+    Active_State.module_ids[module_index] = strings.clone(id)
+    Active_State.module_count += 1
     return module_index
 }
 
-bind_native_module_function :: proc(state: ^State, module_index: int, name: string, native_proc: NativeFunction) {
-    table := &state.module_envs[module_index]
+// Installs one immutable exported native function in an existing module environment.
+bind_module_native_function :: proc(module_index: int, name: string, native_proc: NativeFunction) {
+    table := &Active_State.module_envs[module_index]
     binding_index := binding_table_find(table, name)
 
     if binding_index < 0 {
@@ -318,6 +371,7 @@ bind_native_module_function :: proc(state: ^State, module_index: int, name: stri
         binding_index = binding_table_append(table, name, false)
     }
     table.is_mutable[binding_index] = false
+    Active_State.module_exports[module_index][binding_index] = true
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION
@@ -327,7 +381,7 @@ bind_native_module_function :: proc(state: ^State, module_index: int, name: stri
 }
 
 
-// Execution primitives ===========================================================================
+// Instruction decoding ==========================================================================
 
 
 decode_op :: proc(word: u32) -> Opcode {
@@ -430,34 +484,32 @@ value_mul :: proc(lhs, rhs: Value) -> Value {
 }
 
 value_div :: proc(lhs, rhs: Value) -> Value {
-    left_int, is_int := lhs.(i64)
-    if is_int {
-        right_int, is_int := rhs.(i64)
-        if is_int {
+    left_int, left_is_int := lhs.(i64)
+    left_float, left_is_float := lhs.(f64)
+    right_int, right_is_int := rhs.(i64)
+    right_float, right_is_float := rhs.(f64)
+
+    if (!left_is_int && !left_is_float) || (!right_is_int && !right_is_float) {
+        runtime_error(fmt.tprintf("invalid `/`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
+        return Value{}
+    }
+
+    if (right_is_int && right_int == 0) || (right_is_float && right_float == 0) {
+        runtime_error("invalid `/`; divisor cannot be zero")
+        return Value{}
+    }
+
+    if left_is_int {
+        if right_is_int {
             return Value(f64(left_int) / f64(right_int))
         }
-
-        right_float, is_float := rhs.(f64)
-        if is_float {
-            return Value(f64(left_int) / right_float)
-        }
+        return Value(f64(left_int) / right_float)
     }
 
-    left_float, is_float := lhs.(f64)
-    if is_float {
-        right_int, is_int := rhs.(i64)
-        if is_int {
-            return Value(left_float / f64(right_int))
-        }
-
-        right_float, is_float := rhs.(f64)
-        if is_float {
-            return Value(left_float / right_float)
-        }
+    if right_is_int {
+        return Value(left_float / f64(right_int))
     }
-
-    runtime_error(fmt.tprintf("invalid `/`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
-    return Value{}
+    return Value(left_float / right_float)
 }
 
 value_mod :: proc(lhs, rhs: Value) -> Value {
@@ -640,9 +692,13 @@ runtime_error :: proc(message: string) -> ^Error {
     frame := &Active_State.frame_stack[Active_State.frame_count - 1]
     proto := frame.proto
 
-    // frame_count == 1 is the entry file; deeper frames are user function calls.
+    // A one-frame run is file top-level execution. Deeper frames are user function calls.
     context_text := "in entry file"
-    if Active_State.frame_count > 1 {
+    if Active_State.frame_count == 1 {
+        if proto.is_module {
+            context_text = "in module file"
+        }
+    } else {
         if proto.name == "<function>" {
             context_text = "in anonymous function"
         } else {
@@ -672,7 +728,6 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
     state.frame_count = 1
 
     for {
-        // Current frame is always the last occupied call-frame entry.
         frame := &state.frame_stack[state.frame_count - 1]
 
         // Fetch then advance instruction_index.
@@ -680,12 +735,11 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
         word := frame.proto.bytecode[frame.instruction_index]
         frame.instruction_index += 1
 
-        // Decode/dispatch by opcode, then interpret the matching layout view.
         // All slot operands are frame-relative:
         // slot[A] == state.slots[frame.slot_base + A]
         switch decode_op(word) {
-        case .HALT:
-            return Value{}, nil
+        // case .HALT:
+        //     return Value{}, nil
 
         case .LOAD_NIL:
             inst := InstAx(word)
@@ -734,18 +788,17 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             array_object.data = make([dynamic]Value)
             state.slots[dst] = Value(cast(^Object)array_object)
 
-        case .ARRAY_LEN:
-            inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            src := frame.slot_base + int(inst.b)
-            header, is_object := state.slots[src].(^Object)
-            if !is_object || header.kind != .ARRAY {
-                panic("ARRAY_LEN expected array object")
-            }
-            array_object := cast(^ArrayObject)header
-            state.slots[dst] = Value(i64(len(array_object.data)))
+        // case .ARRAY_LEN:
+        //     inst := InstABx(word)
+        //     dst := frame.slot_base + int(inst.a)
+        //     src := frame.slot_base + int(inst.b)
+        //     header, is_object := state.slots[src].(^Object)
+        //     if !is_object || header.kind != .ARRAY {
+        //         panic("ARRAY_LEN expected array object")
+        //     }
+        //     array_object := cast(^ArrayObject)header
+        //     state.slots[dst] = Value(i64(len(array_object.data)))
 
-        // Reads container B at key/index C into slot A.
         case .INDEX_GET:
             inst := InstABC(word)
             dst := frame.slot_base + int(inst.a)
@@ -795,7 +848,6 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 return Value{}, runtime_error(fmt.tprintf("invalid index read; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
-        // Writes slot C into container A at key/index B.
         case .INDEX_SET:
             inst := InstABC(word)
             container_slot := frame.slot_base + int(inst.a)
@@ -846,7 +898,6 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
-        // Appends slot B to array in slot A.
         case .ARRAY_PUSH:
             inst := InstABx(word)
             array_slot := frame.slot_base + int(inst.a)
@@ -863,42 +914,42 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             append(&array_object.data, value)
 
         // Pops tail of array B into slot A. Empty pop is an error.
-        case .ARRAY_POP:
-            inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            array_slot := frame.slot_base + int(inst.b)
-
-            array_header, is_object := state.slots[array_slot].(^Object)
-            if !is_object || array_header.kind != .ARRAY {
-                panic("ARRAY_POP expected array object")
-            }
-            array_object := cast(^ArrayObject)array_header
-
-            popped_value, ok := pop_safe(&array_object.data)
-            if ok {
-                state.slots[dst] = popped_value
-            } else {
-                panic("ARRAY_POP on empty array")
-            }
+        // case .ARRAY_POP:
+        //     inst := InstABx(word)
+        //     dst := frame.slot_base + int(inst.a)
+        //     array_slot := frame.slot_base + int(inst.b)
+        //
+        //     array_header, is_object := state.slots[array_slot].(^Object)
+        //     if !is_object || array_header.kind != .ARRAY {
+        //         panic("ARRAY_POP expected array object")
+        //     }
+        //     array_object := cast(^ArrayObject)array_header
+        //
+        //     popped_value, ok := pop_safe(&array_object.data)
+        //     if ok {
+        //         state.slots[dst] = popped_value
+        //     } else {
+        //         panic("ARRAY_POP on empty array")
+        //     }
 
         case .NEW_MAP:
-            inst := InstABx(word)
+            inst := InstAx(word)
             dst := frame.slot_base + int(inst.a)
             map_object := new(MapObject)
             map_object.header.kind = .MAP
             map_object.data = make(map[string]Value)
             state.slots[dst] = Value(cast(^Object)map_object)
 
-        case .MAP_LEN:
-            inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            map_slot := frame.slot_base + int(inst.b)
-            map_header, is_object := state.slots[map_slot].(^Object)
-            if !is_object || map_header.kind != .MAP {
-                panic("MAP_LEN expected map object")
-            }
-            map_object := cast(^MapObject)map_header
-            state.slots[dst] = Value(i64(len(map_object.data)))
+        // case .MAP_LEN:
+        //     inst := InstABx(word)
+        //     dst := frame.slot_base + int(inst.a)
+        //     map_slot := frame.slot_base + int(inst.b)
+        //     map_header, is_object := state.slots[map_slot].(^Object)
+        //     if !is_object || map_header.kind != .MAP {
+        //         panic("MAP_LEN expected map object")
+        //     }
+        //     map_object := cast(^MapObject)map_header
+        //     state.slots[dst] = Value(i64(len(map_object.data)))
 
         case .ADD:
             inst := InstABC(word)
@@ -1046,8 +1097,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                         state.slot_count = result_end
                     }
                 } else if produced_results < requested_results {
-                    // Native produced fewer than caller wants.
-                    // Fill the missing result slots with nil.
+                    // Fill missing requested results with nil.
                     for fill_index := produced_results; fill_index < requested_results; fill_index += 1 {
                         state.slots[call_base + fill_index] = Value{}
                     }
@@ -1059,7 +1109,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 proto_function := cast(^ProtoFunctionObject)callee_header
                 callee_proto := proto_function.impl
 
-                if state.frame_count >= MAX_CALLFRAMES {
+                if state.frame_count >= MAX_CALL_FRAMES {
                     return Value{}, runtime_error("call stack limit exceeded")
                 }
 
@@ -1210,7 +1260,6 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 }
             }
 
-            // Pop current frame and restore caller's used slot range.
             state.slot_count = frame.caller_slot_count
             state.frame_count -= 1
         }

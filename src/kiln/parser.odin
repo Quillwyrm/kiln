@@ -1,6 +1,8 @@
 package kiln
 
 import "core:fmt"
+import "core:os"
+import filepath "core:path/filepath"
 
 // Parser state ===================================================================================
 // Token cursor and error latch for one compile operation.
@@ -14,6 +16,9 @@ Parser := struct {
 // ExprDesc types ==================================================================================
 // Expression descriptors decouple parsing from slot emission.
 // parse_expr returns an ExprDesc; surrounding context emits or adjusts it.
+// Binding variants carry binding indexes. ExprSlot is already materialized.
+// ExprCall references emitted CALL bytecode whose result count remains adjustable.
+// ExprIndex carries evaluated container and key slots.
 
 // ExprInvalid only unwinds after Parser.failed already holds the real error.
 ExprInvalid :: struct {}
@@ -26,7 +31,7 @@ ExprGlobalBinding     :: distinct int
 ExprSlot              :: distinct int
 
 // Main/module bindings are bare current-file top-level bindings.
-// Imported bindings come from namespace access and are read-only from the importing file.
+// Imported bindings are exported bindings accessed through a namespace.
 ExprModuleBinding :: struct {
     module_index:  int,
     binding_index: int,
@@ -149,19 +154,12 @@ reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
 
 // Records the local-count mark so end_scope can discard this scope's locals.
 begin_scope :: proc(proto_state: ^ProtoState) {
-    if proto_state.scope_depth >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, Parser.current_token, "too many nested scopes")
-        return
-    }
-
-    proto_state.scope_local_counts[proto_state.scope_depth] = proto_state.local_count
-    proto_state.scope_depth += 1
+    append(&proto_state.scope_local_marks, proto_state.local_count)
 }
 
 // Restores the saved local-count mark, discarding locals declared in this scope.
 end_scope :: proc(proto_state: ^ProtoState) {
-    proto_state.scope_depth -= 1
-    proto_state.local_count = proto_state.scope_local_counts[proto_state.scope_depth]
+    proto_state.local_count = pop(&proto_state.scope_local_marks)
     proto_state.next_temp_slot = proto_state.local_count
 }
 
@@ -198,15 +196,6 @@ import_namespace_find :: proc(proto_state: ^ProtoState, name: string) -> int {
     return -1
 }
 
-registered_module_find :: proc(name: string) -> int {
-    for module_index := 0; module_index < Active_State.module_count; module_index += 1 {
-        if Active_State.module_names[module_index] == name {
-            return module_index
-        }
-    }
-    return -1
-}
-
 module_namespace_from_path :: proc(path: string) -> string {
     start := 0
     for index := 0; index < len(path); index += 1 {
@@ -221,6 +210,72 @@ module_namespace_from_path :: proc(path: string) -> string {
     }
 
     return path[start:end]
+}
+
+module_namespace_is_valid :: proc(name: string) -> bool {
+    if name == "" {
+        return false
+    }
+
+    first := name[0]
+    if !is_alpha(first) && first != '_' {
+        return false
+    }
+
+    for index := 1; index < len(name); index += 1 {
+        if !is_ident_char(name[index]) {
+            return false
+        }
+    }
+
+    if ident_token_kind(name) != .IDENT {
+        return false
+    }
+
+    return true
+}
+
+// Source modules resolve relative to the importing file's directory.
+// The returned path is absolute and owned by the caller when found is true.
+resolve_import_source_path :: proc(proto_state: ^ProtoState, path_token: Token, module_path: string) -> (resolved_path: string, found: bool) {
+    source_path := module_path
+    if !filepath.is_abs(module_path) && filepath.ext(module_path) == "" {
+        source_path = fmt.tprintf("%s.kiln", module_path)
+    }
+
+    candidate_path := source_path
+    joined_path := ""
+    if !filepath.is_abs(source_path) {
+        importer_dir := filepath.dir(proto_state.origin.source_name)
+        defer delete(importer_dir)
+
+        join_parts := [?]string{importer_dir, source_path}
+        path, join_error := filepath.join(join_parts[:], context.allocator)
+        if join_error != nil {
+            parser_error(proto_state, path_token, fmt.tprintf("failed to resolve module path `%s`", module_path))
+            return "", false
+        }
+
+        joined_path = path
+        candidate_path = joined_path
+    }
+
+    absolute_path, abs_error := filepath.abs(candidate_path, context.allocator)
+    if joined_path != "" {
+        delete(joined_path)
+    }
+
+    if abs_error != nil {
+        parser_error(proto_state, path_token, fmt.tprintf("failed to resolve module path `%s`", module_path))
+        return "", false
+    }
+
+    if !os.is_file(absolute_path) {
+        delete(absolute_path)
+        return "", false
+    }
+
+    return absolute_path, true
 }
 
 
@@ -284,6 +339,12 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
                 emit_get_main_bind(proto_state, dst_slot, main_index)
                 return
             }
+        }
+
+        import_index := import_namespace_find(proto_state, ident_name)
+        if import_index >= 0 {
+            parser_error(proto_state, Token(desc), fmt.tprintf("namespace `%s` cannot be used as a value; access an exported binding with '.'", ident_name))
+            return
         }
 
         global_index := binding_table_find(&Active_State.global_env, ident_name)
@@ -643,6 +704,16 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
 
     namespace_name := namespace_token.value.(string)
     import_index := import_namespace_find(proto_state, namespace_name)
+    local_index := local_binding_find(proto_state, namespace_name)
+    if local_index >= 0 {
+        if import_index >= 0 {
+            parser_error(proto_state, Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` shadows imported namespace", namespace_name))
+        } else {
+            parser_error(proto_state, Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` is not an imported namespace", namespace_name))
+        }
+        return ExprInvalid{}
+    }
+
     if import_index < 0 {
         parser_error(proto_state, Token(namespace_token), fmt.tprintf("invalid access expression; namespace `%s` not found", namespace_name))
         return ExprInvalid{}
@@ -653,6 +724,11 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
     binding_index := binding_table_find(&Active_State.module_envs[module_index], member_name)
     if binding_index < 0 {
         parser_error(proto_state, member_token, fmt.tprintf("invalid access expression; module `%s` has no binding `%s`", namespace_name, member_name))
+        return ExprInvalid{}
+    }
+
+    if !Active_State.module_exports[module_index][binding_index] {
+        parser_error(proto_state, member_token, fmt.tprintf("module `%s` does not export binding `%s`", namespace_name, member_name))
         return ExprInvalid{}
     }
 
@@ -1156,11 +1232,11 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     if Parser.failed { return }
 
     // Parameters are collected before creating the child proto so its arity is known.
-    param_tokens: [MAX_FRAME_SLOTS]Token
+    param_tokens: [MAX_CALL_ARGS]Token
     param_count := 0
     if Parser.current_token.kind != .RIGHT_PAREN {
         for {
-            if param_count >= MAX_FRAME_SLOTS {
+            if param_count >= MAX_CALL_ARGS {
                 parser_error(parent_proto_state, Parser.current_token, "too many function parameters")
                 return
             }
@@ -1185,7 +1261,6 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
     if Parser.failed { return }
 
-    // Parent proto state stays alive so the finished child can be appended to it.
     child_origin := SourceLocation{
         source_name = parent_proto_state.origin.source_name,
         line        = origin_token.line,
@@ -1276,7 +1351,12 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    if proto_state.import_count >= MAX_IMPORTS {
+    if !module_namespace_is_valid(namespace_name) {
+        parser_error(proto_state, namespace_token, fmt.tprintf("import namespace `%s` invalid; expected identifier", namespace_name))
+        return
+    }
+
+    if proto_state.import_count >= MAX_MODULES {
         parser_error(proto_state, import_token, "too many imports")
         return
     }
@@ -1298,10 +1378,66 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    module_index := registered_module_find(module_path)
-    if module_index < 0 {
-        parser_error(proto_state, path_token, fmt.tprintf("module `%s` is not registered", module_path))
-        return
+    module_index := -1
+    resolved_source_path, source_found := resolve_import_source_path(proto_state, path_token, module_path)
+    if Parser.failed { return }
+
+    if source_found {
+        module_index = module_find(resolved_source_path)
+        if module_index >= 0 {
+            if Active_State.module_loading[module_index] {
+                delete(resolved_source_path)
+                parser_error(proto_state, path_token, fmt.tprintf("cyclic import detected for module `%s`", module_path))
+                return
+            }
+            delete(resolved_source_path)
+        } else {
+            source_bytes, read_error := os.read_entire_file(resolved_source_path, context.allocator)
+            if read_error != nil {
+                delete(resolved_source_path)
+                parser_error(proto_state, path_token, fmt.tprintf("failed to read module `%s`", module_path))
+                return
+            }
+
+            if Active_State.module_count >= MAX_MODULES {
+                delete(source_bytes)
+                delete(resolved_source_path)
+                parser_error(proto_state, path_token, "too many modules")
+                return
+            }
+
+            module_index = bind_module(resolved_source_path)
+            Active_State.module_loading[module_index] = true
+            defer Active_State.module_loading[module_index] = false
+
+            // Module compilation reuses the package-level scanner/parser.
+            // Save the importing cursor so import loading can return to this file.
+            outer_parser := Parser
+            outer_scanner := Scanner
+            module_proto, compile_error := compile_module_source(string(source_bytes), Active_State.module_ids[module_index], module_index)
+            Parser = outer_parser
+            Scanner = outer_scanner
+            delete(source_bytes)
+            delete(resolved_source_path)
+
+            if compile_error != nil {
+                Parser.failed = true
+                return
+            }
+
+            // Run the imported module after compilation, before the importer continues.
+            module_result, run_error := run_proto(Active_State, module_proto)
+            if run_error != nil {
+                Parser.failed = true
+                return
+            }
+        }
+    } else {
+        module_index = module_find(module_path)
+        if module_index < 0 {
+            parser_error(proto_state, path_token, fmt.tprintf("module `%s` not found", module_path))
+            return
+        }
     }
 
     for existing_import := 0; existing_import < proto_state.import_count; existing_import += 1 {
@@ -1315,6 +1451,84 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     proto_state.import_names[proto_state.import_count] = namespace_name
     proto_state.import_module_indexes[proto_state.import_count] = module_index
     proto_state.import_count += 1
+}
+
+// exportStmt = "export" | "export" "{" ident {"," ident} [","] "}".
+parse_export_stmt :: proc(proto_state: ^ProtoState) {
+    export_token := consume_token(proto_state, .EXPORT, "expected 'export'")
+    if Parser.failed { return }
+
+    if !proto_state.is_module {
+        parser_error(proto_state, export_token, "export is only valid in module files")
+        return
+    }
+
+    module_index := proto_state.module_index
+    module_table := &Active_State.module_envs[module_index]
+
+    if Parser.current_token.kind != .LEFT_BRACE {
+        for binding_index := 0; binding_index < module_table.count; binding_index += 1 {
+            Active_State.module_exports[module_index][binding_index] = true
+        }
+        return
+    }
+
+    consume_token(proto_state, .LEFT_BRACE, "expected '{' after export")
+    if Parser.failed { return }
+
+    if Parser.current_token.kind == .RIGHT_BRACE {
+        parser_error(proto_state, Parser.current_token, "export manifest invalid; expected at least one binding name")
+        return
+    }
+
+    export_tokens: [MAX_BINDINGS]Token
+    export_binding_indexes: [MAX_BINDINGS]int
+    export_count := 0
+
+    for {
+        if export_count >= MAX_BINDINGS {
+            parser_error(proto_state, Parser.current_token, "too many bindings in export manifest")
+            return
+        }
+
+        name_token := consume_token(proto_state, .IDENT, "expected binding name in export manifest")
+        if Parser.failed { return }
+
+        name := name_token.value.(string)
+        for prev_index := 0; prev_index < export_count; prev_index += 1 {
+            if export_tokens[prev_index].value.(string) == name {
+                parser_error(proto_state, name_token, fmt.tprintf("duplicate export binding `%s`", name))
+                return
+            }
+        }
+
+        binding_index := binding_table_find(module_table, name)
+        if binding_index < 0 {
+            parser_error(proto_state, name_token, fmt.tprintf("export binding `%s` is not declared in this module", name))
+            return
+        }
+
+        export_tokens[export_count] = name_token
+        export_binding_indexes[export_count] = binding_index
+        export_count += 1
+
+        if Parser.current_token.kind != .COMMA {
+            break
+        }
+
+        advance_token()
+        if Parser.current_token.kind == .RIGHT_BRACE {
+            break
+        }
+    }
+
+    consume_token(proto_state, .RIGHT_BRACE, "expected '}' after export manifest")
+    if Parser.failed { return }
+
+    for export_index := 0; export_index < export_count; export_index += 1 {
+        binding_index := export_binding_indexes[export_index]
+        Active_State.module_exports[module_index][binding_index] = true
+    }
 }
 
 // block = "{" {stmt} "}".
@@ -1391,13 +1605,8 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .FOR, "expected 'for'")
     if Parser.failed { return }
 
-    if proto_state.loop_depth >= MAX_LOOP_DEPTH {
-        parser_error(proto_state, Parser.current_token, "too many nested loops")
-        return
-    }
     // Break fixups added after this point belong to this loop.
-    proto_state.loop_break_fixup_base[proto_state.loop_depth] = proto_state.break_fixup_count
-    proto_state.loop_depth += 1
+    append(&proto_state.loop_break_fixup_bases, len(proto_state.break_jump_fixups))
 
     loop_start := next_inst_index(proto_state)
     has_exit_jump := false
@@ -1433,14 +1642,13 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
         if Parser.failed { return }
     }
 
-    proto_state.loop_depth -= 1
-    break_fixup_base := proto_state.loop_break_fixup_base[proto_state.loop_depth]
+    break_fixup_base := pop(&proto_state.loop_break_fixup_bases)
     // Patch breaks from this loop body only.
-    for fixup_index := break_fixup_base; fixup_index < proto_state.break_fixup_count; fixup_index += 1 {
-        patch_jump(proto_state, proto_state.break_fixups[fixup_index])
+    for fixup_index := break_fixup_base; fixup_index < len(proto_state.break_jump_fixups); fixup_index += 1 {
+        patch_jump(proto_state, proto_state.break_jump_fixups[fixup_index])
         if Parser.failed { return }
     }
-    proto_state.break_fixup_count = break_fixup_base
+    resize(&proto_state.break_jump_fixups, break_fixup_base)
 }
 
 // Switch parsing ==================================================================================
@@ -1479,8 +1687,8 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         parser_error(proto_state, Parser.current_token, "expected 'case', 'else', or '}' in switch")
         return
     }
-    end_jumps: [256]int
-    end_jump_count := 0
+    end_jumps := make([dynamic]int)
+    defer delete(end_jumps)
 
     for Parser.current_token.kind == .CASE {
         advance_token()
@@ -1514,12 +1722,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         parse_switch_arm_body(proto_state)
         if Parser.failed { return }
 
-        if end_jump_count >= len(end_jumps) {
-            parser_error(proto_state, Parser.current_token, "switch has too many arms")
-            return
-        }
-        end_jumps[end_jump_count] = emit_jump(proto_state)
-        end_jump_count += 1
+        append(&end_jumps, emit_jump(proto_state))
 
         patch_jump(proto_state, false_jump)
         if Parser.failed { return }
@@ -1549,8 +1752,8 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close switch")
     if Parser.failed { return }
 
-    for i in 0 ..< end_jump_count {
-        patch_jump(proto_state, end_jumps[i])
+    for end_jump in end_jumps {
+        patch_jump(proto_state, end_jump)
         if Parser.failed { return }
     }
 
@@ -1584,19 +1787,13 @@ parse_break_stmt :: proc(proto_state: ^ProtoState) {
     break_token := consume_token(proto_state, .BREAK, "expected 'break'")
     if Parser.failed { return }
 
-    if proto_state.loop_depth == 0 {
+    if len(proto_state.loop_break_fixup_bases) == 0 {
         parser_error(proto_state, break_token, "break is only valid inside loops")
         return
     }
 
-    if proto_state.break_fixup_count >= MAX_BREAK_FIXUPS {
-        parser_error(proto_state, break_token, "function has too many break statements")
-        return
-    }
-
     break_jump := emit_jump(proto_state)
-    proto_state.break_fixups[proto_state.break_fixup_count] = break_jump
-    proto_state.break_fixup_count += 1
+    append(&proto_state.break_jump_fixups, break_jump)
 }
 
 // returnStmt = "return" [exprList].
@@ -1693,7 +1890,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
     lhs_count := len(lhs_tokens)
 
-    if proto_state.function_depth == 0 && proto_state.scope_depth == 0 {
+    if proto_state.function_depth == 0 && len(proto_state.scope_local_marks) == 0 {
         binding_indexes: [MAX_BINDINGS]int
         current_top_level_table := &Active_State.main_env
         if proto_state.is_module {
@@ -1773,8 +1970,8 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
         }
 
         scope_start := 0
-        if proto_state.scope_depth > 0 {
-            scope_start = proto_state.scope_local_counts[proto_state.scope_depth - 1]
+        if len(proto_state.scope_local_marks) > 0 {
+            scope_start = proto_state.scope_local_marks[len(proto_state.scope_local_marks) - 1]
         }
 
         for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
@@ -1857,6 +2054,12 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
             }
         }
 
+        import_index := import_namespace_find(proto_state, ident_text)
+        if import_index >= 0 {
+            parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is an imported namespace; namespace names are not assignable", ident_text))
+            return ExprInvalid{}
+        }
+
         global_index := binding_table_find(&Active_State.global_env, ident_text)
         if global_index < 0 {
             if proto_state.function_depth > 0 {
@@ -1882,8 +2085,13 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
         return ExprInvalid{}
 
     case ExprImportedBinding:
-        parser_error(proto_state, source_token, "invalid assignment target; imported module binding is not assignable")
-        return ExprInvalid{}
+        module_table := &Active_State.module_envs[t.module_index]
+        if !module_table.is_mutable[t.binding_index] {
+            parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", module_table.names[t.binding_index]))
+            return ExprInvalid{}
+        }
+
+        return target
     }
 
     panic("assignment target resolution reached non-assignable expression descriptor")
@@ -1901,6 +2109,9 @@ set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprD
         emit_set_main_bind(proto_state, src_slot, int(t))
 
     case ExprModuleBinding:
+        emit_set_module_bind(proto_state, src_slot, t.module_index, t.binding_index)
+
+    case ExprImportedBinding:
         emit_set_module_bind(proto_state, src_slot, t.module_index, t.binding_index)
 
     case ExprGlobalBinding:
@@ -2133,8 +2344,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
         advance_token()
     }
 
-    // Dispatch in decreasing specificity: declare (:=), imm declare (::),
-    // assign (=), compound assign (+= etc), then call or error.
+    // The operator after the shared target prefix determines the statement form.
     if Parser.current_token.kind == .DECL {
         for target_index := 0; target_index < lhs_count; target_index += 1 {
             #partial switch target in targets[target_index] {
@@ -2254,6 +2464,11 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
+    if Parser.current_token.kind == .EXPORT {
+        parser_error(proto_state, Parser.current_token, "export is only valid as final top-level module statement")
+        return
+    }
+
     if Parser.current_token.kind == .IDENT || Parser.current_token.kind == .FUNCTION || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .MAP {
         parse_simple_stmt(proto_state)
         return
@@ -2263,7 +2478,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", error_token_text(token)))
 }
 
-// sourceFile = {stmt} EOF.
+// sourceFile = {importStmt} fileBody [exportStmt].
 // Top-level statement temps die at statement end.
 parse_top_level_statements :: proc(proto_state: ^ProtoState) {
     for !Parser.failed && Parser.current_token.kind == .IMPORT {
@@ -2272,6 +2487,18 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
     }
 
     for !Parser.failed && Parser.current_token.kind != .EOF {
+        if Parser.current_token.kind == .EXPORT {
+            parse_export_stmt(proto_state)
+            if Parser.failed { return }
+
+            if Parser.current_token.kind != .EOF {
+                parser_error(proto_state, Parser.current_token, "export must be final top-level statement")
+                return
+            }
+
+            return
+        }
+
         parse_stmt(proto_state)
         if Parser.failed { return }
         proto_state.next_temp_slot = proto_state.local_count
@@ -2336,7 +2563,7 @@ compile_module_source :: proc(source, source_name: string, module_index: int) ->
         line        = 1,
         column      = 1,
     }
-    module_proto_state := begin_proto(module_origin, Active_State.module_names[module_index], 0, 0)
+    module_proto_state := begin_proto(module_origin, Active_State.module_ids[module_index], 0, 0)
     module_proto_state.is_module = true
     module_proto_state.module_index = module_index
 

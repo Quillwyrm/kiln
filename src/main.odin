@@ -11,9 +11,8 @@ print_help :: proc() {
     fmt.println("")
     fmt.println("Usage:")
     fmt.println("  kiln run <file.kiln>")
-    fmt.println("  kiln check <file.kiln>")
     fmt.println("")
-    fmt.println("Runs or checks Kiln source files. The .kiln extension may be omitted.")
+    fmt.println("Runs Kiln source files. The .kiln extension may be omitted.")
 }
 
 print_kiln_error :: proc(err: ^kiln.Error) {
@@ -43,8 +42,8 @@ main :: proc() {
         return
     }
 
-    if command != "run" && command != "check" {
-        fmt.eprintfln("unknown command `%s`; expected run, check, or help", command)
+    if command != "run" {
+        fmt.eprintfln("unknown command `%s`; expected run or help", command)
         os.exit(1)
     }
 
@@ -81,16 +80,6 @@ main :: proc() {
 
     kiln.bind_core_env(kstate)
     kiln.bind_core_modules(kstate)
-
-    if command == "check" {
-        err := kiln.check_file(kstate, source_path)
-        if err != nil {
-            print_kiln_error(err)
-            os.exit(1)
-        }
-        fmt.printfln("check success: %s compiled", source_path)
-        return
-    }
 
     // The CLI host ignores the script return value; embedding hosts can use it.
     result, err := kiln.run_file(kstate, source_path)

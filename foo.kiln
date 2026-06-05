@@ -1,0 +1,10 @@
+// Source module smoke test for the default host.
+
+hidden := 11
+counter := 1
+
+bar :: function(value) {
+    return value + hidden
+}
+
+export { bar, counter }

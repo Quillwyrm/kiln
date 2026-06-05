@@ -42,7 +42,9 @@ value_type_to_string :: proc(value: Value) -> string {
     panic("unreachable")
 }
 
-value_to_string :: proc(value: Value) -> string {
+// active_objects tracks the current recursive formatting path so collection cycles
+// emit finite placeholders instead of recursing forever.
+value_to_string_with_active_objects :: proc(value: Value, active_objects: ^[dynamic]^Object) -> string {
     if value == nil {
         return "nil"
     }
@@ -62,6 +64,13 @@ value_to_string :: proc(value: Value) -> string {
             return string_object.data
 
         case .ARRAY:
+            for active_index := 0; active_index < len(active_objects); active_index += 1 {
+                if active_objects[active_index] == v {
+                    return "[...]"
+                }
+            }
+            append(active_objects, v)
+
             array_object := cast(^ArrayObject)v
             parts := make([dynamic]string)
 
@@ -79,16 +88,24 @@ value_to_string :: proc(value: Value) -> string {
                     append(&parts, string_object.data)
                     append(&parts, "\"")
                 } else {
-                    append(&parts, value_to_string(item))
+                    append(&parts, value_to_string_with_active_objects(item, active_objects))
                 }
             }
             append(&parts, "]")
 
             result := strings.concatenate(parts[:])
             delete(parts)
+            pop(active_objects)
             return result
 
         case .MAP:
+            for active_index := 0; active_index < len(active_objects); active_index += 1 {
+                if active_objects[active_index] == v {
+                    return "{...}"
+                }
+            }
+            append(active_objects, v)
+
             map_object := cast(^MapObject)v
             parts := make([dynamic]string)
 
@@ -110,7 +127,7 @@ value_to_string :: proc(value: Value) -> string {
                     append(&parts, string_object.data)
                     append(&parts, "\"")
                 } else {
-                    append(&parts, value_to_string(item_value))
+                    append(&parts, value_to_string_with_active_objects(item_value, active_objects))
                 }
 
                 item_index += 1
@@ -119,6 +136,7 @@ value_to_string :: proc(value: Value) -> string {
 
             result := strings.concatenate(parts[:])
             delete(parts)
+            pop(active_objects)
             return result
 
         case .PROTO_FUNCTION, .NATIVE_FUNCTION:
@@ -127,6 +145,13 @@ value_to_string :: proc(value: Value) -> string {
     }
 
     panic("unreachable: value must match one Value variant")
+}
+
+value_to_string :: proc(value: Value) -> string {
+    active_objects := make([dynamic]^Object)
+    result := value_to_string_with_active_objects(value, &active_objects)
+    delete(active_objects)
+    return result
 }
 
 
@@ -147,6 +172,11 @@ native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_
 
 
 native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `type()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
     value := Value{}
     if arg_count >= 1 {
         value = kiln_state.slots[args_base]
@@ -158,6 +188,11 @@ native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_s
 
 
 native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `length()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
     value := Value{}
     if arg_count >= 1 {
         value = kiln_state.slots[args_base]
@@ -189,6 +224,11 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 
 
 native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+    if arg_count > 2 {
+        runtime_error(fmt.tprintf("too many arguments for `assert()`: expected 2, got %d", arg_count))
+        return 0
+    }
+
     condition := Value{}
     if arg_count >= 1 {
         condition = kiln_state.slots[args_base]
@@ -218,6 +258,11 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 
 
 native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `to_string()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
     value := Value{}
     if arg_count >= 1 {
         value = kiln_state.slots[args_base]
@@ -230,6 +275,11 @@ native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 
 // Returns nil on failure instead of erroring.
 native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int, requested_results: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `to_number()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
     value := Value{}
     if arg_count >= 1 {
         value = kiln_state.slots[args_base]

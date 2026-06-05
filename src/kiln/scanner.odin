@@ -104,8 +104,7 @@ Token :: struct {
 
 // Scanner state ==================================================================================
 
-// Scanner runs one active scan at a time — it is a package-level singleton.
-// The = {} on the struct value instantiates it as the package singleton immediately.
+// Scanner runs one active scan at a time; it is a package-level singleton.
 Scanner := struct {
     source: string,
     source_name: string,
@@ -144,7 +143,6 @@ begin_token :: proc() {
     Scanner.token_column = Scanner.column
 }
 
-// match_next conditionally consumes one exact following byte.
 match_next :: proc(expected: u8) -> bool {
     if Scanner.index >= len(Scanner.source) { return false }
 
@@ -157,7 +155,7 @@ match_next :: proc(expected: u8) -> bool {
 
 // Scanner errors =================================================================================
 
-// Latch Scanner.failed and return ERROR token. Does not call set_error — parser handles that.
+// Latch Scanner.failed and return ERROR token. Does not call set_error; parser handles that.
 scanner_error :: proc(message: string) -> Token {
     Scanner.failed = true
     return make_error_token(message)
@@ -177,7 +175,7 @@ make_token :: proc(kind: TokenKind, value: TokenValue = {}) -> Token {
     }
 }
 
-// Constructs an ERROR token. Does not set Scanner.failed — scanner_error owns that.
+// Constructs an ERROR token. Does not set Scanner.failed; scanner_error owns that.
 make_error_token :: proc(message: string) -> Token {
     return Token {
         kind        = .ERROR,
@@ -202,6 +200,47 @@ is_ident_char :: proc(ch: u8) -> bool {
     return is_alpha(ch) || is_digit(ch) || ch == '_'
 }
 
+ident_token_kind :: proc(text: string) -> TokenKind {
+    switch text {
+    case "true":
+        return .TRUE
+    case "false":
+        return .FALSE
+    case "nil":
+        return .NIL
+    case "and":
+        return .AND
+    case "or":
+        return .OR
+    case "if":
+        return .IF
+    case "else":
+        return .ELSE
+    case "for":
+        return .FOR
+    case "break":
+        return .BREAK
+    case "function":
+        return .FUNCTION
+    case "return":
+        return .RETURN
+    case "switch":
+        return .SWITCH
+    case "case":
+        return .CASE
+    case "global":
+        return .GLOBAL
+    case "map":
+        return .MAP
+    case "import":
+        return .IMPORT
+    case "export":
+        return .EXPORT
+    }
+
+    return .IDENT
+}
+
 
 // Token scans ====================================================================================
 
@@ -217,44 +256,12 @@ scan_ident_or_keyword :: proc() -> Token {
 
     token_text := Scanner.source[Scanner.token_start:Scanner.index]
 
-    switch token_text {
-    case "true":
-        return make_token(.TRUE)
-    case "false":
-        return make_token(.FALSE)
-    case "nil":
-        return make_token(.NIL)
-    case "and":
-        return make_token(.AND)
-    case "or":
-        return make_token(.OR)
-    case "if":
-        return make_token(.IF)
-    case "else":
-        return make_token(.ELSE)
-    case "for":
-        return make_token(.FOR)
-    case "break":
-        return make_token(.BREAK)
-    case "function":
-        return make_token(.FUNCTION)
-    case "return":
-        return make_token(.RETURN)
-    case "switch":
-        return make_token(.SWITCH)
-    case "case":
-        return make_token(.CASE)
-    case "global":
-        return make_token(.GLOBAL)
-    case "map":
-        return make_token(.MAP)
-    case "import":
-        return make_token(.IMPORT)
-    case "export":
-        return make_token(.EXPORT)
-    case:
-        return make_token(.IDENT, TokenValue(token_text))
+    kind := ident_token_kind(token_text)
+    if kind != .IDENT {
+        return make_token(kind)
     }
+
+    return make_token(.IDENT, TokenValue(token_text))
 }
 
 // scan_number supports:
@@ -354,7 +361,7 @@ scan_number :: proc() -> Token {
     return make_token(.INT, TokenValue(value))
 }
 
-// No escape decoding — backslash sequences are literal.
+// No escape decoding; backslash sequences are literal.
 scan_string :: proc() -> Token {
     advance_char()
     string_start := Scanner.index
@@ -375,14 +382,13 @@ scan_string :: proc() -> Token {
     return make_token(.STRING, TokenValue(str_content))
 }
 
-// Emits no token — comments are not preserved in the token stream.
+// Emits no token; comments are not preserved in the token stream.
 skip_line_comment :: proc() {
     for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '\n' {
         advance_char()
     }
 }
 
-// Handles both single-character and two-character punctuation/operator forms.
 scan_symbol :: proc() -> Token {
     ch := advance_char()
 
