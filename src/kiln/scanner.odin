@@ -84,7 +84,7 @@ TokenKind :: enum {
     SEMICOLON,
 }
 
-// TokenValue stores payload data for IDENT/INT/FLOAT/STRING tokens.
+// TokenValue stores payload data for IDENT/INT/FLOAT/STRING/ERROR tokens.
 // Other token kinds leave Token.value empty.
 TokenValue :: union {
     i64,
@@ -92,15 +92,11 @@ TokenValue :: union {
     string,
 }
 
-// Token is one scanned unit plus its source location.
-// line and column start at 1 to match printed error locations.
+// Token stores semantic scanner output and its source-start byte offset.
 Token :: struct {
-    kind:        TokenKind,
-    value:       TokenValue,
-    source_text: string,
-
-    line:   int, // 1-based source line where this token begins
-    column: int, // 1-based source column where this token begins
+    kind:  TokenKind,
+    value: TokenValue,
+    start: int,
 }
 
 // Scanner state ==================================================================================
@@ -110,38 +106,22 @@ Scanner := struct {
     source: string,
     source_name: string,
 
-    index:  int,
-    line:   int,
-    column: int,
-
-    token_start:  int,
-    token_line:   int,
-    token_column: int,
+    index:       int,
+    token_start: int,
 
     failed: bool,
 }{}
 
 // Cursor helpers =================================================================================
 
-// Also updates line/column tracking. Newline resets column to 1.
 advance_char :: proc() -> u8 {
     ch := Scanner.source[Scanner.index]
     Scanner.index += 1
-
-    if ch == '\n' {
-        Scanner.line += 1
-        Scanner.column = 1
-    } else {
-        Scanner.column += 1
-    }
-
     return ch
 }
 
 begin_token :: proc() {
     Scanner.token_start = Scanner.index
-    Scanner.token_line = Scanner.line
-    Scanner.token_column = Scanner.column
 }
 
 match_next :: proc(expected: u8) -> bool {
@@ -165,25 +145,20 @@ scanner_error :: proc(message: string) -> Token {
 
 // Token emission =================================================================================
 
-// Uses the current token-start snapshot for position data.
 make_token :: proc(kind: TokenKind, value: TokenValue = {}) -> Token {
     return Token {
-        kind        = kind,
-        value       = value,
-        source_text = Scanner.source[Scanner.token_start:Scanner.index],
-        line        = Scanner.token_line,
-        column      = Scanner.token_column,
+        kind  = kind,
+        value = value,
+        start = Scanner.token_start,
     }
 }
 
 // Constructs an ERROR token. Does not set Scanner.failed; scanner_error owns that.
 make_error_token :: proc(message: string) -> Token {
     return Token {
-        kind        = .ERROR,
-        value       = TokenValue(message),
-        source_text = Scanner.source[Scanner.token_start:Scanner.index],
-        line        = Scanner.token_line,
-        column      = Scanner.token_column,
+        kind  = .ERROR,
+        value = TokenValue(message),
+        start = Scanner.token_start,
     }
 }
 
@@ -492,11 +467,7 @@ begin_scan :: proc(source, source_name: string) {
     Scanner.source = source
     Scanner.source_name = source_name
     Scanner.index = 0
-    Scanner.line = 1
-    Scanner.column = 1
     Scanner.token_start = 0
-    Scanner.token_line = 1
-    Scanner.token_column = 1
     Scanner.failed = false
 }
 

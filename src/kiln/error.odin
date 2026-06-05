@@ -13,6 +13,27 @@ SourceLocation :: struct {
     column:      int,
 }
 
+// Converts a source byte offset into persistent one-based diagnostic coordinates.
+source_location_at :: proc(source_name, source: string, offset: int) -> SourceLocation {
+    line := 1
+    column := 1
+
+    for index := 0; index < offset; index += 1 {
+        if source[index] == '\n' {
+            line += 1
+            column = 1
+        } else {
+            column += 1
+        }
+    }
+
+    return SourceLocation{
+        source_name = source_name,
+        line        = line,
+        column      = column,
+    }
+}
+
 // Error is the current operation diagnostic surfaced to the host.
 // Its strings are borrowed and remain valid for the current host operation.
 Error :: struct {

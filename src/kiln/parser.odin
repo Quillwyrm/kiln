@@ -79,11 +79,8 @@ advance_token :: proc() -> Token {
 
     if Parser.current_token.kind == .ERROR {
         message := Parser.current_token.value.(string)
-        set_error(SourceLocation{
-            source_name = Scanner.source_name,
-            line        = Parser.current_token.line,
-            column      = Parser.current_token.column,
-        }, message)
+        location := source_location_at(Scanner.source_name, Scanner.source, Parser.current_token.start)
+        set_error(location, message)
         Parser.failed = true
     }
 
@@ -93,19 +90,17 @@ advance_token :: proc() -> Token {
 
 // Parser errors ==================================================================================
 
-error_token_text :: proc(token: Token) -> string {
-    if token.kind == .EOF {
+// Scanner.index remains the end of Parser.current_token until advance_token scans again.
+current_token_text :: proc() -> string {
+    if Parser.current_token.kind == .EOF {
         return "end of file"
     }
-    return token.source_text
+    return Scanner.source[Parser.current_token.start:Scanner.index]
 }
 
 parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
-    set_error(SourceLocation{
-        source_name = proto_state.origin.source_name,
-        line        = token.line,
-        column      = token.column,
-    }, message)
+    location := source_location_at(proto_state.origin.source_name, Scanner.source, token.start)
+    set_error(location, message)
     Parser.failed = true
 }
 
@@ -590,7 +585,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 
     token := Parser.current_token
-    parser_error(proto_state, token, fmt.tprintf("expected chain expression, got `%s`", error_token_text(token)))
+    parser_error(proto_state, token, fmt.tprintf("expected chain expression, got `%s`", current_token_text()))
     return ExprInvalid{}
 }
 
@@ -795,7 +790,7 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         return parse_chain_expr(proto_state)
     case:
         token := Parser.current_token
-        parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", error_token_text(token)))
+        parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", current_token_text()))
         return ExprInvalid{}
     }
 }
@@ -1265,11 +1260,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
     if Parser.failed { return }
 
-    child_origin := SourceLocation{
-        source_name = parent_proto_state.origin.source_name,
-        line        = origin_token.line,
-        column      = origin_token.column,
-    }
+    child_origin := source_location_at(parent_proto_state.origin.source_name, Scanner.source, origin_token.start)
     child_proto_state := begin_proto(child_origin, function_name, param_count, parent_proto_state.function_depth + 1)
     child_proto_state.is_module = parent_proto_state.is_module
     child_proto_state.module_index = parent_proto_state.module_index
@@ -2479,7 +2470,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     token := Parser.current_token
-    parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", error_token_text(token)))
+    parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", current_token_text()))
 }
 
 // sourceFile = {importStmt} fileBody [exportStmt].
