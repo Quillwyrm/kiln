@@ -140,6 +140,203 @@ native_system_exit :: proc(kiln_state: ^State, args_base: int, arg_count: int, r
 }
 
 
+// Filesystem module ==============================================================================
+// Filesystem policy:
+// - Caller contract errors are runtime errors:
+//   wrong argument count, wrong argument type, missing required arguments.
+// - Recoverable host filesystem failures are returned as string errors.
+// - Predicate queries return bool.
+// - list_dir returns direct entry names in host order, unsorted.
+// - make_dir creates one directory level.
+// - set_cwd mutates process cwd, so later relative paths use the new cwd.
+
+// read_file(path) -> string | nil, err
+// reads an entire text file, or returns nil and an error string on failure
+native_filesystem_read_file :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.read_file()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.read_file", "first")
+    if !path_is_string { return 0 }
+
+    bytes, read_error := os.read_entire_file(path, context.allocator)
+    if read_error != nil {
+        kiln_state.slots[return_slot_base] = Value{}
+        kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`filesystem.read_file()` failed for `%s`: %v", path, read_error))
+        return 2
+    }
+    defer delete(bytes)
+
+    kiln_state.slots[return_slot_base] = new_string_value(string(bytes))
+    kiln_state.slots[return_slot_base + 1] = Value{}
+    return 2
+}
+
+// write_file(path, text) -> err | nil
+// writes text to a file, replacing existing contents, or returns an error string on failure
+native_filesystem_write_file :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 2 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.write_file()`: expected 2, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.write_file", "first")
+    if !path_is_string { return 0 }
+    text, text_is_string := native_arg_string(kiln_state, args_base, arg_count, 1, "filesystem.write_file", "second")
+    if !text_is_string { return 0 }
+
+    write_error := os.write_entire_file(path, text)
+    if write_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`filesystem.write_file()` failed for `%s`: %v", path, write_error))
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = Value{}
+    return 1
+}
+
+// get_cwd() -> string | nil, err
+// returns current working directory, or nil and an error string on failure
+native_filesystem_get_cwd :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 0 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.get_cwd()`: expected 0, got %d", arg_count))
+        return 0
+    }
+
+    cwd, cwd_error := os.get_working_directory(context.allocator)
+    if cwd_error != nil {
+        kiln_state.slots[return_slot_base] = Value{}
+        kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`filesystem.get_cwd()` failed: %v", cwd_error))
+        return 2
+    }
+    defer delete(cwd)
+
+    kiln_state.slots[return_slot_base] = new_string_value(cwd)
+    kiln_state.slots[return_slot_base + 1] = Value{}
+    return 2
+}
+
+// set_cwd(path) -> err | nil
+// changes current working directory, or returns an error string on failure
+native_filesystem_set_cwd :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.set_cwd()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.set_cwd", "first")
+    if !path_is_string { return 0 }
+
+    cwd_error := os.set_working_directory(path)
+    if cwd_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`filesystem.set_cwd()` failed for `%s`: %v", path, cwd_error))
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = Value{}
+    return 1
+}
+
+// exists(path) -> bool
+// returns true if a filesystem path exists
+native_filesystem_exists :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.exists()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.exists", "first")
+    if !path_is_string { return 0 }
+
+    kiln_state.slots[return_slot_base] = Value(os.exists(path))
+    return 1
+}
+
+// is_file(path) -> bool
+// returns true if path exists and is a regular file
+native_filesystem_is_file :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.is_file()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.is_file", "first")
+    if !path_is_string { return 0 }
+
+    kiln_state.slots[return_slot_base] = Value(os.is_file(path))
+    return 1
+}
+
+// is_dir(path) -> bool
+// returns true if path exists and is a directory
+native_filesystem_is_dir :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.is_dir()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.is_dir", "first")
+    if !path_is_string { return 0 }
+
+    kiln_state.slots[return_slot_base] = Value(os.is_dir(path))
+    return 1
+}
+
+// list_dir(path) -> array | nil, err
+// returns direct entry names inside a directory, or nil and an error string on failure
+native_filesystem_list_dir :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.list_dir()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.list_dir", "first")
+    if !path_is_string { return 0 }
+
+    entries, list_error := os.read_all_directory_by_path(path, context.allocator)
+    if list_error != nil {
+        kiln_state.slots[return_slot_base] = Value{}
+        kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`filesystem.list_dir()` failed for `%s`: %v", path, list_error))
+        return 2
+    }
+    defer os.file_info_slice_delete(entries, context.allocator)
+
+    entry_names := new(ArrayObject)
+    entry_names.header.kind = .ARRAY
+    entry_names.data = make([dynamic]Value)
+    for entry in entries {
+        append(&entry_names.data, new_string_value(entry.name))
+    }
+
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)entry_names)
+    kiln_state.slots[return_slot_base + 1] = Value{}
+    return 2
+}
+
+// make_dir(path) -> err | nil
+// creates one directory level, or returns an error string on failure
+native_filesystem_make_dir :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `filesystem.make_dir()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "filesystem.make_dir", "first")
+    if !path_is_string { return 0 }
+
+    make_error := os.make_directory(path)
+    if make_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`filesystem.make_dir()` failed for `%s`: %v", path, make_error))
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = Value{}
+    return 1
+}
+
+
 // Array module ===================================================================================
 
 // push(array, value)
@@ -648,6 +845,17 @@ bind_core_modules :: proc(state: ^State) {
     bind_module_native_function(system_module, "argv", native_system_argv)
     bind_module_native_function(system_module, "args", native_system_args)
     bind_module_native_function(system_module, "exit", native_system_exit)
+
+    filesystem_module := bind_module("filesystem")
+    bind_module_native_function(filesystem_module, "read_file", native_filesystem_read_file)
+    bind_module_native_function(filesystem_module, "write_file", native_filesystem_write_file)
+    bind_module_native_function(filesystem_module, "get_cwd", native_filesystem_get_cwd)
+    bind_module_native_function(filesystem_module, "set_cwd", native_filesystem_set_cwd)
+    bind_module_native_function(filesystem_module, "exists", native_filesystem_exists)
+    bind_module_native_function(filesystem_module, "is_file", native_filesystem_is_file)
+    bind_module_native_function(filesystem_module, "is_dir", native_filesystem_is_dir)
+    bind_module_native_function(filesystem_module, "list_dir", native_filesystem_list_dir)
+    bind_module_native_function(filesystem_module, "make_dir", native_filesystem_make_dir)
 
     array_module := bind_module("array")
     bind_module_native_function(array_module, "push", native_array_push)

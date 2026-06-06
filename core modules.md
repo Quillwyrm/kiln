@@ -105,32 +105,32 @@ system.
 
 
 filesystem.
-    read_file(path) -> string
-        reads an entire text file
+    read_file(path) -> string | nil, err *DONE*
+        reads an entire text file, or returns nil and error string on failure
 
-    write_file(path, text)
-        writes text to a file, replacing existing contents
+    write_file(path, text) -> err | nil *DONE*
+        writes text to a file, replacing existing contents, or returns error string on failure
 
-    get_cwd() -> string
-        returns current working directory
+    get_cwd() -> string | nil, err *DONE*
+        returns current working directory, or nil and error string on failure
 
-    set_cwd(path)
-        changes current working directory
+    set_cwd(path) -> err | nil *DONE*
+        changes current working directory, or returns error string on failure
 
-    exists(path) -> bool
+    exists(path) -> bool *DONE*
         returns true if a filesystem path exists
 
-    is_file(path) -> bool
+    is_file(path) -> bool *DONE*
         returns true if path exists and is a regular file
 
-    is_dir(path) -> bool
+    is_dir(path) -> bool *DONE*
         returns true if path exists and is a directory
 
-    list_dir(path) -> array
-        returns direct entry names inside a directory
+    list_dir(path) -> array | nil, err *DONE*
+        returns direct entry names inside a directory, or nil and error string on failure
 
-    make_dir(path)
-        creates a directory
+    make_dir(path) -> err | nil *DONE*
+        creates one directory level, or returns error string on failure
 
 
 path.

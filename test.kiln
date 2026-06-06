@@ -6,6 +6,7 @@ import "array"
 import "maps"
 import "string"
 import "system"
+import "filesystem"
 import "foo"
 
 // Basic literal forms.
@@ -175,6 +176,32 @@ core_argv := system.argv()
 core_args := system.args()
 print(length(core_argv), core_argv[1], core_argv[2])
 print(length(core_args))
+
+filesystem_test_path := "dev/core_filesystem_test.txt"
+filesystem.write_file(filesystem_test_path, "kiln filesystem")
+print(filesystem.read_file(filesystem_test_path))
+print(filesystem.exists(filesystem_test_path))
+print(filesystem.is_file(filesystem_test_path))
+print(filesystem.is_dir("dev"))
+print(filesystem.exists("dev/not-a-real-kiln-path"))
+filesystem_entries := filesystem.list_dir("dev")
+print(length(filesystem_entries) > 0)
+print(string.contains(filesystem.get_cwd(), "kilnvm_dev"))
+
+print("--- filesystem errors ---")
+read_missing, read_err := filesystem.read_file("dev/core_filesystem_test_missing.txt")
+assert(read_missing == nil)
+assert(read_err != nil)
+print("read_file error ok")
+
+write_err := filesystem.write_file("dev/missing_dir/out.txt", "hello")
+assert(write_err != nil)
+print("write_file error ok")
+
+list_err_entries, list_err := filesystem.list_dir("dev/core_filesystem_test_missing.txt")
+assert(list_err_entries == nil)
+assert(list_err != nil)
+print("list_dir error ok")
 
 // Source modules compile and run during import loading.
 // Exported bindings are visible through the namespace; private top-level bindings stay module-local.
