@@ -16,6 +16,12 @@ delete_state :: proc(state: ^State) {
     free(state)
 }
 
+// set_argv sets the raw invocation vector and where user script args begin.
+set_argv :: proc(state: ^State, argv: []string, args_start: int) {
+    state.argv = argv
+    state.args_start = args_start
+}
+
 // run_source selects Active_State, clears previous error, compiles the import graph,
 // then executes the entry proto. Imports initialize during compilation.
 // When err != nil, result is undefined.

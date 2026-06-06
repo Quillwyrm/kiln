@@ -266,6 +266,10 @@ State :: struct {
     main_env:   BindingTable,
     global_env: BindingTable,
 
+    // Raw invocation argv chosen by the host, plus the first user script arg index.
+    argv:       []string,
+    args_start: int,
+
     // Loaded-module cache. One module index addresses every parallel array.
     // Core module ids are host names; source module ids are resolved absolute paths.
     // Module environments hold all bindings; module_exports controls outside visibility.

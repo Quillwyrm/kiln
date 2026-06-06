@@ -3,6 +3,9 @@
 
 import "debug"
 import "array"
+import "maps"
+import "string"
+import "system"
 import "foo"
 
 // Basic literal forms.
@@ -117,6 +120,61 @@ array.push(module_items, "second")
 print(module_items[0], module_items[1])
 print(array.pop(module_items))
 print(array.pop(module_items))
+
+// Core native modules expose procedural collection and string utilities.
+print("--- core modules ---")
+
+core_array := [1, 3]
+array.insert(core_array, 1, 2)
+array.insert(core_array, 3, 4)
+print(core_array[0], core_array[1], core_array[2], core_array[3])
+print(array.remove(core_array, 1))
+print(core_array[0], core_array[1], core_array[2])
+
+core_array_slice := array.slice(core_array, 1, 2)
+print(core_array_slice[0], core_array_slice[1])
+
+core_array_copy := array.copy(core_array)
+core_array_copy[0] = 99
+print(core_array[0], core_array_copy[0])
+array.clear(core_array_copy)
+print(length(core_array_copy))
+
+core_map := map {
+    alpha: 10,
+    beta: 20,
+}
+core_map_copy := maps.copy(core_map)
+core_map_copy["alpha"] = 99
+print(core_map["alpha"], core_map_copy["alpha"])
+
+core_map_keys := maps.get_keys(core_map)
+core_map_values := maps.get_values(core_map)
+print(length(core_map_keys), length(core_map_values))
+print(core_map[core_map_keys[0]] != nil and core_map[core_map_keys[1]] != nil)
+print((core_map_values[0] == 10 or core_map_values[0] == 20) and (core_map_values[1] == 10 or core_map_values[1] == 20))
+maps.clear(core_map_copy)
+print(length(core_map_copy))
+
+core_text := "  Kiln VM  "
+print(string.contains(core_text, "Kiln"))
+print(string.has_prefix(core_text, "  Ki"))
+print(string.has_suffix(core_text, "  "))
+core_text_parts := string.split("src/dev/refs", "/")
+print(core_text_parts[0], core_text_parts[1], core_text_parts[2])
+print(string.slice(core_text, 2, 4))
+print(string.replace("kiln-vm-kiln", "kiln", "KILN"))
+print(string.trim(core_text))
+print(string.to_lower("KiLn"))
+print(string.to_upper("KiLn"))
+print(string.get_byte("ABC", 1))
+core_bytes := string.to_bytes("AZ")
+print(core_bytes, core_bytes[1])
+
+core_argv := system.argv()
+core_args := system.args()
+print(length(core_argv), core_argv[1], core_argv[2])
+print(length(core_args))
 
 // Source modules compile and run during import loading.
 // Exported bindings are visible through the namespace; private top-level bindings stay module-local.

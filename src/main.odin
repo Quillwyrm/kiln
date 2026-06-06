@@ -52,11 +52,6 @@ main :: proc() {
         os.exit(1)
     }
 
-    if len(os.args) > 3 {
-        fmt.eprintfln("too many arguments for `%s`; expected one file", command)
-        os.exit(1)
-    }
-
     path_arg := os.args[2]
     source_path := path_arg
     tried_ext_path := ""
@@ -80,6 +75,7 @@ main :: proc() {
 
     kiln.bind_core_env(kstate)
     kiln.bind_core_modules(kstate)
+    kiln.set_argv(kstate, os.args, 3)
 
     // The CLI host ignores the script return value; embedding hosts can use it.
     result, err := kiln.run_file(kstate, source_path)

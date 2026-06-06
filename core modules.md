@@ -7,39 +7,39 @@ array.
     unpack(array) -> multiple values
         expands array elements into multiple results
 
-    push(array, value)
+    push(array, value) *DONE*
         appends value to the end of array
 
-    pop(array) -> value
+    pop(array) -> value *DONE*
         removes and returns the final element
 
-    insert(array, index, value)
+    insert(array, index, value) *DONE*
         inserts value at index, shifting existing elements right
 
-    remove(array, index) -> value
+    remove(array, index) -> value *DONE*
         removes and returns element at index, shifting later elements left
 
-    clear(array)
+    clear(array) *DONE*
         removes all elements
 
-    copy(array) -> array
+    copy(array) -> array *DONE*
         returns a shallow copy
 
-    slice(array, start, count) -> array
+    slice(array, start, count) -> array *DONE*
         returns a shallow copied sub-array
 
 
-map.
-    clear(map)
+maps.
+    clear(map) *DONE*
         removes all entries
 
-    copy(map) -> map
+    copy(map) -> map *DONE*
         returns a shallow copy
 
-    get_keys(map) -> array
+    get_keys(map) -> array *DONE*
         returns an array of keys
 
-    get_values(map) -> array
+    get_values(map) -> array *DONE*
         returns an array of values
         
 
@@ -47,45 +47,45 @@ string.
     format(format, ...values) -> string
         returns formatted text
 
-    contains(text, part) -> bool
+    contains(text, part) -> bool *DONE*
         true if text contains part
 
-    has_prefix(text, prefix) -> bool
+    has_prefix(text, prefix) -> bool *DONE*
         true if text starts with prefix
 
-    has_suffix(text, suffix) -> bool
+    has_suffix(text, suffix) -> bool *DONE*
         true if text ends with suffix
 
-    split(text, separator) -> array
+    split(text, separator) -> array *DONE*
         splits text into string pieces
 
-    slice(text, start, count) -> string
+    slice(text, start, count) -> string *DONE*
         returns substring by byte index/count, given current string model
 
-    replace(text, old, new) -> string
+    replace(text, old, new) -> string *DONE*
         replaces occurrences of old with new
 
-    trim(text) -> string
+    trim(text) -> string *DONE*
         removes leading/trailing whitespace
 
-    to_lower(text) -> string
+    to_lower(text) -> string *DONE*
         returns lowercase text
 
-    to_upper(text) -> string
+    to_upper(text) -> string *DONE*
         returns uppercase text
 
-    get_byte(text, index) -> int 
+    get_byte(text, index) -> int *DONE*
         returns byte value at index
 
-    to_bytes(text) -> array 
+    to_bytes(text) -> array *DONE*
         returns array of byte ints
 
 
 system.
-    args() -> array
+    args() -> array *DONE*
         returns user script arguments, excluding executable/script path
 
-    argv() -> array
+    argv() -> array *DONE*
         returns raw invocation argument vector
 
     get_env(name) -> string | nil
@@ -94,7 +94,7 @@ system.
     set_env(name, value)
         sets environment variable for current process
 
-    exit(code)
+    exit(code) *DONE*
         exits kiln.exe with integer process status code
 
     get_os() -> string
@@ -171,3 +171,7 @@ io.
 
     print_error(text)
         writes text to stderr, then newline
+
+
+ides:
+socket - raw socket/port/https
