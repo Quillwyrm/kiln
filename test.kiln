@@ -7,6 +7,8 @@ import "maps"
 import "string"
 import "system"
 import "filesystem"
+import "path"
+import "io"
 import "foo"
 
 // Basic literal forms.
@@ -202,6 +204,20 @@ list_err_entries, list_err := filesystem.list_dir("dev/core_filesystem_test_miss
 assert(list_err_entries == nil)
 assert(list_err != nil)
 print("list_dir error ok")
+
+print("--- path and io modules ---")
+print(path.join("dev", "core_filesystem_test.txt"))
+assert(path.base_name("dev/core_filesystem_test.txt") == "core_filesystem_test.txt")
+assert(path.dir_name("dev/core_filesystem_test.txt") == "dev")
+assert(path.extension("archive.tar.gz") == ".gz")
+assert(path.stem("archive.tar.gz") == "archive.tar")
+assert(path.stem("") == "")
+print(path.normalize("dev/../dev/core_filesystem_test.txt"))
+
+io_write_err := io.write("io.write ")
+assert(io_write_err == nil)
+io_print_err := io.print("ok")
+assert(io_print_err == nil)
 
 // Source modules compile and run during import loading.
 // Exported bindings are visible through the namespace; private top-level bindings stay module-local.

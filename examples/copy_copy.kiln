@@ -1,0 +1,52 @@
+import fs "filesystem"
+import "path"
+import "io"
+import "system"
+
+args := system.args()
+
+if length(args) < 2 {
+    io.print_error("usage: copy-file <src> <dst-dir>")
+    system.exit(1)
+}
+
+src := args[0]
+dst_dir := args[1]
+
+src_dir := path.normalize(path.dir_name(src))
+dst_dir_clean := path.normalize(dst_dir)
+
+src_base := path.base_name(src)
+src_stem := path.stem(src_base)
+src_ext := path.extension(src_base)
+
+dst_base := src_base
+
+if dst_dir_clean == src_dir {
+    dst_base = src_stem .. "_copy" .. src_ext
+}
+
+dst := path.join(dst_dir, dst_base)
+
+copy_index := 2
+for fs.exists(dst) {
+    dst_base = src_stem .. "_copy" .. to_string(copy_index) .. src_ext
+    dst = path.join(dst_dir, dst_base)
+    copy_index += 1
+}
+
+text, err := fs.read_file(src)
+
+if err != nil {
+    io.print_error(err)
+    system.exit(1)
+}
+
+err = fs.write_file(dst, text)
+
+if err != nil {
+    io.print_error(err)
+    system.exit(1)
+}
+
+io.print("copied " .. src .. " -> " .. dst)

@@ -134,43 +134,43 @@ filesystem.
 
 
 path.
-    join(...) -> string
+    join(...) -> string *DONE*
         joins path parts using host path rules
 
-    base_name(path) -> string
+    base_name(path) -> string *DONE*
         returns final path component
 
-    dir_name(path) -> string
+    dir_name(path) -> string *DONE*
         returns parent path component
 
-    extension(path) -> string
-        returns file extension, probably including dot
+    extension(path) -> string *DONE*
+        returns file extension, including dot
 
-    stem(path) -> string
+    stem(path) -> string *DONE*
         returns base file name without extension
 
-    normalize(path) -> string
+    normalize(path) -> string *DONE*
         lexically cleans path text without checking filesystem
 
 
 io.
-    read_all() -> string
-        reads all remaining stdin until EOF
+    read_all() -> string | nil, err *DONE*
+        reads all remaining stdin until EOF, or returns nil and error string on failure
 
-    read_line() -> string | nil
-        reads one stdin line, or nil on EOF
+    read_line() -> string | nil, err *DONE*
+        reads one stdin line, nil on EOF before bytes, or nil and error string on failure
 
-    write(text)
-        writes exact text to stdout, no newline
+    write(text) -> err | nil *DONE*
+        writes exact text to stdout, no newline, or returns error string on failure
 
-    print(text)
-        writes text to stdout, then newline
+    print(text) -> err | nil *DONE*
+        writes text to stdout, then newline, or returns error string on failure
 
-    write_error(text)
-        writes exact text to stderr, no newline
+    write_error(text) -> err | nil *DONE*
+        writes exact text to stderr, no newline, or returns error string on failure
 
-    print_error(text)
-        writes text to stderr, then newline
+    print_error(text) -> err | nil *DONE*
+        writes text to stderr, then newline, or returns error string on failure
 
 
 ides:

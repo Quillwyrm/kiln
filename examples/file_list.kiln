@@ -1,0 +1,46 @@
+import fs "filesystem"
+import "path"
+import "maps"
+import "array"
+import "io"
+import "system"
+
+args := system.args()
+
+dir := "."
+if length(args) > 0 {
+    dir = args[0]
+}
+
+names, err := fs.list_dir(dir)
+
+if err != nil {
+    io.print_error(err)
+    system.exit(1)
+}
+
+counts := map {}
+
+i := 0
+for i < length(names) {
+    name := names[i]
+    ext := path.extension(name)
+
+    if ext == "" {
+        ext = "<none>"
+    }
+
+    current := counts[ext] else 0
+    counts[ext] = current + 1
+
+    i += 1
+}
+
+keys := maps.get_keys(counts)
+
+i = 0
+for i < length(keys) {
+    key := keys[i]
+    io.print(key .. ": " .. to_string(counts[key]))
+    i += 1
+}

@@ -1,6 +1,7 @@
 package kiln
 
 import "core:fmt"
+import "core:io"
 import "core:os"
 import "core:strings"
 
@@ -329,6 +330,315 @@ native_filesystem_make_dir :: proc(kiln_state: ^State, args_base: int, arg_count
     make_error := os.make_directory(path)
     if make_error != nil {
         kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`filesystem.make_dir()` failed for `%s`: %v", path, make_error))
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = Value{}
+    return 1
+}
+
+
+// Path module ====================================================================================
+// Path functions are pure path-string transforms. They do not touch the filesystem.
+// Caller contract errors are runtime errors. Allocation failure is a runtime error.
+
+// join(...parts) -> string
+// joins path parts using host path rules
+native_path_join :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    parts := make([dynamic]string)
+    defer delete(parts)
+
+    for arg_index in 0..<arg_count {
+        value := native_arg_value(kiln_state, args_base, arg_count, arg_index)
+        header, is_object := value.(^Object)
+        if !is_object || header.kind != .STRING {
+            runtime_error(fmt.tprintf("`path.join()` called with invalid argument %d; expected `string`, got `%s`", arg_index + 1, value_type_to_string(value)))
+            return 0
+        }
+
+        string_object := cast(^StringObject)header
+        append(&parts, string_object.data)
+    }
+
+    joined, join_error := os.join_path(parts[:], context.allocator)
+    if join_error != nil {
+        runtime_error(fmt.tprintf("`path.join()` failed to allocate result string: %v", join_error))
+        return 0
+    }
+    defer delete(joined)
+
+    kiln_state.slots[return_slot_base] = new_string_value(joined)
+    return 1
+}
+
+// base_name(path) -> string
+// returns final path component
+native_path_base_name :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `path.base_name()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "path.base_name", "first")
+    if !path_is_string { return 0 }
+
+    kiln_state.slots[return_slot_base] = new_string_value(os.base(path))
+    return 1
+}
+
+// dir_name(path) -> string
+// returns parent path component
+native_path_dir_name :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `path.dir_name()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "path.dir_name", "first")
+    if !path_is_string { return 0 }
+
+    dir, _ := os.split_path(path)
+    kiln_state.slots[return_slot_base] = new_string_value(dir)
+    return 1
+}
+
+// extension(path) -> string
+// returns file extension, including the dot
+native_path_extension :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `path.extension()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "path.extension", "first")
+    if !path_is_string { return 0 }
+
+    kiln_state.slots[return_slot_base] = new_string_value(os.ext(path))
+    return 1
+}
+
+// stem(path) -> string
+// returns base file name without extension
+native_path_stem :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `path.stem()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "path.stem", "first")
+    if !path_is_string { return 0 }
+
+    if path == "" {
+        kiln_state.slots[return_slot_base] = new_string_value("")
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = new_string_value(os.stem(path))
+    return 1
+}
+
+// normalize(path) -> string
+// lexically cleans path text without checking filesystem
+native_path_normalize :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `path.normalize()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "path.normalize", "first")
+    if !path_is_string { return 0 }
+
+    normalized, normalize_error := os.clean_path(path, context.allocator)
+    if normalize_error != nil {
+        runtime_error(fmt.tprintf("`path.normalize()` failed to allocate result string: %v", normalize_error))
+        return 0
+    }
+    defer delete(normalized)
+
+    kiln_state.slots[return_slot_base] = new_string_value(normalized)
+    return 1
+}
+
+
+// IO module ======================================================================================
+// IO functions talk to host standard streams. Caller contract errors are runtime errors.
+// Recoverable stream failures return error strings.
+
+// read_all() -> string | nil, err
+// reads all remaining stdin until EOF
+native_io_read_all :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 0 {
+        runtime_error(fmt.tprintf("too many arguments for `io.read_all()`: expected 0, got %d", arg_count))
+        return 0
+    }
+
+    data := make([dynamic]byte)
+    defer delete(data)
+
+    buffer: [4096]byte
+    for {
+        read_count, read_error := os.read(os.stdin, buffer[:])
+        if read_count > 0 {
+            append(&data, ..buffer[:read_count])
+        }
+
+        if read_error != nil {
+            read_io_error, read_is_io_error := read_error.(io.Error)
+            if read_is_io_error && read_io_error == .EOF {
+                kiln_state.slots[return_slot_base] = new_string_value(string(data[:]))
+                kiln_state.slots[return_slot_base + 1] = Value{}
+                return 2
+            }
+
+            kiln_state.slots[return_slot_base] = Value{}
+            kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`io.read_all()` failed: %v", read_error))
+            return 2
+        }
+    }
+}
+
+// read_line() -> string | nil, err
+// reads one stdin line, or nil on EOF before any bytes
+native_io_read_line :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 0 {
+        runtime_error(fmt.tprintf("too many arguments for `io.read_line()`: expected 0, got %d", arg_count))
+        return 0
+    }
+
+    line := make([dynamic]byte)
+    defer delete(line)
+
+    buffer: [1]byte
+    for {
+        read_count, read_error := os.read(os.stdin, buffer[:])
+        if read_count > 0 {
+            if buffer[0] == '\n' {
+                if len(line) > 0 && line[len(line) - 1] == '\r' {
+                    pop(&line)
+                }
+
+                kiln_state.slots[return_slot_base] = new_string_value(string(line[:]))
+                kiln_state.slots[return_slot_base + 1] = Value{}
+                return 2
+            }
+
+            append(&line, buffer[0])
+        }
+
+        if read_error != nil {
+            read_io_error, read_is_io_error := read_error.(io.Error)
+            if read_is_io_error && read_io_error == .EOF {
+                if len(line) == 0 {
+                    kiln_state.slots[return_slot_base] = Value{}
+                    kiln_state.slots[return_slot_base + 1] = Value{}
+                    return 2
+                }
+
+                if line[len(line) - 1] == '\r' {
+                    pop(&line)
+                }
+
+                kiln_state.slots[return_slot_base] = new_string_value(string(line[:]))
+                kiln_state.slots[return_slot_base + 1] = Value{}
+                return 2
+            }
+
+            kiln_state.slots[return_slot_base] = Value{}
+            kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`io.read_line()` failed: %v", read_error))
+            return 2
+        }
+    }
+}
+
+// write(text) -> err | nil
+// writes exact text to stdout, no newline
+native_io_write :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `io.write()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    text, text_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "io.write", "first")
+    if !text_is_string { return 0 }
+
+    _, write_error := os.write_string(os.stdout, text)
+    if write_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.write()` failed: %v", write_error))
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = Value{}
+    return 1
+}
+
+// print(text) -> err | nil
+// writes text to stdout, then newline
+native_io_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `io.print()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    text, text_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "io.print", "first")
+    if !text_is_string { return 0 }
+
+    _, write_error := os.write_string(os.stdout, text)
+    if write_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print()` failed: %v", write_error))
+        return 1
+    }
+
+    _, newline_error := os.write_string(os.stdout, "\n")
+    if newline_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print()` failed: %v", newline_error))
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = Value{}
+    return 1
+}
+
+// write_error(text) -> err | nil
+// writes exact text to stderr, no newline
+native_io_write_error :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `io.write_error()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    text, text_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "io.write_error", "first")
+    if !text_is_string { return 0 }
+
+    _, write_error := os.write_string(os.stderr, text)
+    if write_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.write_error()` failed: %v", write_error))
+        return 1
+    }
+
+    kiln_state.slots[return_slot_base] = Value{}
+    return 1
+}
+
+// print_error(text) -> err | nil
+// writes text to stderr, then newline
+native_io_print_error :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 1 {
+        runtime_error(fmt.tprintf("too many arguments for `io.print_error()`: expected 1, got %d", arg_count))
+        return 0
+    }
+
+    text, text_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "io.print_error", "first")
+    if !text_is_string { return 0 }
+
+    _, write_error := os.write_string(os.stderr, text)
+    if write_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print_error()` failed: %v", write_error))
+        return 1
+    }
+
+    _, newline_error := os.write_string(os.stderr, "\n")
+    if newline_error != nil {
+        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print_error()` failed: %v", newline_error))
         return 1
     }
 
@@ -856,6 +1166,22 @@ bind_core_modules :: proc(state: ^State) {
     bind_module_native_function(filesystem_module, "is_dir", native_filesystem_is_dir)
     bind_module_native_function(filesystem_module, "list_dir", native_filesystem_list_dir)
     bind_module_native_function(filesystem_module, "make_dir", native_filesystem_make_dir)
+
+    path_module := bind_module("path")
+    bind_module_native_function(path_module, "join", native_path_join)
+    bind_module_native_function(path_module, "base_name", native_path_base_name)
+    bind_module_native_function(path_module, "dir_name", native_path_dir_name)
+    bind_module_native_function(path_module, "extension", native_path_extension)
+    bind_module_native_function(path_module, "stem", native_path_stem)
+    bind_module_native_function(path_module, "normalize", native_path_normalize)
+
+    io_module := bind_module("io")
+    bind_module_native_function(io_module, "read_all", native_io_read_all)
+    bind_module_native_function(io_module, "read_line", native_io_read_line)
+    bind_module_native_function(io_module, "write", native_io_write)
+    bind_module_native_function(io_module, "print", native_io_print)
+    bind_module_native_function(io_module, "write_error", native_io_write_error)
+    bind_module_native_function(io_module, "print_error", native_io_print_error)
 
     array_module := bind_module("array")
     bind_module_native_function(array_module, "push", native_array_push)
