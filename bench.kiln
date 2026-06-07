@@ -1,0 +1,14 @@
+bench :: function() {
+    n := 10000000
+    i := 0
+    sum := 0
+
+    for i < n {
+        sum = sum + i
+        i = i + 1
+    }
+
+    return sum
+}
+
+print(bench())

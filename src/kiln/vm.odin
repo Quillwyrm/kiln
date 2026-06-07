@@ -394,7 +394,7 @@ decode_op :: proc(word: u32) -> Opcode {
 
 // Value helpers ==================================================================================
 
-value_concat :: proc(lhs, rhs: Value) -> Value {
+value_concat :: #force_inline proc(lhs, rhs: Value) -> Value {
     left_object, left_is_object := lhs.(^Object)
     right_object, right_is_object := rhs.(^Object)
 
@@ -414,7 +414,7 @@ value_concat :: proc(lhs, rhs: Value) -> Value {
     return Value(cast(^Object)result)
 }
 
-value_add :: proc(lhs, rhs: Value) -> Value {
+value_add :: #force_inline proc(lhs, rhs: Value) -> Value {
     left_int, is_int := lhs.(i64)
     if is_int {
         right_int, is_int := rhs.(i64)
@@ -445,7 +445,7 @@ value_add :: proc(lhs, rhs: Value) -> Value {
     return Value{}
 }
 
-value_sub :: proc(lhs, rhs: Value) -> Value {
+value_sub :: #force_inline proc(lhs, rhs: Value) -> Value {
     left_int, is_int := lhs.(i64)
     if is_int {
         right_int, is_int := rhs.(i64)
@@ -476,7 +476,7 @@ value_sub :: proc(lhs, rhs: Value) -> Value {
     return Value{}
 }
 
-value_mul :: proc(lhs, rhs: Value) -> Value {
+value_mul :: #force_inline proc(lhs, rhs: Value) -> Value {
     left_int, is_int := lhs.(i64)
     if is_int {
         right_int, is_int := rhs.(i64)
@@ -507,7 +507,7 @@ value_mul :: proc(lhs, rhs: Value) -> Value {
     return Value{}
 }
 
-value_div :: proc(lhs, rhs: Value) -> Value {
+value_div :: #force_inline proc(lhs, rhs: Value) -> Value {
     left_int, left_is_int := lhs.(i64)
     left_float, left_is_float := lhs.(f64)
     right_int, right_is_int := rhs.(i64)
@@ -536,7 +536,7 @@ value_div :: proc(lhs, rhs: Value) -> Value {
     return Value(left_float / right_float)
 }
 
-value_mod :: proc(lhs, rhs: Value) -> Value {
+value_mod :: #force_inline proc(lhs, rhs: Value) -> Value {
     left_int, is_int := lhs.(i64)
     if is_int {
         right_int, is_int := rhs.(i64)
@@ -554,7 +554,7 @@ value_mod :: proc(lhs, rhs: Value) -> Value {
     return Value{}
 }
 
-value_neg :: proc(value: Value) -> Value {
+value_neg :: #force_inline proc(value: Value) -> Value {
     int_value, is_int := value.(i64)
     if is_int {
         return Value(-int_value)
@@ -571,7 +571,7 @@ value_neg :: proc(value: Value) -> Value {
 
 // Comparison/truthiness helpers ==================================================================
 
-value_is_falsey :: proc(value: Value) -> bool {
+value_is_falsey :: #force_inline proc(value: Value) -> bool {
     bool_value, is_bool := value.(bool)
     if is_bool {
         return !bool_value
@@ -584,7 +584,7 @@ value_is_falsey :: proc(value: Value) -> bool {
     return false
 }
 
-value_equal :: proc(lhs, rhs: Value) -> bool {
+value_equal :: #force_inline proc(lhs, rhs: Value) -> bool {
     left_int, is_int := lhs.(i64)
     if is_int {
         right_int, is_int := rhs.(i64)
@@ -648,7 +648,7 @@ value_equal :: proc(lhs, rhs: Value) -> bool {
     panic("unreachable: lhs must match one Value variant")
 }
 
-value_less :: proc(lhs, rhs: Value) -> bool {
+value_less :: #force_inline proc(lhs, rhs: Value) -> bool {
     left_int, is_int := lhs.(i64)
     if is_int {
         right_int, is_int := rhs.(i64)
@@ -679,7 +679,7 @@ value_less :: proc(lhs, rhs: Value) -> bool {
     return false
 }
 
-value_less_or_equal :: proc(lhs, rhs: Value) -> bool {
+value_less_or_equal :: #force_inline proc(lhs, rhs: Value) -> bool {
     left_int, is_int := lhs.(i64)
     if is_int {
         right_int, is_int := rhs.(i64)

@@ -10,9 +10,13 @@ print_help :: proc() {
     fmt.println("kiln")
     fmt.println("")
     fmt.println("Usage:")
-    fmt.println("  kiln run <file.kiln>")
+    fmt.println("  kiln <file.kiln> [args...]")
     fmt.println("")
-    fmt.println("Runs Kiln source files. The .kiln extension may be omitted.")
+    fmt.println("Examples:")
+    fmt.println("  kiln tool.kiln")
+    fmt.println("  kiln copy-file.kiln input.txt out")
+    fmt.println("")
+    fmt.println("The .kiln extension may be omitted.")
 }
 
 print_kiln_error :: proc(err: ^kiln.Error) {
@@ -35,24 +39,16 @@ main :: proc() {
         return
     }
 
-    command := os.args[1]
+    first_arg := os.args[1]
 
-    if command == "help" {
+    if first_arg == "help" || first_arg == "--help" || first_arg == "-h" {
         print_help()
         return
     }
 
-    if command != "run" {
-        fmt.eprintfln("unknown command `%s`; expected run or help", command)
-        os.exit(1)
-    }
+    path_arg := first_arg
+    script_args_start := 2
 
-    if len(os.args) < 3 {
-        fmt.eprintfln("expected file path after `%s`", command)
-        os.exit(1)
-    }
-
-    path_arg := os.args[2]
     source_path := path_arg
     tried_ext_path := ""
 
@@ -75,7 +71,7 @@ main :: proc() {
 
     kiln.bind_core_env(kstate)
     kiln.bind_core_modules(kstate)
-    kiln.set_argv(kstate, os.args, 3)
+    kiln.set_argv(kstate, os.args, script_args_start)
 
     // The CLI host ignores the script return value; embedding hosts can use it.
     result, err := kiln.run_file(kstate, source_path)

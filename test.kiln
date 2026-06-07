@@ -176,7 +176,9 @@ print(core_bytes, core_bytes[1])
 
 core_argv := system.argv()
 core_args := system.args()
-print(length(core_argv), core_argv[1], core_argv[2])
+print(length(core_argv))
+if length(core_argv) > 1 { print(core_argv[1]) }
+if length(core_argv) > 2 { print(core_argv[2]) }
 print(length(core_args))
 
 filesystem_test_path := "dev/core_filesystem_test.txt"

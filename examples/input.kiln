@@ -1,0 +1,14 @@
+import "io"
+
+print("welcome! whats your name?")
+name := io.read_line()
+print("hello there", name .. ".", "whats your credit card number?")
+num := to_number(io.read_line())
+
+if type(num) != "int" {
+    print("your a gonner buddy, thats not a number")
+} else {
+    print("nice! thanks bro")
+}
+
+print(type(num), num)
