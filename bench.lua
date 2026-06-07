@@ -1,5 +1,5 @@
 local function bench()
-    local n = 10000000
+    local n = 100000000
     local i = 0
     local sum = 0
 

@@ -750,45 +750,49 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
     }
     state.frame_count = 1
 
+    frame := &state.frame_stack[state.frame_count - 1]
+    current_proto := frame.proto
+    pc := frame.instruction_index
+    bytecode := current_proto.bytecode
+    const_pool := current_proto.const_pool
+    child_protos := current_proto.child_protos
+    slot_base := frame.slot_base
+
     for {
-        frame := &state.frame_stack[state.frame_count - 1]
+        // Fetch then advance pc.
+        // Jump offsets are applied relative to this post-fetch pc.
+        word := bytecode[pc]
+        pc += 1
 
-        // Fetch then advance instruction_index.
-        // Jump offsets are applied relative to this post-fetch index.
-        word := frame.proto.bytecode[frame.instruction_index]
-        frame.instruction_index += 1
-
-        // All slot operands are frame-relative:
-        // slot[A] == state.slots[frame.slot_base + A]
         switch decode_op(word) {
         // case .HALT:
         //     return Value{}, nil
 
         case .LOAD_NIL:
             inst := InstAx(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             state.slots[dst] = Value{}
 
         case .LOAD_TRUE:
             inst := InstAx(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             state.slots[dst] = Value(bool(true))
 
         case .LOAD_FALSE:
             inst := InstAx(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             state.slots[dst] = Value(bool(false))
 
         case .LOAD_CONST:
             inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            state.slots[dst] = frame.proto.const_pool[int(inst.b)]
+            dst := slot_base + int(inst.a)
+            state.slots[dst] = const_pool[int(inst.b)]
 
         case .LOAD_FUNC:
             // Materializes a ProtoFunctionObject from this proto's child proto table.
             inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            child_proto := frame.proto.child_protos[int(inst.b)]
+            dst := slot_base + int(inst.a)
+            child_proto := child_protos[int(inst.b)]
 
             function_object := new(ProtoFunctionObject)
             function_object.header.kind = .PROTO_FUNCTION
@@ -798,13 +802,13 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
         case .MOVE:
             inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            src := frame.slot_base + int(inst.b)
+            dst := slot_base + int(inst.a)
+            src := slot_base + int(inst.b)
             state.slots[dst] = state.slots[src]
 
         case .NEW_ARRAY:
             inst := InstAx(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             array_object := new(ArrayObject)
             array_object.header.kind = .ARRAY
             array_object.data = make([dynamic]Value)
@@ -812,8 +816,8 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
         // case .ARRAY_LEN:
         //     inst := InstABx(word)
-        //     dst := frame.slot_base + int(inst.a)
-        //     src := frame.slot_base + int(inst.b)
+        //     dst := slot_base + int(inst.a)
+        //     src := slot_base + int(inst.b)
         //     header, is_object := state.slots[src].(^Object)
         //     if !is_object || header.kind != .ARRAY {
         //         panic("ARRAY_LEN expected array object")
@@ -823,12 +827,13 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
         case .INDEX_GET:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            container_slot := frame.slot_base + int(inst.b)
-            key_slot := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            container_slot := slot_base + int(inst.b)
+            key_slot := slot_base + int(inst.c)
 
             container_header, is_object := state.slots[container_slot].(^Object)
             if !is_object {
+                frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index read; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
@@ -838,14 +843,17 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
                 index_i64, is_i64 := state.slots[key_slot].(i64)
                 if !is_i64 {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("invalid array index; expected `int`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 if index_i64 < 0 {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
 
                 index := int(index_i64)
                 if index >= len(array_object.data) {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
                 state.slots[dst] = array_object.data[index]
@@ -855,6 +863,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
                 key_header, is_key_object := state.slots[key_slot].(^Object)
                 if !is_key_object || key_header.kind != .STRING {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("invalid map key; expected `string`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 key_object := cast(^StringObject)key_header
@@ -867,19 +876,21 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 }
 
             case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+                frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index read; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
         case .INDEX_SET:
             inst := InstABC(word)
-            container_slot := frame.slot_base + int(inst.a)
-            key_slot := frame.slot_base + int(inst.b)
-            value_slot := frame.slot_base + int(inst.c)
+            container_slot := slot_base + int(inst.a)
+            key_slot := slot_base + int(inst.b)
+            value_slot := slot_base + int(inst.c)
 
             value := state.slots[value_slot]
 
             container_header, is_object := state.slots[container_slot].(^Object)
             if !is_object {
+                frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
@@ -889,14 +900,17 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
                 index_i64, is_i64 := state.slots[key_slot].(i64)
                 if !is_i64 {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("invalid array index; expected `int`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 if index_i64 < 0 {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
 
                 index := int(index_i64)
                 if index >= len(array_object.data) {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
                 }
                 array_object.data[index] = value
@@ -906,6 +920,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
                 key_header, is_key_object := state.slots[key_slot].(^Object)
                 if !is_key_object || key_header.kind != .STRING {
+                    frame.instruction_index = pc
                     return Value{}, runtime_error(fmt.tprintf("invalid map key; expected `string`, got `%s`", value_type_to_string(state.slots[key_slot])))
                 }
                 key_object := cast(^StringObject)key_header
@@ -917,13 +932,14 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 }
 
             case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+                frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
         case .ARRAY_PUSH:
             inst := InstABx(word)
-            array_slot := frame.slot_base + int(inst.a)
-            value_slot := frame.slot_base + int(inst.b)
+            array_slot := slot_base + int(inst.a)
+            value_slot := slot_base + int(inst.b)
 
             value := state.slots[value_slot]
 
@@ -938,8 +954,8 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
         // Pops tail of array B into slot A. Empty pop is an error.
         // case .ARRAY_POP:
         //     inst := InstABx(word)
-        //     dst := frame.slot_base + int(inst.a)
-        //     array_slot := frame.slot_base + int(inst.b)
+        //     dst := slot_base + int(inst.a)
+        //     array_slot := slot_base + int(inst.b)
         //
         //     array_header, is_object := state.slots[array_slot].(^Object)
         //     if !is_object || array_header.kind != .ARRAY {
@@ -956,7 +972,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
         case .NEW_MAP:
             inst := InstAx(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             map_object := new(MapObject)
             map_object.header.kind = .MAP
             map_object.data = make(map[string]Value)
@@ -964,8 +980,8 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
         // case .MAP_LEN:
         //     inst := InstABx(word)
-        //     dst := frame.slot_base + int(inst.a)
-        //     map_slot := frame.slot_base + int(inst.b)
+        //     dst := slot_base + int(inst.a)
+        //     map_slot := slot_base + int(inst.b)
         //     map_header, is_object := state.slots[map_slot].(^Object)
         //     if !is_object || map_header.kind != .MAP {
         //         panic("MAP_LEN expected map object")
@@ -975,141 +991,153 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
         case .ADD:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = value_add(state.slots[lhs], state.slots[rhs])
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .SUB:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = value_sub(state.slots[lhs], state.slots[rhs])
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .CONCAT:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = value_concat(state.slots[lhs], state.slots[rhs])
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .MUL:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = value_mul(state.slots[lhs], state.slots[rhs])
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .DIV:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = value_div(state.slots[lhs], state.slots[rhs])
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .MOD:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = value_mod(state.slots[lhs], state.slots[rhs])
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .NEG:
             inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            src := frame.slot_base + int(inst.b)
+            dst := slot_base + int(inst.a)
+            src := slot_base + int(inst.b)
             state.slots[dst] = value_neg(state.slots[src])
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .EQUAL:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = Value(value_equal(state.slots[lhs], state.slots[rhs]))
 
         case .LESS:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = Value(value_less(state.slots[lhs], state.slots[rhs]))
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .LESS_OR_EQUAL:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
-            lhs := frame.slot_base + int(inst.b)
-            rhs := frame.slot_base + int(inst.c)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := slot_base + int(inst.c)
             state.slots[dst] = Value(value_less_or_equal(state.slots[lhs], state.slots[rhs]))
             if state.has_error {
+                frame.instruction_index = pc
                 return Value{}, &state.error
             }
 
         case .NOT:
             inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
-            src := frame.slot_base + int(inst.b)
+            dst := slot_base + int(inst.a)
+            src := slot_base + int(inst.b)
             state.slots[dst] = Value(value_is_falsey(state.slots[src]))
 
         case .JUMP:
             inst := InstJump(word)
-            frame.instruction_index += int(inst.offset)
+            pc += int(inst.offset)
 
         case .JUMP_FALSE:
             inst := InstAsBx(word)
-            condition := frame.slot_base + int(inst.a)
+            condition := slot_base + int(inst.a)
             if value_is_falsey(state.slots[condition]) {
-                frame.instruction_index += int(inst.sb)
+                pc += int(inst.sb)
             }
 
         case .JUMP_NOT_NIL:
             inst := InstAsBx(word)
-            condition := frame.slot_base + int(inst.a)
+            condition := slot_base + int(inst.a)
             if state.slots[condition] != nil {
-                frame.instruction_index += int(inst.sb)
+                pc += int(inst.sb)
             }
 
         case .CALL:
             inst := InstABC(word)
 
             // A = callee/result base, B = arg count, C = requested result count
-            call_base := frame.slot_base + int(inst.a)
+            call_base := slot_base + int(inst.a)
             args_base := call_base + 1
             arg_count := int(inst.b)
             requested_results := int(inst.c)
 
             callee_header, is_object := state.slots[call_base].(^Object)
             if !is_object {
+                frame.instruction_index = pc
                 message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
             }
 
             switch callee_header.kind {
             case .NATIVE_FUNCTION:
+                frame.instruction_index = pc
+
                 // Executes immediately in the caller frame. Writes results then shapes to requested.
                 native_function := cast(^NativeFunctionObject)callee_header
                 produced_results := native_function.impl(state, args_base, arg_count, call_base)
@@ -1119,7 +1147,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
                 if requested_results == CALL_OPEN_RESULTS {
                     result_end := call_base + produced_results
-                    if result_end > frame.slot_base + MAX_FRAME_SLOTS || result_end > MAX_VM_SLOTS {
+                    if result_end > slot_base + MAX_FRAME_SLOTS || result_end > MAX_VM_SLOTS {
                         return Value{}, runtime_error("open call produced too many results")
                     }
 
@@ -1137,6 +1165,8 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 // Extra produced results beyond requested count are ignored by contract.
 
             case .PROTO_FUNCTION:
+                frame.instruction_index = pc
+
                 // Pushes a new frame and continues the VM loop.
                 proto_function := cast(^ProtoFunctionObject)callee_header
                 callee_proto := proto_function.impl
@@ -1178,52 +1208,63 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 }
                 state.frame_count += 1
 
+                frame = &state.frame_stack[state.frame_count - 1]
+                current_proto = frame.proto
+                pc = frame.instruction_index
+                bytecode = current_proto.bytecode
+                const_pool = current_proto.const_pool
+                child_protos = current_proto.child_protos
+                slot_base = frame.slot_base
+
             case .STRING, .ARRAY, .MAP:
+                frame.instruction_index = pc
                 message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
             }
 
         case .GET_MAIN_BIND:
             inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             binding_index := int(inst.b)
             state.slots[dst] = state.main_env.values[binding_index]
 
         case .SET_MAIN_BIND:
             inst := InstABx(word)
-            src := frame.slot_base + int(inst.a)
+            src := slot_base + int(inst.a)
             binding_index := int(inst.b)
             state.main_env.values[binding_index] = state.slots[src]
 
         case .GET_MODULE_BIND:
             inst := InstABC(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             module_index := int(inst.b)
             binding_index := int(inst.c)
             state.slots[dst] = state.module_envs[module_index].values[binding_index]
 
         case .SET_MODULE_BIND:
             inst := InstABC(word)
-            src := frame.slot_base + int(inst.a)
+            src := slot_base + int(inst.a)
             module_index := int(inst.b)
             binding_index := int(inst.c)
             state.module_envs[module_index].values[binding_index] = state.slots[src]
 
         case .GET_GLOBAL_BIND:
             inst := InstABx(word)
-            dst := frame.slot_base + int(inst.a)
+            dst := slot_base + int(inst.a)
             binding_index := int(inst.b)
             state.slots[dst] = state.global_env.values[binding_index]
 
         case .SET_GLOBAL_BIND:
             inst := InstABx(word)
-            src := frame.slot_base + int(inst.a)
+            src := slot_base + int(inst.a)
             binding_index := int(inst.b)
             state.global_env.values[binding_index] = state.slots[src]
 
         case .RETURN:
+            frame.instruction_index = pc
+
             inst := InstABx(word)
-            produced_slot_base := frame.slot_base + int(inst.a)
+            produced_slot_base := slot_base + int(inst.a)
             produced_results := int(inst.b)
 
             if produced_results == RETURN_OPEN_RESULTS {
@@ -1243,7 +1284,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 return Value{}, nil
             }
 
-            caller_result_base := frame.slot_base - 1
+            caller_result_base := slot_base - 1
             requested_results := frame.requested_results
 
             if requested_results == CALL_OPEN_RESULTS {
@@ -1269,6 +1310,15 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                     state.slot_count = result_end
                 }
                 state.frame_count -= 1
+
+                frame = &state.frame_stack[state.frame_count - 1]
+                current_proto = frame.proto
+                pc = frame.instruction_index
+                bytecode = current_proto.bytecode
+                const_pool = current_proto.const_pool
+                child_protos = current_proto.child_protos
+                slot_base = frame.slot_base
+
                 continue
             }
 
@@ -1293,6 +1343,14 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
             state.slot_count = frame.caller_slot_count
             state.frame_count -= 1
+
+            frame = &state.frame_stack[state.frame_count - 1]
+            current_proto = frame.proto
+            pc = frame.instruction_index
+            bytecode = current_proto.bytecode
+            const_pool = current_proto.const_pool
+            child_protos = current_proto.child_protos
+            slot_base = frame.slot_base
         }
     }
 }
