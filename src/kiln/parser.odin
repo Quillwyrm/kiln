@@ -382,6 +382,77 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
     }
 }
 
+expr_read_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
+    #partial switch desc in expr {
+    case ExprInvalid:
+        return 0
+
+    case ExprLocalBinding:
+        return int(desc)
+
+    case ExprSlot:
+        return int(desc)
+
+    case ExprCall:
+        set_call_requested_results(proto_state, desc.call_index, 1)
+        return desc.base_slot
+
+    case ExprUnresolvedBinding:
+        ident_name := desc.value.(string)
+        local_index := local_binding_find(proto_state, ident_name)
+        if local_index >= 0 {
+            return local_index
+        }
+
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        lower_expr_desc(proto_state, expr, dst_slot)
+        return dst_slot
+
+    case ExprIndex:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_index_get(proto_state, dst_slot, desc.container_slot, desc.key_slot)
+        return dst_slot
+
+    case:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        lower_expr_desc(proto_state, expr, dst_slot)
+        return dst_slot
+    }
+}
+
+expr_writable_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
+    #partial switch desc in expr {
+    case ExprInvalid:
+        return 0
+
+    case ExprSlot:
+        return int(desc)
+
+    case ExprCall:
+        set_call_requested_results(proto_state, desc.call_index, 1)
+        return desc.base_slot
+
+    case ExprIndex:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_index_get(proto_state, dst_slot, desc.container_slot, desc.key_slot)
+        return dst_slot
+
+    case:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        lower_expr_desc(proto_state, expr, dst_slot)
+        return dst_slot
+    }
+}
 
 // Expression roots and chains =====================================================================
 
@@ -397,16 +468,15 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
     if Parser.current_token.kind != .RIGHT_BRACKET {
         for {
-            value_slot := claim_temp_slot(proto_state)
-            if Parser.failed { return ExprInvalid{} }
-
             value_expr := parse_expr(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            lower_expr_desc(proto_state, value_expr, value_slot)
+            value_slot := expr_read_slot(proto_state, value_expr)
             if Parser.failed { return ExprInvalid{} }
 
             emit_array_push(proto_state, array_slot, value_slot)
+
+            // Element temps are dead after push; keep the array itself.
             proto_state.next_temp_slot = array_slot + 1
 
             if Parser.current_token.kind != .COMMA {
@@ -498,9 +568,6 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
             emit_load_const(proto_state, key_slot, key_const)
 
-            value_slot := claim_temp_slot(proto_state)
-            if Parser.failed { return ExprInvalid{} }
-
             value_token := Parser.current_token
             if value_token.kind == .NIL {
                 parser_error(proto_state, value_token, fmt.tprintf("invalid value for key `%s` in map literal; nil literals are not valid in map literals", key_text))
@@ -510,10 +577,12 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             value_expr := parse_expr(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            lower_expr_desc(proto_state, value_expr, value_slot)
+            value_slot := expr_read_slot(proto_state, value_expr)
             if Parser.failed { return ExprInvalid{} }
 
             emit_index_set(proto_state, map_slot, key_slot, value_slot)
+
+            // Key/value temps are dead after set; keep the map itself.
             proto_state.next_temp_slot = map_slot + 1
 
             if Parser.current_token.kind != .COMMA {
@@ -802,17 +871,11 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         operand := parse_unary_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        operand_slot := claim_temp_slot(proto_state)
+        operand_slot := expr_writable_slot(proto_state, operand)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_desc(proto_state, operand, operand_slot)
-        if Parser.failed { return ExprInvalid{} }
-
-        result_slot := claim_temp_slot(proto_state)
-        if Parser.failed { return ExprInvalid{} }
-
-        emit_not(proto_state, result_slot, operand_slot)
-        return ExprSlot(result_slot)
+        emit_not(proto_state, operand_slot, operand_slot)
+        return ExprSlot(operand_slot)
     }
 
     if Parser.current_token.kind == .MINUS {
@@ -822,17 +885,11 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         operand := parse_unary_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        operand_slot := claim_temp_slot(proto_state)
+        operand_slot := expr_writable_slot(proto_state, operand)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_desc(proto_state, operand, operand_slot)
-        if Parser.failed { return ExprInvalid{} }
-
-        result_slot := claim_temp_slot(proto_state)
-        if Parser.failed { return ExprInvalid{} }
-
-        emit_neg(proto_state, result_slot, operand_slot)
-        return ExprSlot(result_slot)
+        emit_neg(proto_state, operand_slot, operand_slot)
+        return ExprSlot(operand_slot)
     }
 
     return parse_primary_expr(proto_state)
@@ -848,32 +905,31 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         op_token := advance_token()
         if Parser.failed { return ExprInvalid{} }
 
+        // Materialize the left side before parsing the right side.
+        // This preserves Kiln's left-to-right evaluation order for non-local reads.
+        lhs_slot := expr_read_slot(proto_state, left)
+        if Parser.failed { return ExprInvalid{} }
+
         right := parse_unary_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        lhs_slot := claim_temp_slot(proto_state)
+        rhs_slot := expr_read_slot(proto_state, right)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_desc(proto_state, left, lhs_slot)
-        if Parser.failed { return ExprInvalid{} }
-
-        rhs_slot := claim_temp_slot(proto_state)
-        if Parser.failed { return ExprInvalid{} }
-
-        lower_expr_desc(proto_state, right, rhs_slot)
+        result_slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         if op_token.kind == .STAR {
-            emit_mul(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_mul(proto_state, result_slot, lhs_slot, rhs_slot)
         } else if op_token.kind == .SLASH {
-            emit_div(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_div(proto_state, result_slot, lhs_slot, rhs_slot)
         } else {
-            emit_mod(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_mod(proto_state, result_slot, lhs_slot, rhs_slot)
         }
 
-        // Only the accumulated left result remains live after the binary op.
-        proto_state.next_temp_slot = lhs_slot + 1
-        left = ExprSlot(lhs_slot)
+        // Only the accumulated result remains live after the binary op.
+        proto_state.next_temp_slot = result_slot + 1
+        left = ExprSlot(result_slot)
     }
 
     return left
@@ -891,32 +947,31 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         op_token := advance_token()
         if Parser.failed { return ExprInvalid{} }
 
+        // Materialize the left side before parsing the right side.
+        // This preserves Kiln's left-to-right evaluation order for non-local reads.
+        lhs_slot := expr_read_slot(proto_state, left)
+        if Parser.failed { return ExprInvalid{} }
+
         right := parse_mul_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        lhs_slot := claim_temp_slot(proto_state)
+        rhs_slot := expr_read_slot(proto_state, right)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_desc(proto_state, left, lhs_slot)
-        if Parser.failed { return ExprInvalid{} }
-
-        rhs_slot := claim_temp_slot(proto_state)
-        if Parser.failed { return ExprInvalid{} }
-
-        lower_expr_desc(proto_state, right, rhs_slot)
+        result_slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         if op_token.kind == .PLUS {
-            emit_add(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_add(proto_state, result_slot, lhs_slot, rhs_slot)
         } else if op_token.kind == .MINUS {
-            emit_sub(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_sub(proto_state, result_slot, lhs_slot, rhs_slot)
         } else {
-            emit_concat(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_concat(proto_state, result_slot, lhs_slot, rhs_slot)
         }
 
-        // Only the accumulated left result remains live after the binary op.
-        proto_state.next_temp_slot = lhs_slot + 1
-        left = ExprSlot(lhs_slot)
+        // Only the accumulated result remains live after the binary op.
+        proto_state.next_temp_slot = result_slot + 1
+        left = ExprSlot(result_slot)
     }
 
     return left
@@ -933,46 +988,45 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         op_token := advance_token()
         if Parser.failed { return ExprInvalid{} }
 
+        // Materialize the left side before parsing the right side.
+        // This preserves Kiln's left-to-right evaluation order for non-local reads.
+        lhs_slot := expr_read_slot(proto_state, left)
+        if Parser.failed { return ExprInvalid{} }
+
         right := parse_add_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        lhs_slot := claim_temp_slot(proto_state)
+        rhs_slot := expr_read_slot(proto_state, right)
         if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_desc(proto_state, left, lhs_slot)
-        if Parser.failed { return ExprInvalid{} }
-
-        rhs_slot := claim_temp_slot(proto_state)
-        if Parser.failed { return ExprInvalid{} }
-
-        lower_expr_desc(proto_state, right, rhs_slot)
+        result_slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         #partial switch op_token.kind {
         case .EQUAL:
-            emit_equal(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_equal(proto_state, result_slot, lhs_slot, rhs_slot)
 
         case .NOT_EQUAL:
-            emit_equal(proto_state, lhs_slot, lhs_slot, rhs_slot)
-            emit_not(proto_state, lhs_slot, lhs_slot)
+            emit_equal(proto_state, result_slot, lhs_slot, rhs_slot)
+            emit_not(proto_state, result_slot, result_slot)
 
         case .LESS:
-            emit_less(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_less(proto_state, result_slot, lhs_slot, rhs_slot)
 
         case .LESS_OR_EQUAL:
-            emit_less_or_equal(proto_state, lhs_slot, lhs_slot, rhs_slot)
+            emit_less_or_equal(proto_state, result_slot, lhs_slot, rhs_slot)
 
         case .GREATER:
             // a > b is emitted as b < a because the VM has LESS, not GREATER.
-            emit_less(proto_state, lhs_slot, rhs_slot, lhs_slot)
+            emit_less(proto_state, result_slot, rhs_slot, lhs_slot)
 
         case .GREATER_OR_EQUAL:
-            emit_less_or_equal(proto_state, lhs_slot, rhs_slot, lhs_slot)
+            emit_less_or_equal(proto_state, result_slot, rhs_slot, lhs_slot)
         }
 
-        // Only the accumulated left result remains live after the binary op.
-        proto_state.next_temp_slot = lhs_slot + 1
-        left = ExprSlot(lhs_slot)
+        // Only the comparison result remains live after the binary op.
+        proto_state.next_temp_slot = result_slot + 1
+        left = ExprSlot(result_slot)
 
         // compareExpr allows one compareOp, not a chain.
         #partial switch Parser.current_token.kind {
@@ -1567,18 +1621,18 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     temp_save := proto_state.next_temp_slot
-    condition_slot := claim_temp_slot(proto_state)
-    if Parser.failed { return }
 
     expr := parse_expr(proto_state)
     if Parser.failed { return }
 
-    lower_expr_desc(proto_state, expr, condition_slot)
+    condition_slot := expr_read_slot(proto_state, expr)
     if Parser.failed { return }
 
     false_jump := emit_jump_false(proto_state, condition_slot)
+
     // Condition is dead after the branch; reclaim its temp slots.
     proto_state.next_temp_slot = temp_save
+
     parse_block_stmt(proto_state)
     if Parser.failed { return }
 
@@ -1622,16 +1676,15 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
     // It loops until `break`, `return`, or runtime termination.
     if Parser.current_token.kind != .LEFT_BRACE {
         temp_save := proto_state.next_temp_slot
-        condition_slot := claim_temp_slot(proto_state)
-        if Parser.failed { return }
 
         expr := parse_expr(proto_state)
         if Parser.failed { return }
 
-        lower_expr_desc(proto_state, expr, condition_slot)
+        condition_slot := expr_read_slot(proto_state, expr)
         if Parser.failed { return }
 
         exit_jump = emit_jump_false(proto_state, condition_slot)
+
         // Condition is dead after the branch; reclaim its temp slots.
         proto_state.next_temp_slot = temp_save
         has_exit_jump = true
@@ -1649,11 +1702,13 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     break_fixup_base := pop(&proto_state.loop_break_fixup_bases)
+
     // Patch breaks from this loop body only.
     for fixup_index := break_fixup_base; fixup_index < len(proto_state.break_jump_fixups); fixup_index += 1 {
         patch_jump(proto_state, proto_state.break_jump_fixups[fixup_index])
         if Parser.failed { return }
     }
+
     resize(&proto_state.break_jump_fixups, break_fixup_base)
 }
 
@@ -1845,6 +1900,14 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
+    if expr_count == 1 {
+        return_slot := expr_read_slot(proto_state, last_expr)
+        if Parser.failed { return }
+
+        emit_return(proto_state, return_slot, 1)
+        return
+    }
+
     finish_expr_list_to_slots(proto_state, base_slot, expr_count, last_expr, expr_count)
     if Parser.failed { return }
 
@@ -1944,18 +2007,57 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
             ident_text := lhs_tokens[0].value.(string)
             parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
             if Parser.failed { return }
-        } else {
-            expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
-            if Parser.failed { return }
 
-            if expr_count > lhs_count {
-                parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
+            if proto_state.is_module {
+                emit_set_module_bind(proto_state, rhs_base, proto_state.module_index, binding_indexes[0])
+            } else {
+                emit_set_main_bind(proto_state, rhs_base, binding_indexes[0])
+            }
+            return
+        }
+
+        expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
+        if Parser.failed { return }
+
+        if expr_count > lhs_count {
+            parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
+            return
+        }
+
+        // Fast path for:
+        //
+        //     name := single_expr
+        //
+        // at top level / module root. This avoids:
+        //
+        //     OP temp, ...
+        //     MOVE rhs_base, temp
+        //     SET_MAIN_BIND rhs_base, B
+        //
+        // and emits:
+        //
+        //     OP temp, ...
+        //     SET_MAIN_BIND temp, B
+        //
+        // Do not use this for final call expressions, because declaration value-list
+        // handling has specific requested-result behavior.
+        if lhs_count == 1 && expr_count == 1 {
+            _, final_is_call := last_expr.(ExprCall)
+            if !final_is_call {
+                src_slot := expr_read_slot(proto_state, last_expr)
+                if Parser.failed { return }
+
+                if proto_state.is_module {
+                    emit_set_module_bind(proto_state, src_slot, proto_state.module_index, binding_indexes[0])
+                } else {
+                    emit_set_main_bind(proto_state, src_slot, binding_indexes[0])
+                }
                 return
             }
-
-            finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
-            if Parser.failed { return }
         }
+
+        finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
+        if Parser.failed { return }
 
         for target_index := 0; target_index < lhs_count; target_index += 1 {
             if proto_state.is_module {
@@ -2157,6 +2259,67 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
         return
     }
 
+    // Fast path for:
+    //
+    //     local = single_rhs_expr
+    //
+    // This preserves the current assignment model while avoiding:
+    //
+    //     OP temp, ...
+    //     MOVE local, temp
+    //
+    // For source like:
+    //
+    //     sum = sum + i
+    //
+    // it can rewrite the already-emitted final op from:
+    //
+    //     ADD temp, sum, i
+    //
+    // to:
+    //
+    //     ADD sum, sum, i
+    //
+    // This path is intentionally local-only. Main/global/module/indexed targets
+    // still need their explicit SET/INDEX_SET storage operation.
+    if target_count == 1 && expr_count == 1 {
+        local_target, target_is_local := targets[0].(ExprLocalBinding)
+        if target_is_local {
+            _, final_is_call := last_expr.(ExprCall)
+            if !final_is_call {
+                target_slot := int(local_target)
+
+                slot_expr, expr_is_slot := last_expr.(ExprSlot)
+                if expr_is_slot {
+                    result_slot := int(slot_expr)
+                    if retarget_last_abc_result(proto_state, result_slot, target_slot) {
+                        return
+                    }
+                }
+
+                lower_expr_desc(proto_state, last_expr, target_slot)
+                if Parser.failed { return }
+
+                return
+            }
+        }
+
+        // Fast path for one non-local target:
+        //
+        //     main/global/module/indexed = single_rhs_expr
+        //
+        // The target is already resolved before RHS parsing, so this still preserves
+        // assignment target resolution order. The write itself still happens after RHS
+        // evaluation through set_assign_target.
+        if !target_is_local {
+            src_slot := expr_read_slot(proto_state, last_expr)
+            if Parser.failed { return }
+
+            set_assign_target(proto_state, src_slot, targets[0])
+            return
+        }
+    }
+
     finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, target_count)
     if Parser.failed { return }
 
@@ -2174,6 +2337,46 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
 
     op_token := advance_token()
     if Parser.failed { return }
+
+    // Fast path for simple local compound assignment:
+    //
+    //     local += rhs
+    //
+    // Locals cannot be captured by function literals, so parsing/evaluating the RHS
+    // cannot mutate this local through a called function. It is safe to emit directly
+    // into the local slot.
+    local_target, target_is_local := resolved_target.(ExprLocalBinding)
+    if target_is_local {
+        target_slot := int(local_target)
+
+        rhs_expr := parse_expr(proto_state)
+        if Parser.failed { return }
+
+        rhs_slot := expr_read_slot(proto_state, rhs_expr)
+        if Parser.failed { return }
+
+        #partial switch op_token.kind {
+        case .PLUS_ASSIGN:
+            emit_add(proto_state, target_slot, target_slot, rhs_slot)
+
+        case .MINUS_ASSIGN:
+            emit_sub(proto_state, target_slot, target_slot, rhs_slot)
+
+        case .STAR_ASSIGN:
+            emit_mul(proto_state, target_slot, target_slot, rhs_slot)
+
+        case .SLASH_ASSIGN:
+            emit_div(proto_state, target_slot, target_slot, rhs_slot)
+
+        case .MOD_ASSIGN:
+            emit_mod(proto_state, target_slot, target_slot, rhs_slot)
+
+        case:
+            panic("compound assignment reached non-compound operator")
+        }
+
+        return
+    }
 
     value_slot := claim_temp_slot(proto_state)
     if Parser.failed { return }
@@ -2279,7 +2482,6 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` is already declared", check_name))
             return
         }
-
     }
 
     if Active_State.global_env.count + lhs_count > MAX_BINDINGS {
@@ -2304,6 +2506,17 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
         if expr_count > lhs_count {
             parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
             return
+        }
+
+        if lhs_count == 1 && expr_count == 1 {
+            _, final_is_call := last_expr.(ExprCall)
+            if !final_is_call {
+                src_slot := expr_read_slot(proto_state, last_expr)
+                if Parser.failed { return }
+
+                emit_set_global_bind(proto_state, src_slot, binding_indexes[0])
+                return
+            }
         }
 
         finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)

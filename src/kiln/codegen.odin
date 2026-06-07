@@ -204,6 +204,10 @@ emit_load_func :: proc(proto_state: ^ProtoState, dst, child_proto_index: int) {
 }
 
 emit_move :: proc(proto_state: ^ProtoState, dst, src: int) {
+    if dst == src {
+        return
+    }
+
     record_slots(proto_state, dst, src)
 
     inst := u32(InstABx{ op= .MOVE, a= u8(dst), b= u16(src) })
@@ -510,6 +514,35 @@ emit_return :: proc(proto_state: ^ProtoState, first_slot, result_count: int) {
 
     inst := u32(InstABx{ op= .RETURN, a= u8(first_slot), b= u16(result_count) })
     append(&proto_state.bytecode, inst)
+}
+
+retarget_last_abc_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) -> bool {
+    if old_dst == new_dst {
+        return true
+    }
+
+    if len(proto_state.bytecode) == 0 {
+        return false
+    }
+
+    word_index := len(proto_state.bytecode) - 1
+    word := proto_state.bytecode[word_index]
+    op := decode_op(word)
+
+    #partial switch op {
+    case .ADD, .SUB, .CONCAT, .MUL, .DIV, .MOD, .EQUAL, .LESS, .LESS_OR_EQUAL:
+        inst := InstABC(word)
+        if int(inst.a) != old_dst {
+            return false
+        }
+
+        inst.a = u8(new_dst)
+        proto_state.bytecode[word_index] = u32(inst)
+        record_slots(proto_state, new_dst)
+        return true
+    }
+
+    return false
 }
 
 // Main binding instructions ======================================================================
