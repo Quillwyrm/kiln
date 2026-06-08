@@ -884,3 +884,34 @@ use join for building
 use opcodes for tiny core intrinsics
 keep naive concat simple
 ```
+
+
+
+---
+
+1. Finish lowering cleanup:
+   - retarget last result
+   - unary operand direct lowering
+   - branch compare fusion if still clean after KASM review
+
+2. Fix string runtime basics:
+   - lazy string hash
+   - to_string(string) returns same value
+   - concat empty-string shortcut
+   - maybe string.join
+
+3. Improve tiny builtins:
+   - LENGTH opcode/intrinsic first
+   - maybe TYPE / TO_STRING after
+
+4. Error/source infrastructure:
+   - string escape decoding
+   - source spans
+   - stack traces
+
+5. Small language surface:
+   - for clauses
+   - varargs
+   - for-in
+
+6. Structs as its own pass.

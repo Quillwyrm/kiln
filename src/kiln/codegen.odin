@@ -629,7 +629,7 @@ emit_return :: proc(proto_state: ^ProtoState, first_slot, result_count: int) {
     append(&proto_state.bytecode, inst)
 }
 
-retarget_last_abc_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) -> bool {
+retarget_last_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) -> bool {
     if old_dst == new_dst {
         return true
     }
@@ -643,7 +643,33 @@ retarget_last_abc_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int
     op := decode_op(word)
 
     #partial switch op {
-    case .ADD, .SUB, .CONCAT, .MUL, .DIV, .MOD, .EQUAL, .LESS, .LESS_OR_EQUAL:
+    case .LOAD_NIL, .LOAD_TRUE, .LOAD_FALSE:
+        inst := InstAx(word)
+        if int(inst.a) != old_dst {
+            return false
+        }
+
+        inst.a = u32(new_dst)
+        proto_state.bytecode[word_index] = u32(inst)
+        record_slots(proto_state, new_dst)
+        return true
+
+    case .LOAD_CONST, .LOAD_FUNC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEG, .NOT, .GET_MAIN_BIND, .GET_GLOBAL_BIND:
+        inst := InstABx(word)
+        if int(inst.a) != old_dst {
+            return false
+        }
+
+        inst.a = u8(new_dst)
+        proto_state.bytecode[word_index] = u32(inst)
+        record_slots(proto_state, new_dst)
+        return true
+
+    case .INDEX_GET, .ARRAY_GET_CONST, .MAP_GET_CONST,
+         .ADD, .SUB, .CONCAT, .MUL, .DIV, .MOD,
+         .ADD_CONST, .SUB_CONST, .MUL_CONST, .DIV_CONST, .MOD_CONST,
+         .EQUAL, .LESS, .LESS_OR_EQUAL,
+         .GET_MODULE_BIND:
         inst := InstABC(word)
         if int(inst.a) != old_dst {
             return false

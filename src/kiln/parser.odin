@@ -378,8 +378,13 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
         emit_get_module_bind(proto_state, dst_slot, desc.module_index, desc.binding_index)
 
     case ExprSlot:
-        if int(desc) != dst_slot {
-            emit_move(proto_state, dst_slot, int(desc))
+        src_slot := int(desc)
+        if src_slot != dst_slot {
+            if retarget_last_result(proto_state, src_slot, dst_slot) {
+                return
+            }
+
+            emit_move(proto_state, dst_slot, src_slot)
         }
 
     case ExprCall:
@@ -959,11 +964,14 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         operand := parse_unary_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        operand_slot := expr_writable_slot(proto_state, operand)
+        operand_slot := expr_read_slot(proto_state, operand)
         if Parser.failed { return ExprInvalid{} }
 
-        emit_not(proto_state, operand_slot, operand_slot)
-        return ExprSlot(operand_slot)
+        result_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        emit_not(proto_state, result_slot, operand_slot)
+        return ExprSlot(result_slot)
     }
 
     if Parser.current_token.kind == .MINUS {
@@ -973,11 +981,14 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         operand := parse_unary_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        operand_slot := expr_writable_slot(proto_state, operand)
+        operand_slot := expr_read_slot(proto_state, operand)
         if Parser.failed { return ExprInvalid{} }
 
-        emit_neg(proto_state, operand_slot, operand_slot)
-        return ExprSlot(operand_slot)
+        result_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return ExprInvalid{} }
+
+        emit_neg(proto_state, result_slot, operand_slot)
+        return ExprSlot(result_slot)
     }
 
     return parse_primary_expr(proto_state)
@@ -2422,14 +2433,6 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
             _, final_is_call := last_expr.(ExprCall)
             if !final_is_call {
                 target_slot := int(local_target)
-
-                slot_expr, expr_is_slot := last_expr.(ExprSlot)
-                if expr_is_slot {
-                    result_slot := int(slot_expr)
-                    if retarget_last_abc_result(proto_state, result_slot, target_slot) {
-                        return
-                    }
-                }
 
                 lower_expr_desc(proto_state, last_expr, target_slot)
                 if Parser.failed { return }

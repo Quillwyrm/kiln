@@ -1,0 +1,27 @@
+run := function() {
+    a := 1
+    b := 2
+    c := 3
+    i := 10
+
+    nums := [10, 20, 30]
+
+    state := map {
+        x: 5,
+        y: 7,
+    }
+
+    a = (a + i + 7) % 1000
+    b = (b * 3 + a + 11) % 1000
+    c = (c + a + b) % 1000
+
+    a = nums[1]
+    b = state["x"]
+
+    c = -a
+
+    print(a + b + c)
+    print(a)
+}
+
+run()
