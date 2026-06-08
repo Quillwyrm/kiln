@@ -1125,6 +1125,62 @@ native_string_get_byte :: proc(kiln_state: ^State, args_base: int, arg_count: in
 
 // to_bytes(text) -> array
 // returns array of byte ints
+// join(parts, sep) -> string
+// concatenates array elements as strings separated by sep; allocates result once
+native_string_join :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+    if arg_count > 2 {
+        runtime_error(fmt.tprintf("too many arguments for `string.join()`: expected 2, got %d", arg_count))
+        return 0
+    }
+
+    parts_array, parts_is_array := native_arg_array(kiln_state, args_base, arg_count, 0, "string.join", "first")
+    if !parts_is_array { return 0 }
+
+    sep, sep_is_string := native_arg_string(kiln_state, args_base, arg_count, 1, "string.join", "second")
+    if !sep_is_string { return 0 }
+
+    part_count := len(parts_array.data)
+    total_len := 0
+
+    for i := 0; i < part_count; i += 1 {
+        item := parts_array.data[i]
+        header, is_object := item.(^Object)
+        if !is_object || header.kind != .STRING {
+            runtime_error(fmt.tprintf("`string.join()` called with invalid element at index %d; expected `string`, got `%s`", i, value_type_to_string(item)))
+            return 0
+        }
+
+        string_obj := cast(^StringObject)header
+        total_len += len(string_obj.data)
+    }
+
+    if part_count > 1 {
+        total_len += len(sep) * (part_count - 1)
+    }
+
+    result_bytes := make([]byte, total_len)
+    offset := 0
+
+    for i := 0; i < part_count; i += 1 {
+        header, _ := parts_array.data[i].(^Object)
+        string_obj := cast(^StringObject)header
+
+        offset += copy(result_bytes[offset:], transmute([]byte)string_obj.data)
+
+        if i < part_count - 1 {
+            offset += copy(result_bytes[offset:], transmute([]byte)sep)
+        }
+    }
+
+    string_object := new(StringObject)
+    string_object.header.kind = .STRING
+    string_object.data = string(result_bytes)
+    string_object.hash = 0
+
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)string_object)
+    return 1
+}
+
 native_string_to_bytes :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `string.to_bytes()`: expected 1, got %d", arg_count))
@@ -1225,5 +1281,6 @@ bind_core_modules :: proc(state: ^State) {
     bind_module_native_function(string_module, "to_upper", native_string_to_upper)
     bind_module_native_function(string_module, "get_byte", native_string_get_byte)
     bind_module_native_function(string_module, "to_bytes", native_string_to_bytes)
+    bind_module_native_function(string_module, "join", native_string_join)
 }
 

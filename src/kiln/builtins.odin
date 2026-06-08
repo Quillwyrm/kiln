@@ -3,7 +3,7 @@ package kiln
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
-import "core:hash"
+
 
 // Value helpers ==================================================================================
 
@@ -12,7 +12,7 @@ new_string_value :: proc(text: string) -> Value {
     string_object := new(StringObject)
     string_object.header.kind = .STRING
     string_object.data = strings.clone(text)
-    string_object.hash = hash.fnv64a(transmute([]byte)string_object.data)
+    string_object.hash = 0
     return Value(cast(^Object)string_object)
 }
 
@@ -271,6 +271,12 @@ native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
     value := Value{}
     if arg_count >= 1 {
         value = kiln_state.slots[args_base]
+    }
+
+    object, is_object := value.(^Object)
+    if is_object && object.kind == .STRING {
+        kiln_state.slots[return_slot_base] = value
+        return 1
     }
 
     kiln_state.slots[return_slot_base] = new_string_value(value_to_string(value))

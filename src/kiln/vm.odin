@@ -213,14 +213,14 @@ map_init :: proc(map_object: ^MapObject, entry_capacity: int) {
     map_object.entries = make([dynamic]MapEntry, bucket_count)
 }
 
-map_find_slot :: proc(map_object: ^MapObject, key: ^StringObject) -> (index: int, found: bool) {
+map_find_slot :: proc(map_object: ^MapObject, key: ^StringObject, key_hash: u64) -> (index: int, found: bool) {
     bucket_count := len(map_object.entries)
     if bucket_count == 0 {
         panic("map_find_slot on empty map storage")
     }
 
     mask := bucket_count - 1
-    start := int(key.hash & u64(mask))
+    start := int(key_hash & u64(mask))
     first_tombstone := -1
 
     for probe_offset := 0; probe_offset < bucket_count; probe_offset += 1 {
@@ -241,7 +241,7 @@ map_find_slot :: proc(map_object: ^MapObject, key: ^StringObject) -> (index: int
             return idx, false
         }
 
-        if entry.hash == key.hash {
+        if entry.hash == key_hash {
             if entry.key == key || entry.key.data == key.data {
                 return idx, true
             }
@@ -260,7 +260,8 @@ map_get :: proc(map_object: ^MapObject, key: ^StringObject) -> (Value, bool) {
         return Value{}, false
     }
 
-    idx, found := map_find_slot(map_object, key)
+    key_hash := string_hash(key)
+    idx, found := map_find_slot(map_object, key, key_hash)
     if !found {
         return Value{}, false
     }
@@ -278,7 +279,8 @@ map_set :: proc(map_object: ^MapObject, key: ^StringObject, value: Value) {
         map_init(map_object, 4)
     }
 
-    idx, found := map_find_slot(map_object, key)
+    key_hash := string_hash(key)
+    idx, found := map_find_slot(map_object, key, key_hash)
     if found {
         map_object.entries[idx].value = value
         return
@@ -286,7 +288,7 @@ map_set :: proc(map_object: ^MapObject, key: ^StringObject, value: Value) {
 
     if (map_object.count + map_object.tombstone_count + 1) * 4 >= len(map_object.entries) * 3 {
         map_grow(map_object)
-        idx, found = map_find_slot(map_object, key)
+        idx, found = map_find_slot(map_object, key, key_hash)
     }
 
     entry := &map_object.entries[idx]
@@ -296,7 +298,7 @@ map_set :: proc(map_object: ^MapObject, key: ^StringObject, value: Value) {
     }
 
     entry.key = key
-    entry.hash = key.hash
+    entry.hash = key_hash
     entry.value = value
     entry.tombstone = false
     map_object.count += 1
@@ -307,7 +309,8 @@ map_delete :: proc(map_object: ^MapObject, key: ^StringObject) {
         return
     }
 
-    idx, found := map_find_slot(map_object, key)
+    key_hash := string_hash(key)
+    idx, found := map_find_slot(map_object, key, key_hash)
     if !found {
         return
     }
@@ -343,7 +346,7 @@ map_grow :: proc(map_object: ^MapObject) {
             continue
         }
 
-        idx, _ := map_find_slot(map_object, entry.key)
+        idx, _ := map_find_slot(map_object, entry.key, entry.hash)
         map_object.entries[idx] = MapEntry{
             key       = entry.key,
             hash      = entry.hash,
@@ -599,13 +602,28 @@ value_concat :: #force_inline proc(lhs, rhs: Value) -> Value {
 
     left_string := cast(^StringObject)left_object
     right_string := cast(^StringObject)right_object
+
+    if len(left_string.data) == 0 {
+        return rhs
+    }
+    if len(right_string.data) == 0 {
+        return lhs
+    }
+
     parts := [?]string{left_string.data, right_string.data}
 
     result := new(StringObject)
     result.header.kind = .STRING
     result.data = strings.concatenate(parts[:])
-    result.hash = hash.fnv64a(transmute([]byte)result.data)
+    result.hash = 0
     return Value(cast(^Object)result)
+}
+
+string_hash :: #force_inline proc(s: ^StringObject) -> u64 {
+    if s.hash == 0 {
+        s.hash = hash.fnv64a(transmute([]byte)s.data)
+    }
+    return s.hash
 }
 
 value_add :: #force_inline proc(lhs, rhs: Value) -> Value {
