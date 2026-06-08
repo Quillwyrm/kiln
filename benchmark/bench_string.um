@@ -1,0 +1,7 @@
+fn main() {
+    s := ""
+    for i := 0; i < 10000; i++ {
+        s += sprintf("%d", i)
+    }
+    printf("%d\n", len(s))
+}

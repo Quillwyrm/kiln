@@ -1,6 +1,7 @@
 package kiln
 
 import "core:fmt"
+import "core:hash"
 import "core:strings"
 
 
@@ -161,6 +162,7 @@ Value :: union {
 StringObject :: struct {
     header: Object,
     data:   string,
+    hash:   u64,
 }
 
 ArrayObject :: struct {
@@ -168,11 +170,191 @@ ArrayObject :: struct {
     data:  [dynamic]Value,
 }
 
-MapObject :: struct {
-    header: Object,
-    data:  map[string]Value,
+MapEntry :: struct {
+    key:       ^StringObject,
+    hash:      u64,
+    value:     Value,
+    tombstone: bool,
 }
 
+MapObject :: struct {
+    header:          Object,
+    entries:         [dynamic]MapEntry,
+    count:           int,
+    tombstone_count: int,
+}
+
+
+// Map primitives ==================================================================================
+
+// Map storage is an open-addressed string-key table.
+// Non-empty bucket arrays always have power-of-two length.
+// Empty bucket:     key == nil && !tombstone
+// Full bucket:      key != nil
+// Tombstone bucket: key == nil && tombstone
+//
+// Tombstones preserve probe chains after delete.
+// count is live entries only.
+// tombstone_count is included in growth pressure so dead buckets get rehashed away.
+map_init :: proc(map_object: ^MapObject, entry_capacity: int) {
+    map_object.count = 0
+    map_object.tombstone_count = 0
+
+    if entry_capacity <= 0 {
+        map_object.entries = make([dynamic]MapEntry)
+        return
+    }
+
+    wanted := max(entry_capacity * 2, 8)
+    bucket_count := 1
+    for bucket_count < wanted {
+        bucket_count <<= 1
+    }
+    map_object.entries = make([dynamic]MapEntry, bucket_count)
+}
+
+map_find_slot :: proc(map_object: ^MapObject, key: ^StringObject) -> (index: int, found: bool) {
+    bucket_count := len(map_object.entries)
+    if bucket_count == 0 {
+        panic("map_find_slot on empty map storage")
+    }
+
+    mask := bucket_count - 1
+    start := int(key.hash & u64(mask))
+    first_tombstone := -1
+
+    for probe_offset := 0; probe_offset < bucket_count; probe_offset += 1 {
+        idx := (start + probe_offset) & mask
+        entry := &map_object.entries[idx]
+
+        if entry.key == nil {
+            if entry.tombstone {
+                if first_tombstone < 0 {
+                    first_tombstone = idx
+                }
+                continue
+            }
+
+            if first_tombstone >= 0 {
+                return first_tombstone, false
+            }
+            return idx, false
+        }
+
+        if entry.hash == key.hash {
+            if entry.key == key || entry.key.data == key.data {
+                return idx, true
+            }
+        }
+    }
+
+    if first_tombstone >= 0 {
+        return first_tombstone, false
+    }
+
+    panic("map_find_slot reached full table")
+}
+
+map_get :: proc(map_object: ^MapObject, key: ^StringObject) -> (Value, bool) {
+    if len(map_object.entries) == 0 {
+        return Value{}, false
+    }
+
+    idx, found := map_find_slot(map_object, key)
+    if !found {
+        return Value{}, false
+    }
+
+    return map_object.entries[idx].value, true
+}
+
+map_set :: proc(map_object: ^MapObject, key: ^StringObject, value: Value) {
+    if value == nil {
+        map_delete(map_object, key)
+        return
+    }
+
+    if len(map_object.entries) == 0 {
+        map_init(map_object, 4)
+    }
+
+    idx, found := map_find_slot(map_object, key)
+    if found {
+        map_object.entries[idx].value = value
+        return
+    }
+
+    if (map_object.count + map_object.tombstone_count + 1) * 4 >= len(map_object.entries) * 3 {
+        map_grow(map_object)
+        idx, found = map_find_slot(map_object, key)
+    }
+
+    entry := &map_object.entries[idx]
+
+    if entry.tombstone {
+        map_object.tombstone_count -= 1
+    }
+
+    entry.key = key
+    entry.hash = key.hash
+    entry.value = value
+    entry.tombstone = false
+    map_object.count += 1
+}
+
+map_delete :: proc(map_object: ^MapObject, key: ^StringObject) {
+    if len(map_object.entries) == 0 {
+        return
+    }
+
+    idx, found := map_find_slot(map_object, key)
+    if !found {
+        return
+    }
+
+    entry := &map_object.entries[idx]
+    entry.key = nil
+    entry.hash = 0
+    entry.value = Value{}
+    entry.tombstone = true
+    map_object.count -= 1
+    map_object.tombstone_count += 1
+}
+
+map_clear :: proc(map_object: ^MapObject) {
+    for i := 0; i < len(map_object.entries); i += 1 {
+        map_object.entries[i] = MapEntry{}
+    }
+    map_object.count = 0
+    map_object.tombstone_count = 0
+}
+
+map_grow :: proc(map_object: ^MapObject) {
+    old_entries := map_object.entries
+
+    bucket_count := max(len(old_entries) * 2, 8)
+
+    map_object.entries = make([dynamic]MapEntry, bucket_count)
+    map_object.count = 0
+    map_object.tombstone_count = 0
+
+    for entry in old_entries {
+        if entry.key == nil {
+            continue
+        }
+
+        idx, _ := map_find_slot(map_object, entry.key)
+        map_object.entries[idx] = MapEntry{
+            key       = entry.key,
+            hash      = entry.hash,
+            value     = entry.value,
+            tombstone = false,
+        }
+        map_object.count += 1
+    }
+
+    delete(old_entries)
+}
 
 
 // Functions ======================================================================================
@@ -422,6 +604,7 @@ value_concat :: #force_inline proc(lhs, rhs: Value) -> Value {
     result := new(StringObject)
     result.header.kind = .STRING
     result.data = strings.concatenate(parts[:])
+    result.hash = hash.fnv64a(transmute([]byte)result.data)
     return Value(cast(^Object)result)
 }
 
@@ -886,7 +1069,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 }
                 key_object := cast(^StringObject)key_header
 
-                value, exists := map_object.data[key_object.data]
+                value, exists := map_get(map_object, key_object)
                 if exists {
                     state.slots[dst] = value
                 } else {
@@ -943,11 +1126,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 }
                 key_object := cast(^StringObject)key_header
 
-                if value == nil {
-                    delete_key(&map_object.data, key_object.data)
-                } else {
-                    map_object.data[key_object.data] = value
-                }
+                map_set(map_object, key_object, value)
 
             case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
                 frame.instruction_index = pc
@@ -1022,7 +1201,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
             map_object := cast(^MapObject)map_header
 
-            value, exists := map_object.data[key_object.data]
+            value, exists := map_get(map_object, key_object)
             if exists {
                 state.slots[dst] = value
             } else {
@@ -1042,13 +1221,8 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             map_object := cast(^MapObject)map_header
-            value := state.slots[value_slot]
 
-            if value == nil {
-                delete_key(&map_object.data, key_object.data)
-            } else {
-                map_object.data[key_object.data] = value
-            }
+            map_set(map_object, key_object, state.slots[value_slot])
 
         case .ARRAY_PUSH:
             inst := InstABx(word)
@@ -1091,11 +1265,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
             map_object := new(MapObject)
             map_object.header.kind = .MAP
-            map_object.data = make(map[string]Value)
-
-            if capacity > 0 {
-                reserve(&map_object.data, capacity)
-            }
+            map_init(map_object, capacity)
 
             state.slots[dst] = Value(cast(^Object)map_object)
 

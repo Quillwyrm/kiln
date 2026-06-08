@@ -1,0 +1,11 @@
+fn main() {
+    m := map[int]int{}
+    for i := 0; i < 25000; i++ {
+        m[i] = i
+    }
+    sum := 0
+    for i := 0; i < 25000; i++ {
+        sum += m[i]
+    }
+    printf("%d\n", sum)
+}

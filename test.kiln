@@ -682,6 +682,34 @@ callbacks[0]()
 
 print((numbers[1]))
 
+// Tombstone map test.
+tm := map {}
+tm["a"] = 1
+tm["b"] = 2
+tm["a"] = nil
+assert(tm["b"] == 2, "tombstone sibling preserved")
+assert(tm["a"] == nil, "deleted key returns nil")
+tm["a"] = 3
+assert(tm["a"] == 3, "tombstone slot reused")
+assert(length(tm) == 2, "tombstone count excludes deleted")
+
+// 1000-key growth/collision test.
+big_map := map {}
+i := 0
+for i < 1000 {
+    key := to_string(i)
+    big_map[key] = i
+    i += 1
+}
+sum := 0
+i = 0
+for i < 1000 {
+    key := to_string(i)
+    sum += big_map[key]
+    i += 1
+}
+assert(sum == 499500, "1000-key map sum")
+
 // Return forwarding expands only the final call expression in a return list.
 print("--- return forwarding ---")
 

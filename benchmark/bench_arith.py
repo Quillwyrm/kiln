@@ -1,26 +1,23 @@
-run :: function() {
-    n := 1000000
-    i := 0
-    a := 1
-    b := 2
-    c := 3
-    total := 0
+def main():
+    n = 5000000
+    i = 0
+    a = 1
+    b = 2
+    c = 3
+    total = 0
 
-    for i < n {
+    while i < n:
         a = (a + i + 7) % 1000
         b = (b + a * 3 + 11) % 1000
         c = (c + a + b) % 1000
 
-        if c > 500 {
+        if c > 500:
             total += c - a
-        } else {
+        else:
             total += b - c
-        }
 
         i += 1
-    }
 
     print(total + a + b + c)
-}
 
-run()
+main()

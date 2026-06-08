@@ -821,7 +821,7 @@ native_map_clear :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
     map_object, arg_is_map := native_arg_map(kiln_state, args_base, arg_count, 0, "maps.clear", "first")
     if !arg_is_map { return 0 }
 
-    clear(&map_object.data)
+    map_clear(map_object)
     return 0
 }
 
@@ -838,9 +838,12 @@ native_map_copy :: proc(kiln_state: ^State, args_base: int, arg_count: int, retu
 
     copy_object := new(MapObject)
     copy_object.header.kind = .MAP
-    copy_object.data = make(map[string]Value)
-    for key, value in map_object.data {
-        copy_object.data[key] = value
+    map_init(copy_object, map_object.count)
+    for entry in map_object.entries {
+        if entry.key == nil {
+            continue
+        }
+        map_set(copy_object, entry.key, entry.value)
     }
 
     kiln_state.slots[return_slot_base] = Value(cast(^Object)copy_object)
@@ -861,8 +864,14 @@ native_map_get_keys :: proc(kiln_state: ^State, args_base: int, arg_count: int, 
     keys := new(ArrayObject)
     keys.header.kind = .ARRAY
     keys.data = make([dynamic]Value)
-    for key in map_object.data {
-        append(&keys.data, new_string_value(key))
+    if map_object.count > 0 {
+        reserve(&keys.data, map_object.count)
+    }
+    for entry in map_object.entries {
+        if entry.key == nil {
+            continue
+        }
+        append(&keys.data, Value(cast(^Object)entry.key))
     }
 
     kiln_state.slots[return_slot_base] = Value(cast(^Object)keys)
@@ -883,8 +892,14 @@ native_map_get_values :: proc(kiln_state: ^State, args_base: int, arg_count: int
     values := new(ArrayObject)
     values.header.kind = .ARRAY
     values.data = make([dynamic]Value)
-    for _, value in map_object.data {
-        append(&values.data, value)
+    if map_object.count > 0 {
+        reserve(&values.data, map_object.count)
+    }
+    for entry in map_object.entries {
+        if entry.key == nil {
+            continue
+        }
+        append(&values.data, entry.value)
     }
 
     kiln_state.slots[return_slot_base] = Value(cast(^Object)values)

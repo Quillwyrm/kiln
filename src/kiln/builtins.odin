@@ -3,6 +3,7 @@ package kiln
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
+import "core:hash"
 
 // Value helpers ==================================================================================
 
@@ -11,6 +12,7 @@ new_string_value :: proc(text: string) -> Value {
     string_object := new(StringObject)
     string_object.header.kind = .STRING
     string_object.data = strings.clone(text)
+    string_object.hash = hash.fnv64a(transmute([]byte)string_object.data)
     return Value(cast(^Object)string_object)
 }
 
@@ -111,23 +113,26 @@ value_to_string_with_active_objects :: proc(value: Value, active_objects: ^[dyna
 
             append(&parts, "{")
             item_index := 0
-            for key, item_value in map_object.data {
+            for entry in map_object.entries {
+                if entry.key == nil {
+                    continue
+                }
                 if item_index > 0 {
                     append(&parts, ", ")
                 }
 
                 append(&parts, "\"")
-                append(&parts, key)
+                append(&parts, entry.key.data)
                 append(&parts, "\": ")
 
-                item_object, item_is_object := item_value.(^Object)
+                item_object, item_is_object := entry.value.(^Object)
                 if item_is_object && item_object.kind == .STRING {
                     string_object := cast(^StringObject)item_object
                     append(&parts, "\"")
                     append(&parts, string_object.data)
                     append(&parts, "\"")
                 } else {
-                    append(&parts, value_to_string_with_active_objects(item_value, active_objects))
+                    append(&parts, value_to_string_with_active_objects(entry.value, active_objects))
                 }
 
                 item_index += 1
@@ -207,7 +212,7 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
             return 1
         case .MAP:
             map_object := cast(^MapObject)object_header
-            kiln_state.slots[return_slot_base] = Value(i64(len(map_object.data)))
+            kiln_state.slots[return_slot_base] = Value(i64(map_object.count))
             return 1
         case .STRING:
             string_object := cast(^StringObject)object_header

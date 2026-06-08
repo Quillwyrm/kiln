@@ -1,5 +1,5 @@
 local function run()
-    local n = 1000000
+    local n = 5000000
     local i = 0
     local a = 1
     local b = 2
