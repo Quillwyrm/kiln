@@ -1,0 +1,57 @@
+import "array"
+import "string"
+
+work :: function(a, b) {
+    return (a + b * 3 + 11) % 1000
+}
+
+run := function() {
+    i := 0
+    n := 8
+
+    a := 1
+    b := 2
+    c := 3
+    total := 0
+
+    nums := [10, 20, 30, 40]
+
+    state := map {
+        x: 5,
+        y: 7,
+        z: 0,
+    }
+
+    parts := []
+
+    for i < n {
+        a = (a + i + 7) % 1000
+        b = (b * 3 + a + 11) % 1000
+        c = -(a + b)
+
+        idx := i % 4
+
+        nums[idx] = nums[idx] + a
+
+        state["x"] = (state["x"] + nums[idx] + state["y"]) % 1000
+        state["z"] = state["x"] + state["y"]
+
+        if state["x"] > 500 {
+            total += state["x"] + work(a, b)
+        } else if state["x"] == 500 {
+            total += c
+        } else {
+            total += nums[0] + state["x"]
+        }
+
+        array.push(parts, to_string(i))
+
+        i += 1
+    }
+
+    joined := string.join(parts, "")
+
+    print(total + length(joined))
+}
+
+run()

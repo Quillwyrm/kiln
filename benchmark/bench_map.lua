@@ -1,9 +1,22 @@
+local n = 750000
+local mod = 100000
 local m = {}
-for i = 0, 24999 do
-    m[tostring(i)] = i
+m["a"] = 1
+m["b"] = 2
+m["c"] = 3
+m["d"] = 4
+local total = 0
+local i = 0
+
+while i < n do
+    m["a"] = (m["a"] + i + m["d"]) % mod
+    m["b"] = (m["b"] + m["a"] + 7) % mod
+    m["c"] = m["a"] + m["b"]
+    if m["c"] > mod then
+        m["c"] = m["c"] % mod
+    end
+    total = (total + m["a"] + m["b"] + m["c"]) % mod
+    i = i + 1
 end
-local sum = 0
-for i = 0, 24999 do
-    sum = sum + m[tostring(i)]
-end
-print(sum)
+
+print(total + m["a"] + m["b"] + m["c"])

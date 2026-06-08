@@ -1,0 +1,47 @@
+fn sieve(limit: int): int {
+    is_prime := []bool{}
+    i := 0
+
+    for i <= limit {
+        is_prime = append(is_prime, true)
+        i++
+    }
+
+    is_prime[0] = false
+    is_prime[1] = false
+
+    i = 2
+    for i * i <= limit {
+        if is_prime[i] {
+            j := i * i
+            for j <= limit {
+                is_prime[j] = false
+                j += i
+            }
+        }
+        i++
+    }
+
+    count := 0
+    i = 0
+    for i <= limit {
+        if is_prime[i] {
+            count++
+        }
+        i++
+    }
+
+    return count
+}
+
+fn main() {
+    total := 0
+    r := 0
+
+    for r < 3 {
+        total += sieve(100000)
+        r++
+    }
+
+    printf("%d\n", total)
+}

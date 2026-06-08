@@ -1,5 +1,6 @@
 run :: function() {
-    n := 5000000
+    n := 2000000
+    mod := 100000
     i := 0
     a := 1
     b := 2
@@ -7,16 +8,10 @@ run :: function() {
     total := 0
 
     for i < n {
-        a = (a + i + 7) % 1000
-        b = (b + a * 3 + 11) % 1000
-        c = (c + a + b) % 1000
-
-        if c > 500 {
-            total += c - a
-        } else {
-            total += b - c
-        }
-
+        a = (a + i + 7) % mod
+        b = (b + a * 3 + 11) % mod
+        c = (c + a + b) % mod
+        total = (total + a + b + c) % mod
         i += 1
     }
 

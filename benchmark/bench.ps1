@@ -2,8 +2,8 @@ $script_dir = $PSScriptRoot
 Set-Location $script_dir
 
 $runs = 5
-$workloads = @("bench_arith", "bench_array", "bench_map", "bench_string")
-$workload_labels = @("arith", "array", "map", "string")
+$workloads = @("bench_arith", "bench_array", "bench_map", "bench_string", "bench_call", "bench_control", "bench_sieve")
+$workload_labels = @("arith", "array", "map", "string", "call", "control", "sieve")
 $lang_configs = @(
     @{name="kiln";   ext=".kiln"},
     @{name="lua";    ext=".lua"},
@@ -21,6 +21,7 @@ function Run-One($name, $file, $ext) {
 }
 
 $results = @{}
+$na = @{}
 
 Write-Host "Running benchmarks ($runs runs each)..."
 Write-Host ""
@@ -32,6 +33,14 @@ foreach ($lang in $lang_configs) {
     for ($w = 0; $w -lt $workloads.Length; $w++) {
         $wl = $workloads[$w]
         $label = $workload_labels[$w]
+        $file = "$($wl)$($lang.ext)"
+
+        if (-not (Test-Path $file)) {
+            Write-Host "  $label ... N/A"
+            $na["$name-$wl"] = $true
+            continue
+        }
+
         Write-Host "  $label ..." -NoNewline
 
         $times = @()
@@ -60,18 +69,25 @@ foreach ($lang in $lang_configs) {
 $md_lines = @()
 $md_lines += "# Benchmark Results (ms, $runs runs)"
 $md_lines += ""
-$md_lines += "| lang | workload | min | med | max |"
-$md_lines += "|------|----------|-----|-----|-----|"
+$md_lines += "| workload | kiln                   | lua                    | python                  | umka                   |"
+$md_lines += "|----------|------------------------|------------------------|-------------------------|------------------------|"
 
-foreach ($lang in $lang_configs) {
-    $name = $lang.name
-    for ($w = 0; $w -lt $workloads.Length; $w++) {
-        $wl = $workloads[$w]
-        $label = $workload_labels[$w]
-        $r = $results["$name-$wl"]
-        $row = "| {0,-6} | {1,-8} | {2,7:F2} | {3,7:F2} | {4,7:F2} |" -f $name, $label, $r.min, $r.med, $r.max
-        $md_lines += $row
+for ($w = 0; $w -lt $workloads.Length; $w++) {
+    $label = $workload_labels[$w]
+    $cells = @("{0,-8}" -f $label)
+    foreach ($lang in $lang_configs) {
+        $name = $lang.name
+        $key = "$name-$($workloads[$w])"
+        if ($na[$key]) {
+            $cells += "{0,23}" -f "N/A"
+        } elseif ($results[$key]) {
+            $r = $results[$key]
+            $cells += "{0,7:F2}, {1,7:F2}, {2,7:F2}" -f $r.min, $r.med, $r.max
+        } else {
+            $cells += "{0,23}" -f "ERR"
+        }
     }
+    $md_lines += "| $($cells[0]) | $($cells[1]) | $($cells[2]) | $($cells[3])  | $($cells[4]) |"
 }
 
 $md_text = $md_lines -join "`r`n"

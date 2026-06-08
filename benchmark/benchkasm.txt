@@ -1,0 +1,595 @@
+===== bench_arith =====
+
+bench_arith.kiln
+
+entry
+    slots 1
+    ops 6
+
+    children
+        P0 = run
+
+    bindings
+        B0 = run
+
+    code
+        0000    LOAD_FUNC          R0, P0       ; run
+        0001    SET_MAIN_BIND      R0, B0       ; run
+        0002    GET_MAIN_BIND      R0, B0       ; run
+        0003    CALL               R0, 0, 0
+        0004    LOAD_NIL           R0
+        0005    RETURN             R0, 1
+
+proto run
+    params 0
+    slots 11
+    ops 32
+
+    constants
+        C0 = 2000000
+        C1 = 100000
+        C2 = 0
+        C3 = 1
+        C4 = 2
+        C5 = 3
+        C6 = 7
+        C7 = 11
+
+    bindings
+        G0 = print
+
+    code
+        0000    LOAD_CONST         R0, C0       ; 2000000
+        0001    LOAD_CONST         R1, C1       ; 100000
+        0002    LOAD_CONST         R2, C2       ; 0
+        0003    LOAD_CONST         R3, C3       ; 1
+        0004    LOAD_CONST         R4, C4       ; 2
+        0005    LOAD_CONST         R5, C5       ; 3
+        0006    LOAD_CONST         R6, C2       ; 0
+    J0:
+        0007    LESS               R7, R2, R0
+        0008    JUMP_FALSE         R7, J1       ; +16
+        0009    ADD                R7, R3, R2
+        0010    ADD_CONST          R8, R7, C6   ; 7
+        0011    MOD                R3, R8, R1
+        0012    MUL_CONST          R7, R3, C5   ; 3
+        0013    ADD                R8, R4, R7
+        0014    ADD_CONST          R9, R8, C7   ; 11
+        0015    MOD                R4, R9, R1
+        0016    ADD                R7, R5, R3
+        0017    ADD                R8, R7, R4
+        0018    MOD                R5, R8, R1
+        0019    ADD                R7, R6, R3
+        0020    ADD                R8, R7, R4
+        0021    ADD                R9, R8, R5
+        0022    MOD                R6, R9, R1
+        0023    ADD_CONST          R2, R2, C3   ; 1
+        0024    JUMP               J0           ; -18
+    J1:
+        0025    GET_GLOBAL_BIND    R7, G0       ; print
+        0026    ADD                R8, R6, R3
+        0027    ADD                R9, R8, R4
+        0028    ADD                R8, R9, R5
+        0029    CALL               R7, 1, 0
+        0030    LOAD_NIL           R7
+        0031    RETURN             R7, 1
+
+===== bench_array =====
+
+bench_array.kiln
+
+entry
+    slots 1
+    ops 6
+
+    children
+        P0 = run
+
+    bindings
+        B0 = run
+
+    code
+        0000    LOAD_FUNC          R0, P0       ; run
+        0001    SET_MAIN_BIND      R0, B0       ; run
+        0002    GET_MAIN_BIND      R0, B0       ; run
+        0003    CALL               R0, 0, 0
+        0004    LOAD_NIL           R0
+        0005    RETURN             R0, 1
+
+proto run
+    params 0
+    slots 10
+    ops 36
+
+    constants
+        C0 = 50000
+        C1 = 100000
+        C2 = 5
+        C3 = 0
+        C4 = 1000
+        C5 = 1
+
+    bindings
+        G0 = print
+        M5.B0 = array.push
+
+    code
+        0000    LOAD_CONST         R0, C0       ; 50000
+        0001    LOAD_CONST         R1, C1       ; 100000
+        0002    LOAD_CONST         R2, C2       ; 5
+        0003    LOAD_CONST         R3, C3       ; 0
+        0004    LOAD_CONST         R4, C3       ; 0
+    J0:
+        0005    LESS               R5, R4, R2
+        0006    JUMP_FALSE         R5, J5       ; +24
+        0007    NEW_ARRAY          R5, 0
+        0008    LOAD_CONST         R6, C3       ; 0
+    J1:
+        0009    LESS               R7, R6, R0
+        0010    JUMP_FALSE         R7, J2       ; +6
+        0011    GET_MODULE_BIND    R7, M5.B0    ; array.push
+        0012    MOVE               R8, R5
+        0013    MOD_CONST          R9, R6, C4   ; 1000
+        0014    CALL               R7, 2, 0
+        0015    ADD_CONST          R6, R6, C5   ; 1
+        0016    JUMP               J1           ; -8
+    J2:
+        0017    LOAD_CONST         R6, C3       ; 0
+    J3:
+        0018    LESS               R7, R6, R0
+        0019    JUMP_FALSE         R7, J4       ; +9
+        0020    INDEX_GET          R7, R5, R6
+        0021    ADD                R8, R7, R6
+        0022    MOD                R9, R8, R1
+        0023    INDEX_SET          R5, R6, R9
+        0024    INDEX_GET          R8, R5, R6
+        0025    ADD                R7, R3, R8
+        0026    MOD                R3, R7, R1
+        0027    ADD_CONST          R6, R6, C5   ; 1
+        0028    JUMP               J3           ; -11
+    J4:
+        0029    ADD_CONST          R4, R4, C5   ; 1
+        0030    JUMP               J0           ; -26
+    J5:
+        0031    GET_GLOBAL_BIND    R5, G0       ; print
+        0032    MOVE               R6, R3
+        0033    CALL               R5, 1, 0
+        0034    LOAD_NIL           R5
+        0035    RETURN             R5, 1
+
+===== bench_map =====
+
+bench_map.kiln
+
+entry
+    slots 1
+    ops 6
+
+    children
+        P0 = run
+
+    bindings
+        B0 = run
+
+    code
+        0000    LOAD_FUNC          R0, P0       ; run
+        0001    SET_MAIN_BIND      R0, B0       ; run
+        0002    GET_MAIN_BIND      R0, B0       ; run
+        0003    CALL               R0, 0, 0
+        0004    LOAD_NIL           R0
+        0005    RETURN             R0, 1
+
+proto run
+    params 0
+    slots 10
+    ops 56
+
+    constants
+        C0 = 750000
+        C1 = 100000
+        C2 = 0
+        C3 = "a"
+        C4 = 1
+        C5 = "b"
+        C6 = 2
+        C7 = "c"
+        C8 = 3
+        C9 = "d"
+        C10 = 4
+        C11 = 7
+
+    bindings
+        G0 = print
+
+    code
+        0000    LOAD_CONST         R0, C0       ; 750000
+        0001    LOAD_CONST         R1, C1       ; 100000
+        0002    LOAD_CONST         R2, C2       ; 0
+        0003    NEW_MAP            R3, 0
+        0004    LOAD_CONST         R4, C4       ; 1
+        0005    MAP_SET_CONST      R3, C3, R4   ; "a"
+        0006    LOAD_CONST         R4, C6       ; 2
+        0007    MAP_SET_CONST      R3, C5, R4   ; "b"
+        0008    LOAD_CONST         R4, C8       ; 3
+        0009    MAP_SET_CONST      R3, C7, R4   ; "c"
+        0010    LOAD_CONST         R4, C10      ; 4
+        0011    MAP_SET_CONST      R3, C9, R4   ; "d"
+        0012    LOAD_CONST         R4, C2       ; 0
+    J0:
+        0013    LESS               R5, R4, R0
+        0014    JUMP_FALSE         R5, J2       ; +31
+        0015    MAP_GET_CONST      R5, R3, C3   ; "a"
+        0016    ADD                R6, R5, R4
+        0017    MAP_GET_CONST      R8, R3, C9   ; "d"
+        0018    ADD                R7, R6, R8
+        0019    MOD                R8, R7, R1
+        0020    MAP_SET_CONST      R3, C3, R8   ; "a"
+        0021    MAP_GET_CONST      R5, R3, C5   ; "b"
+        0022    MAP_GET_CONST      R7, R3, C3   ; "a"
+        0023    ADD                R6, R5, R7
+        0024    ADD_CONST          R7, R6, C11  ; 7
+        0025    MOD                R8, R7, R1
+        0026    MAP_SET_CONST      R3, C5, R8   ; "b"
+        0027    MAP_GET_CONST      R5, R3, C3   ; "a"
+        0028    MAP_GET_CONST      R7, R3, C5   ; "b"
+        0029    ADD                R6, R5, R7
+        0030    MAP_SET_CONST      R3, C7, R6   ; "c"
+        0031    MAP_GET_CONST      R5, R3, C7   ; "c"
+        0032    LESS               R6, R1, R5
+        0033    JUMP_FALSE         R6, J1       ; +3
+        0034    MAP_GET_CONST      R5, R3, C7   ; "c"
+        0035    MOD                R6, R5, R1
+        0036    MAP_SET_CONST      R3, C7, R6   ; "c"
+    J1:
+        0037    MAP_GET_CONST      R6, R3, C3   ; "a"
+        0038    ADD                R5, R2, R6
+        0039    MAP_GET_CONST      R7, R3, C5   ; "b"
+        0040    ADD                R6, R5, R7
+        0041    MAP_GET_CONST      R8, R3, C7   ; "c"
+        0042    ADD                R7, R6, R8
+        0043    MOD                R2, R7, R1
+        0044    ADD_CONST          R4, R4, C4   ; 1
+        0045    JUMP               J0           ; -33
+    J2:
+        0046    GET_GLOBAL_BIND    R5, G0       ; print
+        0047    MAP_GET_CONST      R7, R3, C3   ; "a"
+        0048    ADD                R6, R2, R7
+        0049    MAP_GET_CONST      R8, R3, C5   ; "b"
+        0050    ADD                R7, R6, R8
+        0051    MAP_GET_CONST      R9, R3, C7   ; "c"
+        0052    ADD                R6, R7, R9
+        0053    CALL               R5, 1, 0
+        0054    LOAD_NIL           R5
+        0055    RETURN             R5, 1
+
+===== bench_string =====
+
+bench_string.kiln
+
+entry
+    slots 4
+    ops 32
+
+    constants
+        C0 = 25000
+        C1 = 0
+        C2 = 1
+        C3 = ""
+
+    bindings
+        B0 = n
+        B1 = parts
+        B2 = i
+        B3 = s
+        G0 = print
+        G2 = length
+        G4 = to_string
+        M5.B0 = array.push
+        M7.B11 = string.join
+
+    code
+        0000    LOAD_CONST         R0, C0       ; 25000
+        0001    SET_MAIN_BIND      R0, B0       ; n
+        0002    NEW_ARRAY          R0, 0
+        0003    SET_MAIN_BIND      R0, B1       ; parts
+        0004    LOAD_CONST         R0, C1       ; 0
+        0005    SET_MAIN_BIND      R0, B2       ; i
+    J0:
+        0006    GET_MAIN_BIND      R0, B2       ; i
+        0007    GET_MAIN_BIND      R1, B0       ; n
+        0008    LESS               R2, R0, R1
+        0009    JUMP_FALSE         R2, J1       ; +10
+        0010    GET_MODULE_BIND    R0, M5.B0    ; array.push
+        0011    GET_MAIN_BIND      R1, B1       ; parts
+        0012    GET_GLOBAL_BIND    R2, G4       ; to_string
+        0013    GET_MAIN_BIND      R3, B2       ; i
+        0014    CALL               R2, 1, 1
+        0015    CALL               R0, 2, 0
+        0016    GET_MAIN_BIND      R0, B2       ; i
+        0017    ADD_CONST          R0, R0, C2   ; 1
+        0018    SET_MAIN_BIND      R0, B2       ; i
+        0019    JUMP               J0           ; -14
+    J1:
+        0020    GET_MODULE_BIND    R0, M7.B11   ; string.join
+        0021    GET_MAIN_BIND      R1, B1       ; parts
+        0022    LOAD_CONST         R2, C3       ; ""
+        0023    CALL               R0, 2, 1
+        0024    SET_MAIN_BIND      R0, B3       ; s
+        0025    GET_GLOBAL_BIND    R0, G0       ; print
+        0026    GET_GLOBAL_BIND    R1, G2       ; length
+        0027    GET_MAIN_BIND      R2, B3       ; s
+        0028    CALL               R1, 1, 1
+        0029    CALL               R0, 1, 0
+        0030    LOAD_NIL           R0
+        0031    RETURN             R0, 1
+
+===== bench_call =====
+
+bench_call.kiln
+
+entry
+    slots 1
+    ops 8
+
+    children
+        P0 = work
+        P1 = run
+
+    bindings
+        B0 = work
+        B1 = run
+
+    code
+        0000    LOAD_FUNC          R0, P0       ; work
+        0001    SET_MAIN_BIND      R0, B0       ; work
+        0002    LOAD_FUNC          R0, P1       ; run
+        0003    SET_MAIN_BIND      R0, B1       ; run
+        0004    GET_MAIN_BIND      R0, B1       ; run
+        0005    CALL               R0, 0, 0
+        0006    LOAD_NIL           R0
+        0007    RETURN             R0, 1
+
+proto work
+    params 2
+    slots 6
+    ops 7
+
+    constants
+        C0 = 3
+        C1 = 11
+        C2 = 1000
+
+    code
+        0000    MUL_CONST          R2, R1, C0   ; 3
+        0001    ADD                R3, R0, R2
+        0002    ADD_CONST          R4, R3, C1   ; 11
+        0003    MOD_CONST          R5, R4, C2   ; 1000
+        0004    RETURN             R5, 1
+        0005    LOAD_NIL           R2
+        0006    RETURN             R2, 1
+
+proto run
+    params 0
+    slots 9
+    ops 19
+
+    constants
+        C0 = 1000000
+        C1 = 100000
+        C2 = 0
+        C3 = 1
+
+    bindings
+        B0 = work
+        G0 = print
+
+    code
+        0000    LOAD_CONST         R0, C0       ; 1000000
+        0001    LOAD_CONST         R1, C1       ; 100000
+        0002    LOAD_CONST         R2, C2       ; 0
+        0003    LOAD_CONST         R3, C2       ; 0
+    J0:
+        0004    LESS               R4, R3, R0
+        0005    JUMP_FALSE         R4, J1       ; +8
+        0006    GET_MAIN_BIND      R4, B0       ; work
+        0007    MOVE               R5, R3
+        0008    MOVE               R6, R2
+        0009    CALL               R4, 2, 1
+        0010    ADD                R7, R2, R4
+        0011    MOD                R2, R7, R1
+        0012    ADD_CONST          R3, R3, C3   ; 1
+        0013    JUMP               J0           ; -10
+    J1:
+        0014    GET_GLOBAL_BIND    R4, G0       ; print
+        0015    MOVE               R5, R2
+        0016    CALL               R4, 1, 0
+        0017    LOAD_NIL           R4
+        0018    RETURN             R4, 1
+
+===== bench_control =====
+
+bench_control.kiln
+
+entry
+    slots 1
+    ops 6
+
+    children
+        P0 = run
+
+    bindings
+        B0 = run
+
+    code
+        0000    LOAD_FUNC          R0, P0       ; run
+        0001    SET_MAIN_BIND      R0, B0       ; run
+        0002    GET_MAIN_BIND      R0, B0       ; run
+        0003    CALL               R0, 0, 0
+        0004    LOAD_NIL           R0
+        0005    RETURN             R0, 1
+
+proto run
+    params 0
+    slots 6
+    ops 18
+
+    constants
+        C0 = 10000000
+        C1 = 5000000
+        C2 = 0
+        C3 = 1
+        C4 = 2
+
+    bindings
+        G0 = print
+
+    code
+        0000    LOAD_CONST         R0, C0       ; 10000000
+        0001    LOAD_CONST         R1, C1       ; 5000000
+        0002    LOAD_CONST         R2, C2       ; 0
+        0003    LOAD_CONST         R3, C2       ; 0
+    J0:
+        0004    LESS               R4, R2, R0
+        0005    JUMP_FALSE         R4, J3       ; +7
+        0006    LESS               R4, R2, R1
+        0007    JUMP_FALSE         R4, J1       ; +2
+        0008    ADD_CONST          R3, R3, C3   ; 1
+        0009    JUMP               J2           ; +1
+    J1:
+        0010    ADD_CONST          R3, R3, C4   ; 2
+    J2:
+        0011    ADD_CONST          R2, R2, C3   ; 1
+        0012    JUMP               J0           ; -9
+    J3:
+        0013    GET_GLOBAL_BIND    R4, G0       ; print
+        0014    MOVE               R5, R3
+        0015    CALL               R4, 1, 0
+        0016    LOAD_NIL           R4
+        0017    RETURN             R4, 1
+
+===== bench_sieve =====
+
+bench_sieve.kiln
+
+entry
+    slots 1
+    ops 8
+
+    children
+        P0 = sieve
+        P1 = run
+
+    bindings
+        B0 = sieve
+        B1 = run
+
+    code
+        0000    LOAD_FUNC          R0, P0       ; sieve
+        0001    SET_MAIN_BIND      R0, B0       ; sieve
+        0002    LOAD_FUNC          R0, P1       ; run
+        0003    SET_MAIN_BIND      R0, B1       ; run
+        0004    GET_MAIN_BIND      R0, B1       ; run
+        0005    CALL               R0, 0, 0
+        0006    LOAD_NIL           R0
+        0007    RETURN             R0, 1
+
+proto sieve
+    params 1
+    slots 6
+    ops 41
+
+    constants
+        C0 = 0
+        C1 = 1
+        C2 = 2
+
+    bindings
+        M5.B0 = array.push
+
+    code
+        0000    NEW_ARRAY          R1, 0
+        0001    LOAD_CONST         R2, C0       ; 0
+    J0:
+        0002    LESS_OR_EQUAL      R3, R2, R0
+        0003    JUMP_FALSE         R3, J1       ; +6
+        0004    GET_MODULE_BIND    R3, M5.B0    ; array.push
+        0005    MOVE               R4, R1
+        0006    LOAD_TRUE          R5
+        0007    CALL               R3, 2, 0
+        0008    ADD_CONST          R2, R2, C1   ; 1
+        0009    JUMP               J0           ; -8
+    J1:
+        0010    LOAD_FALSE         R3
+        0011    ARRAY_SET_CONST    R1, C0, R3   ; 0
+        0012    LOAD_FALSE         R3
+        0013    ARRAY_SET_CONST    R1, C1, R3   ; 1
+        0014    LOAD_CONST         R2, C2       ; 2
+    J2:
+        0015    MUL                R3, R2, R2
+        0016    LESS_OR_EQUAL      R4, R3, R0
+        0017    JUMP_FALSE         R4, J5       ; +11
+        0018    INDEX_GET          R3, R1, R2
+        0019    JUMP_FALSE         R3, J4       ; +7
+        0020    MUL                R3, R2, R2
+    J3:
+        0021    LESS_OR_EQUAL      R4, R3, R0
+        0022    JUMP_FALSE         R4, J4       ; +4
+        0023    LOAD_FALSE         R4
+        0024    INDEX_SET          R1, R3, R4
+        0025    ADD                R3, R3, R2
+        0026    JUMP               J3           ; -6
+    J4:
+        0027    ADD_CONST          R2, R2, C1   ; 1
+        0028    JUMP               J2           ; -14
+    J5:
+        0029    LOAD_CONST         R3, C0       ; 0
+        0030    LOAD_CONST         R2, C0       ; 0
+    J6:
+        0031    LESS_OR_EQUAL      R4, R2, R0
+        0032    JUMP_FALSE         R4, J8       ; +5
+        0033    INDEX_GET          R4, R1, R2
+        0034    JUMP_FALSE         R4, J7       ; +1
+        0035    ADD_CONST          R3, R3, C1   ; 1
+    J7:
+        0036    ADD_CONST          R2, R2, C1   ; 1
+        0037    JUMP               J6           ; -7
+    J8:
+        0038    RETURN             R3, 1
+        0039    LOAD_NIL           R4
+        0040    RETURN             R4, 1
+
+proto run
+    params 0
+    slots 4
+    ops 16
+
+    constants
+        C0 = 0
+        C1 = 3
+        C2 = 100000
+        C3 = 1
+
+    bindings
+        B0 = sieve
+        G0 = print
+
+    code
+        0000    LOAD_CONST         R0, C0       ; 0
+        0001    LOAD_CONST         R1, C0       ; 0
+    J0:
+        0002    LOAD_CONST         R2, C1       ; 3
+        0003    LESS               R3, R1, R2
+        0004    JUMP_FALSE         R3, J1       ; +6
+        0005    GET_MAIN_BIND      R2, B0       ; sieve
+        0006    LOAD_CONST         R3, C2       ; 100000
+        0007    CALL               R2, 1, 1
+        0008    ADD                R0, R0, R2
+        0009    ADD_CONST          R1, R1, C3   ; 1
+        0010    JUMP               J0           ; -9
+    J1:
+        0011    GET_GLOBAL_BIND    R2, G0       ; print
+        0012    MOVE               R3, R0
+        0013    CALL               R2, 1, 0
+        0014    LOAD_NIL           R2
+        0015    RETURN             R2, 1
+

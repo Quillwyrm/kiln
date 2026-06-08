@@ -1,15 +1,27 @@
-m := map {}
-i := 0
-for i < 25000 {
-    key := to_string(i)
-    m[key] = i
-    i += 1
+run :: function() {
+    n := 750000
+    mod := 100000
+    total := 0
+
+    m := map {}
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    m["d"] = 4
+
+    i := 0
+    for i < n {
+        m["a"] = (m["a"] + i + m["d"]) % mod
+        m["b"] = (m["b"] + m["a"] + 7) % mod
+        m["c"] = m["a"] + m["b"]
+        if m["c"] > mod {
+            m["c"] = m["c"] % mod
+        }
+        total = (total + m["a"] + m["b"] + m["c"]) % mod
+        i += 1
+    }
+
+    print(total + m["a"] + m["b"] + m["c"])
 }
-sum := 0
-i = 0
-for i < 25000 {
-    key := to_string(i)
-    sum += m[key]
-    i += 1
-}
-print(sum)
+
+run()

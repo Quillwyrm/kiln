@@ -1,0 +1,17 @@
+fn main() {
+    n := 10000000
+    half := 5000000
+    i := 0
+    total := 0
+
+    for i < n {
+        if i < half {
+            total += 1
+        } else {
+            total += 2
+        }
+        i++
+    }
+
+    printf("%d\n", total)
+}

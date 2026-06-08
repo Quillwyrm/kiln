@@ -1,7 +1,35 @@
 fn main() {
-    s := ""
-    for i := 0; i < 10000; i++ {
-        s += sprintf("%d", i)
+    n := 25000
+    parts := []str{}
+    i := 0
+
+    for i < n {
+        parts = append(parts, sprintf("%d", i))
+        i++
     }
+
+    totalLen := 0
+    i = 0
+    for i < len(parts) {
+        totalLen += len(parts[i])
+        i++
+    }
+
+    bytes := make([]uint8, totalLen)
+    offset := 0
+
+    i = 0
+    for i < len(parts) {
+        partBytes := []uint8(parts[i])
+        j := 0
+        for j < len(partBytes) {
+            bytes[offset] = partBytes[j]
+            offset++
+            j++
+        }
+        i++
+    }
+
+    s := str(bytes)
     printf("%d\n", len(s))
 }
