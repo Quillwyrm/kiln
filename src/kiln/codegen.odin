@@ -125,6 +125,13 @@ delete_proto_state :: proc(proto_state: ^ProtoState) {
 
 // Constants ======================================================================================
 const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
+    for const_index := 0; const_index < len(proto_state.const_pool); const_index += 1 {
+        existing, is_int := proto_state.const_pool[const_index].(i64)
+        if is_int && existing == value {
+            return const_index
+        }
+    }
+
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
         set_error(proto_state.origin, "too many constants in function")
         Parser.failed = true
@@ -138,6 +145,13 @@ const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
 }
 
 const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
+    for const_index := 0; const_index < len(proto_state.const_pool); const_index += 1 {
+        existing, is_float := proto_state.const_pool[const_index].(f64)
+        if is_float && existing == value {
+            return const_index
+        }
+    }
+
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
         set_error(proto_state.origin, "too many constants in function")
         Parser.failed = true
@@ -151,6 +165,18 @@ const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
 }
 
 const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
+    for const_index := 0; const_index < len(proto_state.const_pool); const_index += 1 {
+        object, is_object := proto_state.const_pool[const_index].(^Object)
+        if !is_object || object.kind != .STRING {
+            continue
+        }
+
+        string_object := cast(^StringObject)object
+        if string_object.data == text {
+            return const_index
+        }
+    }
+
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
         set_error(proto_state.origin, "too many constants in function")
         Parser.failed = true

@@ -310,3 +310,17 @@ optimizer pipeline
 ```
 
 `hot-frame caching + scalar fast paths + bytecode cleanup`
+
+
+1. Constant pool dedup for scalar literals.
+2. Indexed access lowering cleanup.
+3. Re-run map/array/entity benches.
+4. Add INDEX_GET / INDEX_SET fast paths.
+5. Re-run benches again.
+
+1. INDEX_GET_CONST / INDEX_SET_CONST
+2. String hash caching
+3. Maybe string interning
+4. A very small arithmetic-const opcode family
+5. Maybe compare+branch fusion
+6. Known immutable function calls later

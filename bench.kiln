@@ -1,14 +1,38 @@
-bench :: function() {
-    n := 100000000
+bench := function() {
+    n := 3000000
     i := 0
-    sum := 0
+    total := 0
 
-    for i < n {
-        sum = sum + i
-        i = i + 1
+    items := [1, 2, 3, 4, 5, 6, 7, 8]
+
+    state := map {
+        a: 1,
+        b: 2,
+        c: 3,
+        d: 4,
     }
 
-    return sum
+    for i < n {
+        index := i % 8
+
+        value := items[index]
+        value = (value + state["a"] + i) % 100000
+        items[index] = value
+
+        state["a"] = (state["a"] + value + state["d"]) % 100000
+        state["b"] = (state["b"] + items[index] + 7) % 100000
+        state["c"] = state["a"] + state["b"] + value
+
+        if state["c"] > 100000 {
+            state["c"] = state["c"] % 100000
+        }
+
+        total += value + state["a"] + state["b"] + state["c"]
+
+        i += 1
+    }
+
+    return total + items[0] + items[1] + state["a"] + state["b"] + state["c"]
 }
 
 print(bench())

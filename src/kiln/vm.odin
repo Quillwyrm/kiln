@@ -994,6 +994,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_int + right_int)
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(f64(left_int) + right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_float + f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(left_float + right_float)
+                    continue
+                }
+            }
+
             state.slots[dst] = value_add(state.slots[lhs], state.slots[rhs])
             if state.has_error {
                 frame.instruction_index = pc
@@ -1005,6 +1034,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_int - right_int)
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(f64(left_int) - right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_float - f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(left_float - right_float)
+                    continue
+                }
+            }
+
             state.slots[dst] = value_sub(state.slots[lhs], state.slots[rhs])
             if state.has_error {
                 frame.instruction_index = pc
@@ -1027,6 +1085,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_int * right_int)
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(f64(left_int) * right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_float * f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(left_float * right_float)
+                    continue
+                }
+            }
+
             state.slots[dst] = value_mul(state.slots[lhs], state.slots[rhs])
             if state.has_error {
                 frame.instruction_index = pc
@@ -1038,6 +1125,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int && right_int != 0 {
+                    state.slots[dst] = Value(f64(left_int) / f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float && right_float != 0.0 {
+                    state.slots[dst] = Value(f64(left_int) / right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int && right_int != 0 {
+                    state.slots[dst] = Value(left_float / f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float && right_float != 0.0 {
+                    state.slots[dst] = Value(left_float / right_float)
+                    continue
+                }
+            }
+
             state.slots[dst] = value_div(state.slots[lhs], state.slots[rhs])
             if state.has_error {
                 frame.instruction_index = pc
@@ -1049,6 +1165,16 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int && right_int != 0 {
+                    state.slots[dst] = Value(left_int % right_int)
+                    continue
+                }
+            }
+
             state.slots[dst] = value_mod(state.slots[lhs], state.slots[rhs])
             if state.has_error {
                 frame.instruction_index = pc
@@ -1059,6 +1185,19 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             inst := InstABx(word)
             dst := slot_base + int(inst.a)
             src := slot_base + int(inst.b)
+
+            int_value, is_int := state.slots[src].(i64)
+            if is_int {
+                state.slots[dst] = Value(-int_value)
+                continue
+            }
+
+            float_value, is_float := state.slots[src].(f64)
+            if is_float {
+                state.slots[dst] = Value(-float_value)
+                continue
+            }
+
             state.slots[dst] = value_neg(state.slots[src])
             if state.has_error {
                 frame.instruction_index = pc
@@ -1070,13 +1209,117 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
-            state.slots[dst] = Value(value_equal(state.slots[lhs], state.slots[rhs]))
+
+            lhs_value := state.slots[lhs]
+            rhs_value := state.slots[rhs]
+
+            // nil checks first (nil is the union zero value, not an object)
+            if lhs_value == nil || rhs_value == nil {
+                state.slots[dst] = Value(bool(lhs_value == nil && rhs_value == nil))
+                continue
+            }
+
+            // int/int, int/float
+            lhs_int, lhs_is_int := lhs_value.(i64)
+            if lhs_is_int {
+                rhs_int, rhs_is_int := rhs_value.(i64)
+                if rhs_is_int {
+                    state.slots[dst] = Value(bool(lhs_int == rhs_int))
+                    continue
+                }
+                rhs_float, rhs_is_float := rhs_value.(f64)
+                if rhs_is_float {
+                    state.slots[dst] = Value(bool(f64(lhs_int) == rhs_float))
+                    continue
+                }
+                state.slots[dst] = Value(bool(false))
+                continue
+            }
+
+            // float/int, float/float
+            lhs_float, lhs_is_float := lhs_value.(f64)
+            if lhs_is_float {
+                rhs_int, rhs_is_int := rhs_value.(i64)
+                if rhs_is_int {
+                    state.slots[dst] = Value(bool(lhs_float == f64(rhs_int)))
+                    continue
+                }
+                rhs_float, rhs_is_float := rhs_value.(f64)
+                if rhs_is_float {
+                    state.slots[dst] = Value(bool(lhs_float == rhs_float))
+                    continue
+                }
+                state.slots[dst] = Value(bool(false))
+                continue
+            }
+
+            // bool/bool
+            lhs_bool, lhs_is_bool := lhs_value.(bool)
+            if lhs_is_bool {
+                rhs_bool, rhs_is_bool := rhs_value.(bool)
+                if rhs_is_bool {
+                    state.slots[dst] = Value(bool(lhs_bool == rhs_bool))
+                    continue
+                }
+                state.slots[dst] = Value(bool(false))
+                continue
+            }
+
+            // Both are objects at this point (nil already handled above).
+            lhs_object, lhs_is_object := lhs_value.(^Object)
+            rhs_object, rhs_is_object := rhs_value.(^Object)
+            if lhs_is_object && rhs_is_object {
+                if lhs_object == rhs_object {
+                    state.slots[dst] = Value(bool(true))
+                    continue
+                }
+                // Both strings but different pointer -> compare contents via fallback.
+                if lhs_object.kind == .STRING && rhs_object.kind == .STRING {
+                    state.slots[dst] = Value(value_equal(lhs_value, rhs_value))
+                    continue
+                }
+                // Different non-string objects -> not equal.
+                state.slots[dst] = Value(bool(false))
+                continue
+            }
+
+            // Remaining type mismatches (object vs non-object, etc.) -> not equal.
+            state.slots[dst] = Value(bool(false))
 
         case .LESS:
             inst := InstABC(word)
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(bool(left_int < right_int))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(bool(f64(left_int) < right_float))
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(bool(left_float < f64(right_int)))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(bool(left_float < right_float))
+                    continue
+                }
+            }
+
             state.slots[dst] = Value(value_less(state.slots[lhs], state.slots[rhs]))
             if state.has_error {
                 frame.instruction_index = pc
@@ -1088,6 +1331,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             dst := slot_base + int(inst.a)
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(bool(left_int <= right_int))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(bool(f64(left_int) <= right_float))
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(bool(left_float <= f64(right_int)))
+                    continue
+                }
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(bool(left_float <= right_float))
+                    continue
+                }
+            }
+
             state.slots[dst] = Value(value_less_or_equal(state.slots[lhs], state.slots[rhs]))
             if state.has_error {
                 frame.instruction_index = pc
@@ -1098,7 +1370,14 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             inst := InstABx(word)
             dst := slot_base + int(inst.a)
             src := slot_base + int(inst.b)
-            state.slots[dst] = Value(value_is_falsey(state.slots[src]))
+
+            value := state.slots[src]
+            bool_value, is_bool := value.(bool)
+            if is_bool {
+                state.slots[dst] = Value(!bool_value)
+            } else {
+                state.slots[dst] = Value(value == nil)
+            }
 
         case .JUMP:
             inst := InstJump(word)
@@ -1107,7 +1386,14 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
         case .JUMP_FALSE:
             inst := InstAsBx(word)
             condition := slot_base + int(inst.a)
-            if value_is_falsey(state.slots[condition]) {
+
+            value := state.slots[condition]
+            bool_value, is_bool := value.(bool)
+            if is_bool {
+                if !bool_value {
+                    pc += int(inst.sb)
+                }
+            } else if value == nil {
                 pc += int(inst.sb)
             }
 

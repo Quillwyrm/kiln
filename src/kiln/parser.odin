@@ -720,27 +720,26 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     consume_token(proto_state, .LEFT_BRACKET, "expected '[' to start index expression")
     if Parser.failed { return ExprInvalid{} }
 
-    container_slot: int
-    slot_expr, container_is_slot := container.(ExprSlot)
-    if container_is_slot {
-        container_slot = int(slot_expr)
-        reserve_slots_until(proto_state, container_slot + 1)
-        if Parser.failed { return ExprInvalid{} }
-    } else {
-        container_slot = claim_temp_slot(proto_state)
-        if Parser.failed { return ExprInvalid{} }
+    // Preserve evaluation order:
+    //   1. materialize/read the container
+    //   2. evaluate the key expression
+    //   3. materialize/read the key
+    //
+    // INDEX_GET / INDEX_SET can read container/key from any slots, so locals and
+    // already-materialized temps do not need fake MOVE copies.
+    container_slot := expr_read_slot(proto_state, container)
+    if Parser.failed { return ExprInvalid{} }
 
-        lower_expr_desc(proto_state, container, container_slot)
-        if Parser.failed { return ExprInvalid{} }
-    }
-
-    key_slot := claim_temp_slot(proto_state)
+    reserve_slots_until(proto_state, container_slot + 1)
     if Parser.failed { return ExprInvalid{} }
 
     key_expr := parse_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    lower_expr_desc(proto_state, key_expr, key_slot)
+    key_slot := expr_read_slot(proto_state, key_expr)
+    if Parser.failed { return ExprInvalid{} }
+
+    reserve_slots_until(proto_state, key_slot + 1)
     if Parser.failed { return ExprInvalid{} }
 
     consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after index expression")
