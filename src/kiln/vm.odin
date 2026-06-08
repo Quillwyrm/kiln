@@ -17,18 +17,24 @@ Opcode :: enum u8 {
     MOVE,          // ABx: A=dst, B=src
 
     // Array Operations
-    NEW_ARRAY,     // Ax: A=dst
+    NEW_ARRAY,     // ABx: A=dst, B=capacity
     // ARRAY_LEN,  // ABx: A=dst,       B=src_array
     ARRAY_PUSH,    // ABx: A=dst_array, B=src
     // ARRAY_POP,  // ABx: A=dst,       B=src_array
 
     // Map Operations
-    NEW_MAP,       // Ax: A=dst
+    NEW_MAP,       // ABx: A=dst, B=capacity
     // MAP_LEN,    // ABx: A=dst,     B=src_map
 
     // Indexed Access
     INDEX_GET,     // ABC: A=dst,       B=container, C=key
     INDEX_SET,     // ABC: A=container, B=key,       C=src
+
+    // Typed const-key indexed access
+    ARRAY_GET_CONST, // ABC: A=dst,   B=array, C=const_int_index
+    ARRAY_SET_CONST, // ABC: A=array, B=const_int_index, C=src
+    MAP_GET_CONST,   // ABC: A=dst,   B=map,   C=const_string_key
+    MAP_SET_CONST,   // ABC: A=map,   B=const_string_key, C=src
 
     // Arithmetic and Concatenation Operations
     ADD,           // ABC: A=dst, B=lhs, C=rhs
@@ -37,6 +43,11 @@ Opcode :: enum u8 {
     MUL,           // ABC: A=dst, B=lhs, C=rhs
     DIV,           // ABC: A=dst, B=lhs, C=rhs
     MOD,           // ABC: A=dst, B=lhs, C=rhs
+    ADD_CONST,     // ABC: A=dst, B=lhs, C=const_index
+    SUB_CONST,     // ABC: A=dst, B=lhs, C=const_index
+    MUL_CONST,     // ABC: A=dst, B=lhs, C=const_index
+    DIV_CONST,     // ABC: A=dst, B=lhs, C=const_index
+    MOD_CONST,     // ABC: A=dst, B=lhs, C=const_index
     NEG,           // ABx: A=dst, B=src
 
     // Comparison and Boolean Operations
@@ -807,11 +818,18 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             state.slots[dst] = state.slots[src]
 
         case .NEW_ARRAY:
-            inst := InstAx(word)
+            inst := InstABx(word)
             dst := slot_base + int(inst.a)
+            capacity := int(inst.b)
+
             array_object := new(ArrayObject)
             array_object.header.kind = .ARRAY
             array_object.data = make([dynamic]Value)
+
+            if capacity > 0 {
+                reserve(&array_object.data, capacity)
+            }
+
             state.slots[dst] = Value(cast(^Object)array_object)
 
         // case .ARRAY_LEN:
@@ -936,6 +954,102 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
 
+        case .ARRAY_GET_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            array_slot := slot_base + int(inst.b)
+            index_i64 := const_pool[int(inst.c)].(i64)
+
+            array_header, is_object := state.slots[array_slot].(^Object)
+            if !is_object || array_header.kind != .ARRAY {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("invalid array index read; expected `array`, got `%s`", value_type_to_string(state.slots[array_slot])))
+            }
+
+            array_object := cast(^ArrayObject)array_header
+
+            if index_i64 < 0 {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
+            }
+
+            index := int(index_i64)
+            if index >= len(array_object.data) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
+            }
+
+            state.slots[dst] = array_object.data[index]
+
+        case .ARRAY_SET_CONST:
+            inst := InstABC(word)
+            array_slot := slot_base + int(inst.a)
+            index_i64 := const_pool[int(inst.b)].(i64)
+            value_slot := slot_base + int(inst.c)
+
+            array_header, is_object := state.slots[array_slot].(^Object)
+            if !is_object || array_header.kind != .ARRAY {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("invalid array index assignment; expected `array`, got `%s`", value_type_to_string(state.slots[array_slot])))
+            }
+
+            array_object := cast(^ArrayObject)array_header
+
+            if index_i64 < 0 {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
+            }
+
+            index := int(index_i64)
+            if index >= len(array_object.data) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("array index out of range: index %d, length %d", index_i64, len(array_object.data)))
+            }
+
+            array_object.data[index] = state.slots[value_slot]
+
+        case .MAP_GET_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            map_slot := slot_base + int(inst.b)
+            key_object := cast(^StringObject)const_pool[int(inst.c)].(^Object)
+
+            map_header, is_object := state.slots[map_slot].(^Object)
+            if !is_object || map_header.kind != .MAP {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("invalid map index read; expected `map`, got `%s`", value_type_to_string(state.slots[map_slot])))
+            }
+
+            map_object := cast(^MapObject)map_header
+
+            value, exists := map_object.data[key_object.data]
+            if exists {
+                state.slots[dst] = value
+            } else {
+                state.slots[dst] = Value{}
+            }
+
+        case .MAP_SET_CONST:
+            inst := InstABC(word)
+            map_slot := slot_base + int(inst.a)
+            key_object := cast(^StringObject)const_pool[int(inst.b)].(^Object)
+            value_slot := slot_base + int(inst.c)
+
+            map_header, is_object := state.slots[map_slot].(^Object)
+            if !is_object || map_header.kind != .MAP {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("invalid map index assignment; expected `map`, got `%s`", value_type_to_string(state.slots[map_slot])))
+            }
+
+            map_object := cast(^MapObject)map_header
+            value := state.slots[value_slot]
+
+            if value == nil {
+                delete_key(&map_object.data, key_object.data)
+            } else {
+                map_object.data[key_object.data] = value
+            }
+
         case .ARRAY_PUSH:
             inst := InstABx(word)
             array_slot := slot_base + int(inst.a)
@@ -971,11 +1085,18 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
         //     }
 
         case .NEW_MAP:
-            inst := InstAx(word)
+            inst := InstABx(word)
             dst := slot_base + int(inst.a)
+            capacity := int(inst.b)
+
             map_object := new(MapObject)
             map_object.header.kind = .MAP
             map_object.data = make(map[string]Value)
+
+            if capacity > 0 {
+                reserve(&map_object.data, capacity)
+            }
+
             state.slots[dst] = Value(cast(^Object)map_object)
 
         // case .MAP_LEN:
@@ -1176,6 +1297,187 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_mod(state.slots[lhs], state.slots[rhs])
+            if state.has_error {
+                frame.instruction_index = pc
+                return Value{}, &state.error
+            }
+
+        case .ADD_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := const_pool[int(inst.c)]
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_int + right_int)
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(f64(left_int) + right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_float + f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(left_float + right_float)
+                    continue
+                }
+            }
+
+            state.slots[dst] = value_add(state.slots[lhs], rhs)
+            if state.has_error {
+                frame.instruction_index = pc
+                return Value{}, &state.error
+            }
+
+        case .SUB_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := const_pool[int(inst.c)]
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_int - right_int)
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(f64(left_int) - right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_float - f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(left_float - right_float)
+                    continue
+                }
+            }
+
+            state.slots[dst] = value_sub(state.slots[lhs], rhs)
+            if state.has_error {
+                frame.instruction_index = pc
+                return Value{}, &state.error
+            }
+
+        case .MUL_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := const_pool[int(inst.c)]
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_int * right_int)
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(f64(left_int) * right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int {
+                    state.slots[dst] = Value(left_float * f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float {
+                    state.slots[dst] = Value(left_float * right_float)
+                    continue
+                }
+            }
+
+            state.slots[dst] = value_mul(state.slots[lhs], rhs)
+            if state.has_error {
+                frame.instruction_index = pc
+                return Value{}, &state.error
+            }
+
+        case .DIV_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := const_pool[int(inst.c)]
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int && right_int != 0 {
+                    state.slots[dst] = Value(f64(left_int) / f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float && right_float != 0.0 {
+                    state.slots[dst] = Value(f64(left_int) / right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int && right_int != 0 {
+                    state.slots[dst] = Value(left_float / f64(right_int))
+                    continue
+                }
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float && right_float != 0.0 {
+                    state.slots[dst] = Value(left_float / right_float)
+                    continue
+                }
+            }
+
+            state.slots[dst] = value_div(state.slots[lhs], rhs)
+            if state.has_error {
+                frame.instruction_index = pc
+                return Value{}, &state.error
+            }
+
+        case .MOD_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            lhs := slot_base + int(inst.b)
+            rhs := const_pool[int(inst.c)]
+
+            left_int, left_is_int := state.slots[lhs].(i64)
+            if left_is_int {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int && right_int != 0 {
+                    state.slots[dst] = Value(left_int % right_int)
+                    continue
+                }
+            }
+
+            state.slots[dst] = value_mod(state.slots[lhs], rhs)
             if state.has_error {
                 frame.instruction_index = pc
                 return Value{}, &state.error

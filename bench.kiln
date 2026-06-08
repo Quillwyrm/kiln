@@ -3,8 +3,6 @@ bench := function() {
     i := 0
     total := 0
 
-    items := [1, 2, 3, 4, 5, 6, 7, 8]
-
     state := map {
         a: 1,
         b: 2,
@@ -13,26 +11,20 @@ bench := function() {
     }
 
     for i < n {
-        index := i % 8
-
-        value := items[index]
-        value = (value + state["a"] + i) % 100000
-        items[index] = value
-
-        state["a"] = (state["a"] + value + state["d"]) % 100000
-        state["b"] = (state["b"] + items[index] + 7) % 100000
-        state["c"] = state["a"] + state["b"] + value
+        state["a"] = (state["a"] + i + state["d"]) % 100000
+        state["b"] = (state["b"] + state["a"] + 7) % 100000
+        state["c"] = state["a"] + state["b"]
 
         if state["c"] > 100000 {
             state["c"] = state["c"] % 100000
         }
 
-        total += value + state["a"] + state["b"] + state["c"]
+        total += state["a"] + state["b"] + state["c"]
 
         i += 1
     }
 
-    return total + items[0] + items[1] + state["a"] + state["b"] + state["c"]
+    return total + state["a"] + state["b"] + state["c"]
 }
 
 print(bench())

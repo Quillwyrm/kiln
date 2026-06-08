@@ -241,11 +241,23 @@ emit_move :: proc(proto_state: ^ProtoState, dst, src: int) {
 }
 
 // Array operations ===============================================================================
-emit_new_array :: proc(proto_state: ^ProtoState, dst: int) {
+emit_new_array :: proc(proto_state: ^ProtoState, dst, capacity: int) -> int {
     record_slots(proto_state, dst)
 
-    inst := u32(InstAx{ op= .NEW_ARRAY, a= u32(dst) })
+    inst_index := len(proto_state.bytecode)
+    inst := u32(InstABx{ op= .NEW_ARRAY, a= u8(dst), b= u16(capacity) })
     append(&proto_state.bytecode, inst)
+
+    return inst_index
+}
+
+patch_new_array_capacity :: proc(proto_state: ^ProtoState, inst_index, capacity: int) {
+    inst := InstABx(proto_state.bytecode[inst_index])
+    proto_state.bytecode[inst_index] = u32(InstABx{
+        op = .NEW_ARRAY,
+        a  = inst.a,
+        b  = u16(capacity),
+    })
 }
 
 // emit_array_len :: proc(proto_state: ^ProtoState, dst, src_array: int) {
@@ -271,11 +283,23 @@ emit_array_push :: proc(proto_state: ^ProtoState, dst_array, src: int) {
 
 // Map operations =================================================================================
 
-emit_new_map :: proc(proto_state: ^ProtoState, dst: int) {
+emit_new_map :: proc(proto_state: ^ProtoState, dst, capacity: int) -> int {
     record_slots(proto_state, dst)
 
-    inst := u32(InstAx{ op= .NEW_MAP, a= u32(dst) })
+    inst_index := len(proto_state.bytecode)
+    inst := u32(InstABx{ op= .NEW_MAP, a= u8(dst), b= u16(capacity) })
     append(&proto_state.bytecode, inst)
+
+    return inst_index
+}
+
+patch_new_map_capacity :: proc(proto_state: ^ProtoState, inst_index, capacity: int) {
+    inst := InstABx(proto_state.bytecode[inst_index])
+    proto_state.bytecode[inst_index] = u32(InstABx{
+        op = .NEW_MAP,
+        a  = inst.a,
+        b  = u16(capacity),
+    })
 }
 
 // emit_map_len :: proc(proto_state: ^ProtoState, dst, src_map: int) {
@@ -298,6 +322,34 @@ emit_index_set :: proc(proto_state: ^ProtoState, container, key, src: int) {
     record_slots(proto_state, container, key, src)
 
     inst := u32(InstABC{ op= .INDEX_SET, a= u8(container), b= u8(key), c= u8(src) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_array_get_const :: proc(proto_state: ^ProtoState, dst, array_slot, const_idx: int) {
+    record_slots(proto_state, dst, array_slot)
+
+    inst := u32(InstABC{ op= .ARRAY_GET_CONST, a= u8(dst), b= u8(array_slot), c= u8(const_idx) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_array_set_const :: proc(proto_state: ^ProtoState, array_slot, const_idx, src: int) {
+    record_slots(proto_state, array_slot, src)
+
+    inst := u32(InstABC{ op= .ARRAY_SET_CONST, a= u8(array_slot), b= u8(const_idx), c= u8(src) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_map_get_const :: proc(proto_state: ^ProtoState, dst, map_slot, const_idx: int) {
+    record_slots(proto_state, dst, map_slot)
+
+    inst := u32(InstABC{ op= .MAP_GET_CONST, a= u8(dst), b= u8(map_slot), c= u8(const_idx) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_map_set_const :: proc(proto_state: ^ProtoState, map_slot, const_idx, src: int) {
+    record_slots(proto_state, map_slot, src)
+
+    inst := u32(InstABC{ op= .MAP_SET_CONST, a= u8(map_slot), b= u8(const_idx), c= u8(src) })
     append(&proto_state.bytecode, inst)
 }
 
@@ -342,6 +394,41 @@ emit_mod :: proc(proto_state: ^ProtoState, dst, lhs, rhs: int) {
     record_slots(proto_state, dst, lhs, rhs)
 
     inst := u32(InstABC{ op= .MOD, a= u8(dst), b= u8(lhs), c= u8(rhs) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_add_const :: proc(proto_state: ^ProtoState, dst, lhs, const_idx: int) {
+    record_slots(proto_state, dst, lhs)
+
+    inst := u32(InstABC{ op= .ADD_CONST, a= u8(dst), b= u8(lhs), c= u8(const_idx) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_sub_const :: proc(proto_state: ^ProtoState, dst, lhs, const_idx: int) {
+    record_slots(proto_state, dst, lhs)
+
+    inst := u32(InstABC{ op= .SUB_CONST, a= u8(dst), b= u8(lhs), c= u8(const_idx) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_mul_const :: proc(proto_state: ^ProtoState, dst, lhs, const_idx: int) {
+    record_slots(proto_state, dst, lhs)
+
+    inst := u32(InstABC{ op= .MUL_CONST, a= u8(dst), b= u8(lhs), c= u8(const_idx) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_div_const :: proc(proto_state: ^ProtoState, dst, lhs, const_idx: int) {
+    record_slots(proto_state, dst, lhs)
+
+    inst := u32(InstABC{ op= .DIV_CONST, a= u8(dst), b= u8(lhs), c= u8(const_idx) })
+    append(&proto_state.bytecode, inst)
+}
+
+emit_mod_const :: proc(proto_state: ^ProtoState, dst, lhs, const_idx: int) {
+    record_slots(proto_state, dst, lhs)
+
+    inst := u32(InstABC{ op= .MOD_CONST, a= u8(dst), b= u8(lhs), c= u8(const_idx) })
     append(&proto_state.bytecode, inst)
 }
 

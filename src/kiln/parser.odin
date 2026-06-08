@@ -48,6 +48,16 @@ ExprIndex :: struct {
     key_slot:       int,
 }
 
+ExprArrayIndexConst :: struct {
+    array_slot: int,
+    key_const:  int,
+}
+
+ExprMapIndexConst :: struct {
+    map_slot:   int,
+    key_const:  int,
+}
+
 ExprDesc :: union {
     ExprInvalid,
     ExprNil,
@@ -64,6 +74,8 @@ ExprDesc :: union {
     ExprSlot,
     ExprCall,
     ExprIndex,
+    ExprArrayIndexConst,
+    ExprMapIndexConst,
 }
 
 // Token cursor ===================================================================================
@@ -379,6 +391,12 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
     case ExprIndex:
         emit_index_get(proto_state, dst_slot, desc.container_slot, desc.key_slot)
 
+    case ExprArrayIndexConst:
+        emit_array_get_const(proto_state, dst_slot, desc.array_slot, desc.key_const)
+
+    case ExprMapIndexConst:
+        emit_map_get_const(proto_state, dst_slot, desc.map_slot, desc.key_const)
+
     }
 }
 
@@ -417,6 +435,20 @@ expr_read_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
         emit_index_get(proto_state, dst_slot, desc.container_slot, desc.key_slot)
         return dst_slot
 
+    case ExprArrayIndexConst:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_array_get_const(proto_state, dst_slot, desc.array_slot, desc.key_const)
+        return dst_slot
+
+    case ExprMapIndexConst:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_map_get_const(proto_state, dst_slot, desc.map_slot, desc.key_const)
+        return dst_slot
+
     case:
         dst_slot := claim_temp_slot(proto_state)
         if Parser.failed { return 0 }
@@ -445,6 +477,20 @@ expr_writable_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
         emit_index_get(proto_state, dst_slot, desc.container_slot, desc.key_slot)
         return dst_slot
 
+    case ExprArrayIndexConst:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_array_get_const(proto_state, dst_slot, desc.array_slot, desc.key_const)
+        return dst_slot
+
+    case ExprMapIndexConst:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_map_get_const(proto_state, dst_slot, desc.map_slot, desc.key_const)
+        return dst_slot
+
     case:
         dst_slot := claim_temp_slot(proto_state)
         if Parser.failed { return 0 }
@@ -464,7 +510,8 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     array_slot := claim_temp_slot(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    emit_new_array(proto_state, array_slot)
+    new_array_inst := emit_new_array(proto_state, array_slot, 0)
+    element_count := 0
 
     if Parser.current_token.kind != .RIGHT_BRACKET {
         for {
@@ -475,6 +522,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             if Parser.failed { return ExprInvalid{} }
 
             emit_array_push(proto_state, array_slot, value_slot)
+            element_count += 1
 
             // Element temps are dead after push; keep the array itself.
             proto_state.next_temp_slot = array_slot + 1
@@ -494,6 +542,10 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after array literal")
     if Parser.failed { return ExprInvalid{} }
 
+    if element_count < 65536 {
+        patch_new_array_capacity(proto_state, new_array_inst, element_count)
+    }
+
     return ExprSlot(array_slot)
 }
 
@@ -508,7 +560,8 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     map_slot := claim_temp_slot(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    emit_new_map(proto_state, map_slot)
+    new_map_inst := emit_new_map(proto_state, map_slot, 0)
+    entry_count := 0
 
     key_texts := make([dynamic]string)
     defer delete(key_texts)
@@ -560,13 +613,8 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             consume_token(proto_state, .COLON, "map entry invalid; expected ':' after map key")
             if Parser.failed { return ExprInvalid{} }
 
-            key_slot := claim_temp_slot(proto_state)
-            if Parser.failed { return ExprInvalid{} }
-
             key_const := const_string(proto_state, key_text)
             if Parser.failed { return ExprInvalid{} }
-
-            emit_load_const(proto_state, key_slot, key_const)
 
             value_token := Parser.current_token
             if value_token.kind == .NIL {
@@ -574,13 +622,30 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 return ExprInvalid{}
             }
 
-            value_expr := parse_expr(proto_state)
-            if Parser.failed { return ExprInvalid{} }
+            if key_const < 256 {
+                value_expr := parse_expr(proto_state)
+                if Parser.failed { return ExprInvalid{} }
 
-            value_slot := expr_read_slot(proto_state, value_expr)
-            if Parser.failed { return ExprInvalid{} }
+                value_slot := expr_read_slot(proto_state, value_expr)
+                if Parser.failed { return ExprInvalid{} }
 
-            emit_index_set(proto_state, map_slot, key_slot, value_slot)
+                emit_map_set_const(proto_state, map_slot, key_const, value_slot)
+            } else {
+                key_slot := claim_temp_slot(proto_state)
+                if Parser.failed { return ExprInvalid{} }
+
+                emit_load_const(proto_state, key_slot, key_const)
+
+                value_expr := parse_expr(proto_state)
+                if Parser.failed { return ExprInvalid{} }
+
+                value_slot := expr_read_slot(proto_state, value_expr)
+                if Parser.failed { return ExprInvalid{} }
+
+                emit_index_set(proto_state, map_slot, key_slot, value_slot)
+            }
+
+            entry_count += 1
 
             // Key/value temps are dead after set; keep the map itself.
             proto_state.next_temp_slot = map_slot + 1
@@ -595,6 +660,10 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 break
             }
         }
+    }
+
+    if entry_count < 65536 {
+        patch_new_map_capacity(proto_state, new_map_inst, entry_count)
     }
 
     if Parser.current_token.kind != .RIGHT_BRACE {
@@ -723,7 +792,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     // Preserve evaluation order:
     //   1. materialize/read the container
     //   2. evaluate the key expression
-    //   3. materialize/read the key
+    //   3. either use a const-pool key directly (literal) or materialize/read the key
     //
     // INDEX_GET / INDEX_SET can read container/key from any slots, so locals and
     // already-materialized temps do not need fake MOVE copies.
@@ -736,13 +805,33 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     key_expr := parse_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
+    consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after index expression")
+    if Parser.failed { return ExprInvalid{} }
+
+    // If the key expression is an i64 or string literal, encode it as a typed
+    // const-pool reference to skip a LOAD_CONST + INDEX_GET/INDEX_SET pair.
+    #partial switch key in key_expr {
+    case i64:
+        key_const := const_int(proto_state, key)
+        if Parser.failed { return ExprInvalid{} }
+
+        if key_const < 256 {
+            return ExprArrayIndexConst{container_slot, key_const}
+        }
+
+    case string:
+        key_const := const_string(proto_state, key)
+        if Parser.failed { return ExprInvalid{} }
+
+        if key_const < 256 {
+            return ExprMapIndexConst{container_slot, key_const}
+        }
+    }
+
     key_slot := expr_read_slot(proto_state, key_expr)
     if Parser.failed { return ExprInvalid{} }
 
     reserve_slots_until(proto_state, key_slot + 1)
-    if Parser.failed { return ExprInvalid{} }
-
-    consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after index expression")
     if Parser.failed { return ExprInvalid{} }
 
     return ExprIndex{container_slot, key_slot}
@@ -894,6 +983,25 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return parse_primary_expr(proto_state)
 }
 
+// const_index_from_numeric_literal checks if an expression is a numeric literal
+// (i64 or f64) suitable for a const arithmetic opcode. Returns the const pool index
+// and true if the literal fits in 8-bit C field (< 256).
+const_index_from_numeric_literal :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> (int, bool) {
+    #partial switch v in expr {
+    case i64:
+        idx := const_int(proto_state, v)
+        if Parser.failed { return 0, false }
+        return idx, idx < 256
+
+    case f64:
+        idx := const_float(proto_state, v)
+        if Parser.failed { return 0, false }
+        return idx, idx < 256
+    }
+
+    return 0, false
+}
+
 // mulExpr = unaryExpr {mulOp unaryExpr}.
 parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     left := parse_unary_expr(proto_state)
@@ -912,18 +1020,28 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         right := parse_unary_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        rhs_slot := expr_read_slot(proto_state, right)
-        if Parser.failed { return ExprInvalid{} }
-
         result_slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        if op_token.kind == .STAR {
-            emit_mul(proto_state, result_slot, lhs_slot, rhs_slot)
-        } else if op_token.kind == .SLASH {
-            emit_div(proto_state, result_slot, lhs_slot, rhs_slot)
+        if rhs_const, rhs_ok := const_index_from_numeric_literal(proto_state, right); rhs_ok {
+            if op_token.kind == .STAR {
+                emit_mul_const(proto_state, result_slot, lhs_slot, rhs_const)
+            } else if op_token.kind == .SLASH {
+                emit_div_const(proto_state, result_slot, lhs_slot, rhs_const)
+            } else {
+                emit_mod_const(proto_state, result_slot, lhs_slot, rhs_const)
+            }
         } else {
-            emit_mod(proto_state, result_slot, lhs_slot, rhs_slot)
+            rhs_slot := expr_read_slot(proto_state, right)
+            if Parser.failed { return ExprInvalid{} }
+
+            if op_token.kind == .STAR {
+                emit_mul(proto_state, result_slot, lhs_slot, rhs_slot)
+            } else if op_token.kind == .SLASH {
+                emit_div(proto_state, result_slot, lhs_slot, rhs_slot)
+            } else {
+                emit_mod(proto_state, result_slot, lhs_slot, rhs_slot)
+            }
         }
 
         // Only the accumulated result remains live after the binary op.
@@ -954,18 +1072,29 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         right := parse_mul_expr(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        rhs_slot := expr_read_slot(proto_state, right)
-        if Parser.failed { return ExprInvalid{} }
-
         result_slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        if op_token.kind == .PLUS {
-            emit_add(proto_state, result_slot, lhs_slot, rhs_slot)
-        } else if op_token.kind == .MINUS {
-            emit_sub(proto_state, result_slot, lhs_slot, rhs_slot)
-        } else {
+        if op_token.kind == .CONCAT {
+            rhs_slot := expr_read_slot(proto_state, right)
+            if Parser.failed { return ExprInvalid{} }
+
             emit_concat(proto_state, result_slot, lhs_slot, rhs_slot)
+        } else if rhs_const, rhs_ok := const_index_from_numeric_literal(proto_state, right); rhs_ok {
+            if op_token.kind == .PLUS {
+                emit_add_const(proto_state, result_slot, lhs_slot, rhs_const)
+            } else {
+                emit_sub_const(proto_state, result_slot, lhs_slot, rhs_const)
+            }
+        } else {
+            rhs_slot := expr_read_slot(proto_state, right)
+            if Parser.failed { return ExprInvalid{} }
+
+            if op_token.kind == .PLUS {
+                emit_add(proto_state, result_slot, lhs_slot, rhs_slot)
+            } else {
+                emit_sub(proto_state, result_slot, lhs_slot, rhs_slot)
+            }
         }
 
         // Only the accumulated result remains live after the binary op.
@@ -2187,7 +2316,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
         return ExprGlobalBinding(global_index)
 
-    case ExprLocalBinding, ExprMainBinding, ExprModuleBinding, ExprGlobalBinding, ExprIndex:
+    case ExprLocalBinding, ExprMainBinding, ExprModuleBinding, ExprGlobalBinding, ExprIndex, ExprArrayIndexConst, ExprMapIndexConst:
         return target
 
     case ExprCall:
@@ -2229,6 +2358,12 @@ set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprD
 
     case ExprIndex:
         emit_index_set(proto_state, t.container_slot, t.key_slot, src_slot)
+
+    case ExprArrayIndexConst:
+        emit_array_set_const(proto_state, t.array_slot, t.key_const, src_slot)
+
+    case ExprMapIndexConst:
+        emit_map_set_const(proto_state, t.map_slot, t.key_const, src_slot)
 
     case:
         panic("assignment lowering reached non-assignable expression descriptor")
@@ -2351,24 +2486,56 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
         rhs_expr := parse_expr(proto_state)
         if Parser.failed { return }
 
-        rhs_slot := expr_read_slot(proto_state, rhs_expr)
-        if Parser.failed { return }
-
         #partial switch op_token.kind {
         case .PLUS_ASSIGN:
-            emit_add(proto_state, target_slot, target_slot, rhs_slot)
+            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
+                emit_add_const(proto_state, target_slot, target_slot, rhs_const)
+            } else {
+                rhs_slot := expr_read_slot(proto_state, rhs_expr)
+                if Parser.failed { return }
+
+                emit_add(proto_state, target_slot, target_slot, rhs_slot)
+            }
 
         case .MINUS_ASSIGN:
-            emit_sub(proto_state, target_slot, target_slot, rhs_slot)
+            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
+                emit_sub_const(proto_state, target_slot, target_slot, rhs_const)
+            } else {
+                rhs_slot := expr_read_slot(proto_state, rhs_expr)
+                if Parser.failed { return }
+
+                emit_sub(proto_state, target_slot, target_slot, rhs_slot)
+            }
 
         case .STAR_ASSIGN:
-            emit_mul(proto_state, target_slot, target_slot, rhs_slot)
+            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
+                emit_mul_const(proto_state, target_slot, target_slot, rhs_const)
+            } else {
+                rhs_slot := expr_read_slot(proto_state, rhs_expr)
+                if Parser.failed { return }
+
+                emit_mul(proto_state, target_slot, target_slot, rhs_slot)
+            }
 
         case .SLASH_ASSIGN:
-            emit_div(proto_state, target_slot, target_slot, rhs_slot)
+            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
+                emit_div_const(proto_state, target_slot, target_slot, rhs_const)
+            } else {
+                rhs_slot := expr_read_slot(proto_state, rhs_expr)
+                if Parser.failed { return }
+
+                emit_div(proto_state, target_slot, target_slot, rhs_slot)
+            }
 
         case .MOD_ASSIGN:
-            emit_mod(proto_state, target_slot, target_slot, rhs_slot)
+            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
+                emit_mod_const(proto_state, target_slot, target_slot, rhs_const)
+            } else {
+                rhs_slot := expr_read_slot(proto_state, rhs_expr)
+                if Parser.failed { return }
+
+                emit_mod(proto_state, target_slot, target_slot, rhs_slot)
+            }
 
         case:
             panic("compound assignment reached non-compound operator")
@@ -2391,24 +2558,47 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     rhs_expr := parse_expr(proto_state)
     if Parser.failed { return }
 
-    lower_expr_desc(proto_state, rhs_expr, rhs_slot)
-    if Parser.failed { return }
+    rhs_const, rhs_is_const := const_index_from_numeric_literal(proto_state, rhs_expr)
+    if !rhs_is_const {
+        lower_expr_desc(proto_state, rhs_expr, rhs_slot)
+        if Parser.failed { return }
+    }
 
     #partial switch op_token.kind {
     case .PLUS_ASSIGN:
-        emit_add(proto_state, value_slot, value_slot, rhs_slot)
+        if rhs_is_const {
+            emit_add_const(proto_state, value_slot, value_slot, rhs_const)
+        } else {
+            emit_add(proto_state, value_slot, value_slot, rhs_slot)
+        }
 
     case .MINUS_ASSIGN:
-        emit_sub(proto_state, value_slot, value_slot, rhs_slot)
+        if rhs_is_const {
+            emit_sub_const(proto_state, value_slot, value_slot, rhs_const)
+        } else {
+            emit_sub(proto_state, value_slot, value_slot, rhs_slot)
+        }
 
     case .STAR_ASSIGN:
-        emit_mul(proto_state, value_slot, value_slot, rhs_slot)
+        if rhs_is_const {
+            emit_mul_const(proto_state, value_slot, value_slot, rhs_const)
+        } else {
+            emit_mul(proto_state, value_slot, value_slot, rhs_slot)
+        }
 
     case .SLASH_ASSIGN:
-        emit_div(proto_state, value_slot, value_slot, rhs_slot)
+        if rhs_is_const {
+            emit_div_const(proto_state, value_slot, value_slot, rhs_const)
+        } else {
+            emit_div(proto_state, value_slot, value_slot, rhs_slot)
+        }
 
     case .MOD_ASSIGN:
-        emit_mod(proto_state, value_slot, value_slot, rhs_slot)
+        if rhs_is_const {
+            emit_mod_const(proto_state, value_slot, value_slot, rhs_const)
+        } else {
+            emit_mod(proto_state, value_slot, value_slot, rhs_slot)
+        }
 
     case:
         panic("compound assignment reached non-compound operator")
@@ -2630,7 +2820,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
         #partial switch target in targets[0] {
         case ExprUnresolvedBinding:
             parser_error(proto_state, lhs_tokens[0], fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
-        case ExprIndex:
+        case ExprIndex, ExprArrayIndexConst, ExprMapIndexConst:
             parser_error(proto_state, lhs_tokens[0], fmt.tprintf("indexed expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)))
         case:
             parser_error(proto_state, lhs_tokens[0], fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))

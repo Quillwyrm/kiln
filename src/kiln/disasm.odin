@@ -14,6 +14,22 @@ disasm_value_text :: proc(value: Value) -> string {
     return value_to_string(value)
 }
 
+DISASM_OPCODE_WIDTH :: 19
+
+disasm_append_inst :: proc(parts: ^[dynamic]string, ip: int, op_name, operands, comment: string) {
+    body := fmt.tprintf("        %04d    %s", ip, op_name)
+
+    for i := len(op_name); i < DISASM_OPCODE_WIDTH; i += 1 {
+        body = strings.concatenate({body, " "})
+    }
+
+    if operands != "" {
+        body = strings.concatenate({body, operands})
+    }
+
+    disasm_append_line(parts, body, comment)
+}
+
 disasm_append_line :: proc(parts: ^[dynamic]string, body, comment: string) {
     append(parts, body)
 
@@ -175,181 +191,235 @@ disasm_append_code :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto
         #partial switch op {
         case .LOAD_NIL:
             inst := InstAx(word)
-            body := fmt.tprintf("        %04d    LOAD_NIL         R%d", ip, inst.a)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d", inst.a)
+            disasm_append_inst(parts, ip, "LOAD_NIL", operands, "")
 
         case .LOAD_TRUE:
             inst := InstAx(word)
-            body := fmt.tprintf("        %04d    LOAD_TRUE        R%d", ip, inst.a)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d", inst.a)
+            disasm_append_inst(parts, ip, "LOAD_TRUE", operands, "")
 
         case .LOAD_FALSE:
             inst := InstAx(word)
-            body := fmt.tprintf("        %04d    LOAD_FALSE       R%d", ip, inst.a)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d", inst.a)
+            disasm_append_inst(parts, ip, "LOAD_FALSE", operands, "")
 
         case .LOAD_CONST:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    LOAD_CONST       R%d, C%d", ip, inst.a, inst.b)
+            operands := fmt.tprintf("R%d, C%d", inst.a, inst.b)
             comment := disasm_value_text(proto.const_pool[int(inst.b)])
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "LOAD_CONST", operands, comment)
 
         case .LOAD_FUNC:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    LOAD_FUNC        R%d, P%d", ip, inst.a, inst.b)
+            operands := fmt.tprintf("R%d, P%d", inst.a, inst.b)
             comment := proto.child_protos[int(inst.b)].name
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "LOAD_FUNC", operands, comment)
 
         case .MOVE:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    MOVE             R%d, R%d", ip, inst.a, inst.b)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d", inst.a, inst.b)
+            disasm_append_inst(parts, ip, "MOVE", operands, "")
 
         case .NEW_ARRAY:
-            inst := InstAx(word)
-            body := fmt.tprintf("        %04d    NEW_ARRAY        R%d", ip, inst.a)
-            disasm_append_line(parts, body, "")
+            inst := InstABx(word)
+            operands := fmt.tprintf("R%d, %d", inst.a, inst.b)
+            disasm_append_inst(parts, ip, "NEW_ARRAY", operands, "")
 
         case .ARRAY_PUSH:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    ARRAY_PUSH       R%d, R%d", ip, inst.a, inst.b)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d", inst.a, inst.b)
+            disasm_append_inst(parts, ip, "ARRAY_PUSH", operands, "")
 
         case .NEW_MAP:
-            inst := InstAx(word)
-            body := fmt.tprintf("        %04d    NEW_MAP          R%d", ip, inst.a)
-            disasm_append_line(parts, body, "")
+            inst := InstABx(word)
+            operands := fmt.tprintf("R%d, %d", inst.a, inst.b)
+            disasm_append_inst(parts, ip, "NEW_MAP", operands, "")
 
         case .INDEX_GET:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    INDEX_GET        R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "INDEX_GET", operands, "")
 
         case .INDEX_SET:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    INDEX_SET        R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "INDEX_SET", operands, "")
+
+        case .ARRAY_GET_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "ARRAY_GET_CONST", operands, comment)
+
+        case .ARRAY_SET_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, C%d, R%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.b)])
+            disasm_append_inst(parts, ip, "ARRAY_SET_CONST", operands, comment)
+
+        case .MAP_GET_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "MAP_GET_CONST", operands, comment)
+
+        case .MAP_SET_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, C%d, R%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.b)])
+            disasm_append_inst(parts, ip, "MAP_SET_CONST", operands, comment)
 
         case .ADD:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    ADD              R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "ADD", operands, "")
 
         case .SUB:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    SUB              R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "SUB", operands, "")
 
         case .CONCAT:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    CONCAT           R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "CONCAT", operands, "")
 
         case .MUL:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    MUL              R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "MUL", operands, "")
 
         case .DIV:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    DIV              R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "DIV", operands, "")
 
         case .MOD:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    MOD              R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "MOD", operands, "")
+
+        case .ADD_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "ADD_CONST", operands, comment)
+
+        case .SUB_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "SUB_CONST", operands, comment)
+
+        case .MUL_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "MUL_CONST", operands, comment)
+
+        case .DIV_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "DIV_CONST", operands, comment)
+
+        case .MOD_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "MOD_CONST", operands, comment)
 
         case .NEG:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    NEG              R%d, R%d", ip, inst.a, inst.b)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d", inst.a, inst.b)
+            disasm_append_inst(parts, ip, "NEG", operands, "")
 
         case .EQUAL:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    EQUAL            R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "EQUAL", operands, "")
 
         case .LESS:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    LESS             R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "LESS", operands, "")
 
         case .LESS_OR_EQUAL:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    LESS_OR_EQUAL    R%d, R%d, R%d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "LESS_OR_EQUAL", operands, "")
 
         case .NOT:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    NOT              R%d, R%d", ip, inst.a, inst.b)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, R%d", inst.a, inst.b)
+            disasm_append_inst(parts, ip, "NOT", operands, "")
 
         case .JUMP:
             inst := InstJump(word)
             target_ip := ip + 1 + int(inst.offset)
-            body := fmt.tprintf("        %04d    JUMP             J%d", ip, label_for_ip[target_ip])
-            disasm_append_line(parts, body, fmt.tprintf("%+d", inst.offset))
+            operands := fmt.tprintf("J%d", label_for_ip[target_ip])
+            disasm_append_inst(parts, ip, "JUMP", operands, fmt.tprintf("%+d", inst.offset))
 
         case .JUMP_FALSE:
             inst := InstAsBx(word)
             target_ip := ip + 1 + int(inst.sb)
-            body := fmt.tprintf("        %04d    JUMP_FALSE       R%d, J%d", ip, inst.a, label_for_ip[target_ip])
-            disasm_append_line(parts, body, fmt.tprintf("%+d", inst.sb))
+            operands := fmt.tprintf("R%d, J%d", inst.a, label_for_ip[target_ip])
+            disasm_append_inst(parts, ip, "JUMP_FALSE", operands, fmt.tprintf("%+d", inst.sb))
 
         case .JUMP_NOT_NIL:
             inst := InstAsBx(word)
             target_ip := ip + 1 + int(inst.sb)
-            body := fmt.tprintf("        %04d    JUMP_NOT_NIL     R%d, J%d", ip, inst.a, label_for_ip[target_ip])
-            disasm_append_line(parts, body, fmt.tprintf("%+d", inst.sb))
+            operands := fmt.tprintf("R%d, J%d", inst.a, label_for_ip[target_ip])
+            disasm_append_inst(parts, ip, "JUMP_NOT_NIL", operands, fmt.tprintf("%+d", inst.sb))
 
         case .CALL:
             inst := InstABC(word)
-            body := fmt.tprintf("        %04d    CALL             R%d, %d, %d", ip, inst.a, inst.b, inst.c)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, %d, %d", inst.a, inst.b, inst.c)
+            disasm_append_inst(parts, ip, "CALL", operands, "")
 
         case .RETURN:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    RETURN           R%d, %d", ip, inst.a, inst.b)
-            disasm_append_line(parts, body, "")
+            operands := fmt.tprintf("R%d, %d", inst.a, inst.b)
+            disasm_append_inst(parts, ip, "RETURN", operands, "")
 
         case .GET_MAIN_BIND:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    GET_MAIN_BIND    R%d, B%d", ip, inst.a, inst.b)
+            operands := fmt.tprintf("R%d, B%d", inst.a, inst.b)
             comment := state.main_env.names[int(inst.b)]
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "GET_MAIN_BIND", operands, comment)
 
         case .SET_MAIN_BIND:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    SET_MAIN_BIND    R%d, B%d", ip, inst.a, inst.b)
+            operands := fmt.tprintf("R%d, B%d", inst.a, inst.b)
             comment := state.main_env.names[int(inst.b)]
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "SET_MAIN_BIND", operands, comment)
 
         case .GET_MODULE_BIND:
             inst := InstABC(word)
             module_env := &state.module_envs[int(inst.b)]
-            body := fmt.tprintf("        %04d    GET_MODULE_BIND  R%d, M%d.B%d", ip, inst.a, inst.b, inst.c)
+            operands := fmt.tprintf("R%d, M%d.B%d", inst.a, inst.b, inst.c)
             comment := fmt.tprintf("%s.%s", state.module_ids[int(inst.b)], module_env.names[int(inst.c)])
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "GET_MODULE_BIND", operands, comment)
 
         case .SET_MODULE_BIND:
             inst := InstABC(word)
             module_env := &state.module_envs[int(inst.b)]
-            body := fmt.tprintf("        %04d    SET_MODULE_BIND  R%d, M%d.B%d", ip, inst.a, inst.b, inst.c)
+            operands := fmt.tprintf("R%d, M%d.B%d", inst.a, inst.b, inst.c)
             comment := fmt.tprintf("%s.%s", state.module_ids[int(inst.b)], module_env.names[int(inst.c)])
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "SET_MODULE_BIND", operands, comment)
 
         case .GET_GLOBAL_BIND:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    GET_GLOBAL_BIND  R%d, G%d", ip, inst.a, inst.b)
+            operands := fmt.tprintf("R%d, G%d", inst.a, inst.b)
             comment := state.global_env.names[int(inst.b)]
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "GET_GLOBAL_BIND", operands, comment)
 
         case .SET_GLOBAL_BIND:
             inst := InstABx(word)
-            body := fmt.tprintf("        %04d    SET_GLOBAL_BIND  R%d, G%d", ip, inst.a, inst.b)
+            operands := fmt.tprintf("R%d, G%d", inst.a, inst.b)
             comment := state.global_env.names[int(inst.b)]
-            disasm_append_line(parts, body, comment)
+            disasm_append_inst(parts, ip, "SET_GLOBAL_BIND", operands, comment)
         }
     }
 }
