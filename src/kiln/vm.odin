@@ -403,18 +403,24 @@ NativeFunctionObject :: struct {
 
 MAX_BINDINGS :: 256 // binding operands use u8 binding indexes
 
+BindingFlag :: enum u8 {
+    MUTABLE,
+    EXPORTED,
+}
+
+BindingFlags :: bit_set[BindingFlag; u8]
+
 // BindingEnv is one fixed-size named value namespace.
-// Entries occupy 0..<count. names[i], values[i], is_mutable[i], and is_exported[i]
-// describe the same binding. Bytecode stores i and indexes the array directly.
+// Entries occupy 0..<count. names[i], values[i], and flags[i] describe the same binding.
+// Bytecode stores i and indexes the arrays directly.
 // Bindings are appended and never removed, so their indexes remain stable.
-// is_exported controls namespace visibility for module/core envs (ignored for global/env 0).
+// flags[i] stores per-binding policy bits such as mutability and namespace export visibility.
 BindingEnv :: struct {
-    id:          string,
-    names:       [MAX_BINDINGS]string,
-    values:      [MAX_BINDINGS]Value,
-    is_mutable:  [MAX_BINDINGS]bool,
-    is_exported: [MAX_BINDINGS]bool,
-    count:       int,
+    id:     string,
+    names:  [MAX_BINDINGS]string,
+    values: [MAX_BINDINGS]Value,
+    flags:  [MAX_BINDINGS]BindingFlags,
+    count:  int,
 }
 
 
@@ -469,7 +475,7 @@ State :: struct {
     loading_env_indexes: [MAX_ENVS]int,
     loading_env_count:   int,
 
-    // Global/environment for builtins. is_exported is ignored here.
+    // Global environment for builtins. Export flags are ignored here.
     global_env: BindingEnv,
 
     // Raw invocation argv chosen by the host, plus the first user script arg index.
@@ -499,8 +505,12 @@ binding_env_find :: proc(env: ^BindingEnv, name: string) -> int {
 binding_env_append :: proc(env: ^BindingEnv, name: string, is_mutable: bool) -> int {
     binding_index := env.count
     env.names[env.count] = strings.clone(name)
-    env.is_mutable[env.count] = is_mutable
-    env.is_exported[env.count] = false
+    env.flags[env.count] = {}
+
+    if is_mutable {
+        env.flags[env.count] += {.MUTABLE}
+    }
+
     env.count += 1
     return binding_index
 }
@@ -523,7 +533,7 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
         binding_index = binding_env_append(&Active_State.global_env, name, false)
     }
-    Active_State.global_env.is_mutable[binding_index] = false
+    Active_State.global_env.flags[binding_index] -= {.MUTABLE}
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION
@@ -571,8 +581,8 @@ bind_env_native_function :: proc(env_index: int, name: string, native_proc: Nati
 
         binding_index = binding_env_append(env, name, false)
     }
-    env.is_mutable[binding_index] = false
-    env.is_exported[binding_index] = true
+    env.flags[binding_index] -= {.MUTABLE}
+    env.flags[binding_index] += {.EXPORTED}
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION

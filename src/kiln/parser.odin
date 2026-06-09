@@ -893,7 +893,7 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
         return ExprInvalid{}
     }
 
-    if !env.is_exported[binding_index] {
+    if !(.EXPORTED in env.flags[binding_index]) {
         parser_error(proto_state, member_token, fmt.tprintf("module `%s` does not export binding `%s`", namespace_name, member_name))
         return ExprInvalid{}
     }
@@ -1703,7 +1703,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
 
     if Parser.current_token.kind != .LEFT_BRACE {
         for binding_index := 0; binding_index < env.count; binding_index += 1 {
-            env.is_exported[binding_index] = true
+            env.flags[binding_index] += {.EXPORTED}
         }
         return
     }
@@ -1763,7 +1763,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
 
     for export_index := 0; export_index < export_count; export_index += 1 {
         binding_index := export_binding_indexes[export_index]
-        env.is_exported[binding_index] = true
+        env.flags[binding_index] += {.EXPORTED}
     }
 }
 
@@ -2290,7 +2290,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
         env := &Active_State.envs[proto_state.env_index]
         binding_index := binding_env_find(env, ident_text)
         if binding_index >= 0 {
-            if !env.is_mutable[binding_index] {
+            if !(.MUTABLE in env.flags[binding_index]) {
                 parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
                 return ExprInvalid{}
             }
@@ -2314,7 +2314,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
             return ExprInvalid{}
         }
 
-        if !Active_State.global_env.is_mutable[global_index] {
+        if !(.MUTABLE in Active_State.global_env.flags[global_index]) {
             parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
             return ExprInvalid{}
         }
@@ -2330,11 +2330,11 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
     case ExprImportedBinding:
         env := &Active_State.envs[t.env_index]
-        if !env.is_exported[t.binding_index] {
+        if !(.EXPORTED in env.flags[t.binding_index]) {
             parser_error(proto_state, source_token, fmt.tprintf("module does not export binding `%s`", env.names[t.binding_index]))
             return ExprInvalid{}
         }
-        if !env.is_mutable[t.binding_index] {
+        if !(.MUTABLE in env.flags[t.binding_index]) {
             parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", env.names[t.binding_index]))
             return ExprInvalid{}
         }
