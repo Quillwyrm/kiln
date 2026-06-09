@@ -30,6 +30,7 @@ ExprMainBinding       :: distinct int
 ExprGlobalBinding     :: distinct int
 ExprModuleBinding     :: distinct int
 ExprSlot              :: distinct int
+ExprMergeSlot         :: distinct int
 
 // Main/module bindings are bare current-file top-level bindings.
 // Imported bindings are exported bindings accessed through a namespace.
@@ -58,21 +59,33 @@ ExprMapIndexConst :: struct {
     key_const:  int,
 }
 
+// Parser/lowering handles. These are not all runtime values.
 ExprDesc :: union {
-    ExprInvalid,
+    ExprInvalid, // parse failed; Parser.failed already owns the real error
     ExprNil,
+
     bool,
     i64,
     f64,
     string,
+
+    // Binding references. Context decides whether to read, write, or reject.
     ExprUnresolvedBinding,
     ExprLocalBinding,
     ExprMainBinding,
     ExprGlobalBinding,
     ExprModuleBinding,
     ExprImportedBinding,
+
+    // Materialized slots. ExprMergeSlot is a control-flow merge result from
+    // `and`, `or`, or fallback `else`; lower it with MOVE only, never retarget.
     ExprSlot,
+    ExprMergeSlot,
+
+    // Call already emitted; result count may still be adjusted by context.
     ExprCall,
+
+    // Deferred indexed access. Context decides read vs write.
     ExprIndex,
     ExprArrayIndexConst,
     ExprMapIndexConst,
@@ -387,6 +400,12 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
             emit_move(proto_state, dst_slot, src_slot)
         }
 
+    case ExprMergeSlot:
+        src_slot := int(desc)
+        if src_slot != dst_slot {
+            emit_move(proto_state, dst_slot, src_slot)
+        }
+
     case ExprCall:
         set_call_requested_results(proto_state, desc.call_index, 1)
         if desc.base_slot != dst_slot {
@@ -414,6 +433,9 @@ expr_read_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
         return int(desc)
 
     case ExprSlot:
+        return int(desc)
+
+    case ExprMergeSlot:
         return int(desc)
 
     case ExprCall:
@@ -1220,11 +1242,12 @@ parse_and_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the accumulated bool result remains live after the logical op.
         proto_state.next_temp_slot = result_slot + 1
-        left = ExprSlot(result_slot)
+        left = ExprMergeSlot(result_slot)
     }
 
     return left
 }
+
 
 // orExpr = andExpr {"or" andExpr}.
 parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
@@ -1274,11 +1297,12 @@ parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the accumulated bool result remains live after the logical op.
         proto_state.next_temp_slot = result_slot + 1
-        left = ExprSlot(result_slot)
+        left = ExprMergeSlot(result_slot)
     }
 
     return left
 }
+
 
 // fallbackExpr = orExpr ["else" fallbackExpr].
 parse_fallback_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
@@ -1286,6 +1310,20 @@ parse_fallback_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.failed { return ExprInvalid{} }
 
     if Parser.current_token.kind == .ELSE {
+        saved_index := Scanner.index
+        saved_token_start := Scanner.token_start
+        saved_failed := Scanner.failed
+
+        next_token := scan_next_token()
+
+        Scanner.index = saved_index
+        Scanner.token_start = saved_token_start
+        Scanner.failed = saved_failed
+
+        if next_token.kind == .COLON {
+            return left
+        }
+
         advance_token()
         if Parser.failed { return ExprInvalid{} }
 
@@ -1308,11 +1346,12 @@ parse_fallback_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
         // Only the fallback result remains live after the nil test.
         proto_state.next_temp_slot = result_slot + 1
-        return ExprSlot(result_slot)
+        return ExprMergeSlot(result_slot)
     }
 
     return left
 }
+
 
 // expr = fallbackExpr.
 parse_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
@@ -1375,15 +1414,24 @@ finish_expr_list_to_slots :: proc(proto_state: ^ProtoState, base_slot: int, expr
 
     call_expr, final_is_call := last_expr.(ExprCall)
     if final_is_call {
-        if call_expr.base_slot != last_dst {
-            panic("call result base does not match expression-list destination")
-        }
-
         set_call_requested_results(proto_state, call_expr.call_index, wanted_from_last)
         if Parser.failed { return }
 
-        if wanted_from_last > 1 {
-            record_slots(proto_state, last_dst + wanted_from_last - 1)
+        if call_expr.base_slot == last_dst {
+            if wanted_from_last > 1 {
+                record_slots(proto_state, last_dst + wanted_from_last - 1)
+            }
+            return
+        }
+
+        if last_dst < call_expr.base_slot {
+            for move_index := 0; move_index < wanted_from_last; move_index += 1 {
+                emit_move(proto_state, last_dst + move_index, call_expr.base_slot + move_index)
+            }
+        } else {
+            for move_index := wanted_from_last - 1; move_index >= 0; move_index -= 1 {
+                emit_move(proto_state, last_dst + move_index, call_expr.base_slot + move_index)
+            }
         }
 
         return
