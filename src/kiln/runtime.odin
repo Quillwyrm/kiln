@@ -2,12 +2,15 @@ package kiln
 
 import "core:fmt"
 import "core:os"
+import filepath "core:path/filepath"
 
 
 // Runtime entry points ===========================================================================
 
 new_state :: proc() -> ^State {
-    return new(State)
+    state := new(State)
+    state.env_count = 1
+    return state
 }
 
 // Heap objects and cloned compile/runtime strings are not walked yet.
@@ -44,18 +47,26 @@ run_source :: proc(state: ^State, source, source_name: string) -> (Value, ^Error
 }
 
 // run_file loads source text from disk and forwards to run_source.
-// File read errors use line=0, column=0 because no source location exists yet.
+// The path is resolved to canonical form so envs[0].id matches import resolution.
 run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
     Active_State = state
 
-    source_bytes, read_error := os.read_entire_file(path, context.allocator)
-    if read_error != nil {
+    resolved_path, abs_err := filepath.abs(path, context.allocator)
+    if abs_err != nil {
         result := Value{}
         location := SourceLocation{source_name = path, line = 0, column = 0}
-        return result, set_error(location, fmt.tprintf("failed to read '%s'", path))
+        return result, set_error(location, fmt.tprintf("failed to resolve path '%s'", path))
+    }
+    defer delete(resolved_path)
+
+    source_bytes, read_error := os.read_entire_file(resolved_path, context.allocator)
+    if read_error != nil {
+        result := Value{}
+        location := SourceLocation{source_name = resolved_path, line = 0, column = 0}
+        return result, set_error(location, fmt.tprintf("failed to read '%s'", resolved_path))
     }
     defer delete(source_bytes)
-    return run_source(state, string(source_bytes), path)
+    return run_source(state, string(source_bytes), resolved_path)
 }
 
 

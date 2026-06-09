@@ -67,13 +67,13 @@ Opcode :: enum u8 {
     CALL,          // ABC: A=callee/result base, B=arg_count, C=requested_results
     RETURN,        // ABx: A=first_return, B=produced_results
 
-    // Main Bindings
-    GET_MAIN_BIND,   // ABx: A=dst, B=binding_index
-    SET_MAIN_BIND,   // ABx: A=src, B=binding_index
+    // File Bindings
+    GET_FILE_BIND,   // ABx: A=dst, B=binding_index
+    SET_FILE_BIND,   // ABx: A=src, B=binding_index
 
     // Module Bindings
-    GET_MODULE_BIND, // ABC: A=dst, B=module_index, C=binding_index
-    SET_MODULE_BIND, // ABC: A=src, B=module_index, C=binding_index
+    GET_MODULE_BIND, // ABC: A=dst, B=env_index, C=binding_index
+    SET_MODULE_BIND, // ABC: A=src, B=env_index, C=binding_index
 
     // Global Bindings
     GET_GLOBAL_BIND, // ABx: A=dst, B=binding_index
@@ -369,11 +369,11 @@ Proto :: struct {
     // Source identity used by runtime diagnostics.
     origin:    SourceLocation,
     name:      string,
-    is_module: bool,
 
     // Execution shape.
     frame_slot_count: int,
     param_count:      int,
+    env_index:        int,
 
     // Compiled data.
     bytecode:     []u32,
@@ -399,19 +399,22 @@ NativeFunctionObject :: struct {
 }
 
 
-// Binding tables ================================================================================
+// Binding environments ===========================================================================
 
-MAX_BINDINGS :: 256 // module binding operands use u8 binding indexes
+MAX_BINDINGS :: 256 // binding operands use u8 binding indexes
 
-// BindingTable is one fixed-size named value namespace.
-// Entries occupy 0..<count. names[i], values[i], and is_mutable[i] describe
-// the same binding. Bytecode stores i and indexes the table directly.
+// BindingEnv is one fixed-size named value namespace.
+// Entries occupy 0..<count. names[i], values[i], is_mutable[i], and is_exported[i]
+// describe the same binding. Bytecode stores i and indexes the array directly.
 // Bindings are appended and never removed, so their indexes remain stable.
-BindingTable :: struct {
-    names:      [MAX_BINDINGS]string,
-    values:     [MAX_BINDINGS]Value,
-    is_mutable: [MAX_BINDINGS]bool,
-    count:      int,
+// is_exported controls namespace visibility for module/core envs (ignored for global/env 0).
+BindingEnv :: struct {
+    id:          string,
+    names:       [MAX_BINDINGS]string,
+    values:      [MAX_BINDINGS]Value,
+    is_mutable:  [MAX_BINDINGS]bool,
+    is_exported: [MAX_BINDINGS]bool,
+    count:       int,
 }
 
 
@@ -441,7 +444,7 @@ CallFrame :: struct {
 // VM state =======================================================================================
 MAX_VM_SLOTS :: 4096
 MAX_CALL_FRAMES :: 256
-MAX_MODULES :: 256 // module binding operands use u8 module indexes
+MAX_ENVS :: 256 // env binding operands use u8 env indexes
 
 // State is one host-owned Kiln runtime instance.
 State :: struct {
@@ -458,35 +461,32 @@ State :: struct {
     frame_stack: [MAX_CALL_FRAMES]CallFrame,
     frame_count: int,
 
-    // Program binding environments.
-    main_env:   BindingTable,
-    global_env: BindingTable,
+    // Binding environments. envs[0] is the entry file. envs[1..] are imported and core modules.
+    envs:        [MAX_ENVS]BindingEnv,
+    env_count:   int,
+
+    // Import-chain stack for cycle detection. Indices in envs[0..<env_count].
+    loading_env_indexes: [MAX_ENVS]int,
+    loading_env_count:   int,
+
+    // Global/environment for builtins. is_exported is ignored here.
+    global_env: BindingEnv,
 
     // Raw invocation argv chosen by the host, plus the first user script arg index.
     argv:       []string,
     args_start: int,
-
-    // Loaded-module cache. One module index addresses every parallel array.
-    // Core module ids are host names; source module ids are resolved absolute paths.
-    // Module environments hold all bindings; module_exports controls outside visibility.
-    // An id with module_loading=true means the source module is in the active import chain.
-    module_ids:       [MAX_MODULES]string,
-    module_envs:      [MAX_MODULES]BindingTable,
-    module_exports:   [MAX_MODULES][MAX_BINDINGS]bool,
-    module_loading:   [MAX_MODULES]bool,
-    module_count:     int,
 }
 
 // Active_State is the host-selected State used by compiler and runtime internals.
 Active_State: ^State
 
 
-// Binding table primitives =======================================================================
+// Binding env primitives ==========================================================================
 
-// binding_table_find returns the binding index for name, or -1 when name is absent.
-binding_table_find :: proc(table: ^BindingTable, name: string) -> int {
-    for binding_index := 0; binding_index < table.count; binding_index += 1 {
-        if table.names[binding_index] == name {
+// binding_env_find returns the binding index for name, or -1 when name is absent.
+binding_env_find :: proc(env: ^BindingEnv, name: string) -> int {
+    for binding_index := 0; binding_index < env.count; binding_index += 1 {
+        if env.names[binding_index] == name {
             return binding_index
         }
     }
@@ -494,13 +494,14 @@ binding_table_find :: proc(table: ^BindingTable, name: string) -> int {
     return -1
 }
 
-// binding_table_append appends a new binding. Caller owns duplicate-name and capacity policy.
+// binding_env_append appends a new binding. Caller owns duplicate-name and capacity policy.
 // Binding names are cloned because source module text can be freed after compile.
-binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: bool) -> int {
-    binding_index := table.count
-    table.names[table.count] = strings.clone(name)
-    table.is_mutable[table.count] = is_mutable
-    table.count += 1
+binding_env_append :: proc(env: ^BindingEnv, name: string, is_mutable: bool) -> int {
+    binding_index := env.count
+    env.names[env.count] = strings.clone(name)
+    env.is_mutable[env.count] = is_mutable
+    env.is_exported[env.count] = false
+    env.count += 1
     return binding_index
 }
 
@@ -510,7 +511,7 @@ binding_table_append :: proc(table: ^BindingTable, name: string, is_mutable: boo
 // Public host entry points select Active_State before these helpers run.
 
 bind_native_global :: proc(name: string, native_proc: NativeFunction) {
-    binding_index := binding_table_find(&Active_State.global_env, name)
+    binding_index := binding_env_find(&Active_State.global_env, name)
 
     if binding_index >= 0 {
         // Existing builtin binding is being refreshed during host setup.
@@ -520,7 +521,7 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
             return
         }
 
-        binding_index = binding_table_append(&Active_State.global_env, name, false)
+        binding_index = binding_env_append(&Active_State.global_env, name, false)
     }
     Active_State.global_env.is_mutable[binding_index] = false
 
@@ -531,53 +532,53 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     Active_State.global_env.values[binding_index] = Value(cast(^Object)native_function)
 }
 
-// Module bindings ================================================================================
+// Environment management ==========================================================================
 
-module_find :: proc(id: string) -> int {
-    for module_index := 0; module_index < Active_State.module_count; module_index += 1 {
-        if Active_State.module_ids[module_index] == id {
-            return module_index
+env_find :: proc(id: string) -> int {
+    for env_index := 0; env_index < Active_State.env_count; env_index += 1 {
+        if Active_State.envs[env_index].id == id {
+            return env_index
         }
     }
 
     return -1
 }
 
-// Returns the existing module index for id or appends a new stable module index.
-// Caller must ensure capacity before creating a new module.
-bind_module :: proc(id: string) -> int {
-    existing_index := module_find(id)
+// Returns the existing env index for id or appends a new stable env index.
+// Caller must ensure capacity before creating a new env.
+bind_env :: proc(id: string) -> int {
+    existing_index := env_find(id)
     if existing_index >= 0 {
         return existing_index
     }
 
-    module_index := Active_State.module_count
-    Active_State.module_ids[module_index] = strings.clone(id)
-    Active_State.module_count += 1
-    return module_index
+    env_index := Active_State.env_count
+    Active_State.envs[env_index].id = strings.clone(id)
+    Active_State.env_count += 1
+    return env_index
 }
 
 // Installs one immutable exported native function in an existing module environment.
-bind_module_native_function :: proc(module_index: int, name: string, native_proc: NativeFunction) {
-    table := &Active_State.module_envs[module_index]
-    binding_index := binding_table_find(table, name)
+bind_env_native_function :: proc(env_index: int, name: string, native_proc: NativeFunction) {
+    env := &Active_State.envs[env_index]
+    binding_index := binding_env_find(env, name)
 
     if binding_index < 0 {
-        if table.count >= MAX_BINDINGS {
-            set_error(SourceLocation{}, "too many native module bindings")
+        if env.count >= MAX_BINDINGS {
+            set_error(SourceLocation{}, "too many native env bindings")
             return
         }
 
-        binding_index = binding_table_append(table, name, false)
+        binding_index = binding_env_append(env, name, false)
     }
-    table.is_mutable[binding_index] = false
-    Active_State.module_exports[module_index][binding_index] = true
+    env.is_mutable[binding_index] = false
+    env.is_exported[binding_index] = true
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION
     native_function.impl = native_proc
 
-    table.values[binding_index] = Value(cast(^Object)native_function)
+    env.values[binding_index] = Value(cast(^Object)native_function)
 }
 
 
@@ -931,7 +932,7 @@ runtime_error :: proc(message: string) -> ^Error {
     // A one-frame run is file top-level execution. Deeper frames are user function calls.
     context_text := "in entry file"
     if Active_State.frame_count == 1 {
-        if proto.is_module {
+        if proto.env_index != 0 {
             context_text = "in module file"
         }
     } else {
@@ -969,6 +970,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
     const_pool := current_proto.const_pool
     child_protos := current_proto.child_protos
     slot_base := frame.slot_base
+    file_env := &state.envs[current_proto.env_index]
 
     for {
         // Fetch then advance pc.
@@ -1991,6 +1993,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 const_pool = current_proto.const_pool
                 child_protos = current_proto.child_protos
                 slot_base = frame.slot_base
+                file_env = &state.envs[current_proto.env_index]
 
             case .STRING, .ARRAY, .MAP:
                 frame.instruction_index = pc
@@ -1998,31 +2001,31 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 return Value{}, runtime_error(message)
             }
 
-        case .GET_MAIN_BIND:
+        case .GET_FILE_BIND:
             inst := InstABx(word)
             dst := slot_base + int(inst.a)
             binding_index := int(inst.b)
-            state.slots[dst] = state.main_env.values[binding_index]
+            state.slots[dst] = file_env.values[binding_index]
 
-        case .SET_MAIN_BIND:
+        case .SET_FILE_BIND:
             inst := InstABx(word)
             src := slot_base + int(inst.a)
             binding_index := int(inst.b)
-            state.main_env.values[binding_index] = state.slots[src]
+            file_env.values[binding_index] = state.slots[src]
 
         case .GET_MODULE_BIND:
             inst := InstABC(word)
             dst := slot_base + int(inst.a)
-            module_index := int(inst.b)
+            env_index := int(inst.b)
             binding_index := int(inst.c)
-            state.slots[dst] = state.module_envs[module_index].values[binding_index]
+            state.slots[dst] = state.envs[env_index].values[binding_index]
 
         case .SET_MODULE_BIND:
             inst := InstABC(word)
             src := slot_base + int(inst.a)
-            module_index := int(inst.b)
+            env_index := int(inst.b)
             binding_index := int(inst.c)
-            state.module_envs[module_index].values[binding_index] = state.slots[src]
+            state.envs[env_index].values[binding_index] = state.slots[src]
 
         case .GET_GLOBAL_BIND:
             inst := InstABx(word)
@@ -2094,6 +2097,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 const_pool = current_proto.const_pool
                 child_protos = current_proto.child_protos
                 slot_base = frame.slot_base
+                file_env = &state.envs[current_proto.env_index]
 
                 continue
             }
@@ -2127,6 +2131,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             const_pool = current_proto.const_pool
             child_protos = current_proto.child_protos
             slot_base = frame.slot_base
+            file_env = &state.envs[current_proto.env_index]
         }
     }
 }

@@ -17,12 +17,11 @@ LocalBinding :: struct {
 // begin_proto creates its dynamic arrays; end_proto or delete_proto_state releases them.
 ProtoState :: struct {
     // Proto identity and current-file compile context.
-    origin:         SourceLocation,
-    name:           string,
-    param_count:    int,
-    is_function:    bool,
-    is_module:      bool,
-    module_index:   int,
+    origin:       SourceLocation,
+    name:         string,
+    param_count:  int,
+    is_function:  bool,
+    env_index:    int,
 
     // Unfinished compiled output copied into Proto by end_proto.
     bytecode:     [dynamic]u32,
@@ -37,9 +36,9 @@ ProtoState :: struct {
     scope_local_marks: [dynamic]int,
 
     // Imported namespaces visible throughout this file and its child protos.
-    import_names:          [MAX_MODULES]string,
-    import_module_indexes: [MAX_MODULES]int,
-    import_count:          int,
+    import_names:        [MAX_ENVS]string,
+    import_env_indexes:  [MAX_ENVS]int,
+    import_count:        int,
 
     // Unresolved control-flow jumps owned by active loops.
     // Each break fixup is an unresolved jump instruction index.
@@ -64,12 +63,13 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
 
 // origin identifies where this proto originated for diagnostics.
 // name is cloned because it can come from source token text.
-begin_proto :: proc(origin: SourceLocation, name: string, param_count: int, is_function: bool) -> ProtoState {
+begin_proto :: proc(origin: SourceLocation, name: string, param_count: int, is_function: bool, env_index: int) -> ProtoState {
     return ProtoState{
         origin                  = origin,
         name                    = strings.clone(name),
         param_count             = param_count,
         is_function             = is_function,
+        env_index               = env_index,
         frame_slot_count        = param_count,
         bytecode                = make([dynamic]u32),
         const_pool              = make([dynamic]Value),
@@ -101,12 +101,12 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
     proto^ = Proto{
         origin           = proto_state.origin,
         name             = proto_state.name,
-        is_module        = proto_state.is_module,
         bytecode         = bytecode,
         const_pool       = const_pool,
         child_protos     = child_protos,
         frame_slot_count = proto_state.frame_slot_count,
         param_count      = proto_state.param_count,
+        env_index        = proto_state.env_index,
     }
 
     return proto
@@ -654,7 +654,7 @@ retarget_last_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) ->
         record_slots(proto_state, new_dst)
         return true
 
-    case .LOAD_CONST, .LOAD_FUNC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEG, .NOT, .GET_MAIN_BIND, .GET_GLOBAL_BIND:
+    case .LOAD_CONST, .LOAD_FUNC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEG, .NOT, .GET_FILE_BIND, .GET_GLOBAL_BIND:
         inst := InstABx(word)
         if int(inst.a) != old_dst {
             return false
@@ -684,35 +684,35 @@ retarget_last_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) ->
     return false
 }
 
-// Main binding instructions ======================================================================
+// File binding instructions =======================================================================
 
-emit_get_main_bind :: proc(proto_state: ^ProtoState, dst: int, binding_index: int) {
+emit_get_file_bind :: proc(proto_state: ^ProtoState, dst: int, binding_index: int) {
     record_slots(proto_state, dst)
 
-    inst := u32(InstABx{ op= .GET_MAIN_BIND, a= u8(dst), b= u16(binding_index) })
+    inst := u32(InstABx{ op= .GET_FILE_BIND, a= u8(dst), b= u16(binding_index) })
     append(&proto_state.bytecode, inst)
 }
 
-emit_set_main_bind :: proc(proto_state: ^ProtoState, src: int, binding_index: int) {
+emit_set_file_bind :: proc(proto_state: ^ProtoState, src: int, binding_index: int) {
     record_slots(proto_state, src)
 
-    inst := u32(InstABx{ op= .SET_MAIN_BIND, a= u8(src), b= u16(binding_index) })
+    inst := u32(InstABx{ op= .SET_FILE_BIND, a= u8(src), b= u16(binding_index) })
     append(&proto_state.bytecode, inst)
 }
 
 // Module binding instructions ====================================================================
 
-emit_get_module_bind :: proc(proto_state: ^ProtoState, dst, module_index, binding_index: int) {
+emit_get_module_bind :: proc(proto_state: ^ProtoState, dst, env_index, binding_index: int) {
     record_slots(proto_state, dst)
 
-    inst := u32(InstABC{ op= .GET_MODULE_BIND, a= u8(dst), b= u8(module_index), c= u8(binding_index) })
+    inst := u32(InstABC{ op= .GET_MODULE_BIND, a= u8(dst), b= u8(env_index), c= u8(binding_index) })
     append(&proto_state.bytecode, inst)
 }
 
-emit_set_module_bind :: proc(proto_state: ^ProtoState, src, module_index, binding_index: int) {
+emit_set_module_bind :: proc(proto_state: ^ProtoState, src, env_index, binding_index: int) {
     record_slots(proto_state, src)
 
-    inst := u32(InstABC{ op= .SET_MODULE_BIND, a= u8(src), b= u8(module_index), c= u8(binding_index) })
+    inst := u32(InstABC{ op= .SET_MODULE_BIND, a= u8(src), b= u8(env_index), c= u8(binding_index) })
     append(&proto_state.bytecode, inst)
 }
 

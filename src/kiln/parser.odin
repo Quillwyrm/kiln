@@ -2,6 +2,7 @@ package kiln
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import filepath "core:path/filepath"
 
 // Parser state ===================================================================================
@@ -26,16 +27,15 @@ ExprNil     :: struct {}
 
 ExprUnresolvedBinding :: distinct Token
 ExprLocalBinding      :: distinct int
-ExprMainBinding       :: distinct int
+ExprFileBinding       :: distinct int
 ExprGlobalBinding     :: distinct int
-ExprModuleBinding     :: distinct int
 ExprSlot              :: distinct int
 ExprMergeSlot         :: distinct int
 
-// Main/module bindings are bare current-file top-level bindings.
+// File bindings are bare current-file top-level bindings.
 // Imported bindings are exported bindings accessed through a namespace.
 ExprImportedBinding :: struct {
-    module_index:  int,
+    env_index:     int,
     binding_index: int,
 }
 
@@ -72,9 +72,8 @@ ExprDesc :: union {
     // Binding references. Context decides whether to read, write, or reject.
     ExprUnresolvedBinding,
     ExprLocalBinding,
-    ExprMainBinding,
+    ExprFileBinding,
     ExprGlobalBinding,
-    ExprModuleBinding,
     ExprImportedBinding,
 
     // Materialized slots. ExprMergeSlot is a control-flow merge result from
@@ -339,19 +338,11 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
             return
         }
 
-        if proto_state.is_module {
-            module_index := proto_state.module_index
-            binding_index := binding_table_find(&Active_State.module_envs[module_index], ident_name)
-            if binding_index >= 0 {
-                emit_get_module_bind(proto_state, dst_slot, module_index, binding_index)
-                return
-            }
-        } else {
-            main_index := binding_table_find(&Active_State.main_env, ident_name)
-            if main_index >= 0 {
-                emit_get_main_bind(proto_state, dst_slot, main_index)
-                return
-            }
+        env := &Active_State.envs[proto_state.env_index]
+        binding_index := binding_env_find(env, ident_name)
+        if binding_index >= 0 {
+            emit_get_file_bind(proto_state, dst_slot, binding_index)
+            return
         }
 
         import_index := import_namespace_find(proto_state, ident_name)
@@ -360,7 +351,7 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
             return
         }
 
-        global_index := binding_table_find(&Active_State.global_env, ident_name)
+        global_index := binding_env_find(&Active_State.global_env, ident_name)
         if global_index < 0 {
             if proto_state.is_function {
                 parser_error(proto_state, Token(desc), fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
@@ -378,17 +369,14 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
             emit_move(proto_state, dst_slot, local_slot)
         }
 
-    case ExprMainBinding:
-        emit_get_main_bind(proto_state, dst_slot, int(desc))
+    case ExprFileBinding:
+        emit_get_file_bind(proto_state, dst_slot, int(desc))
 
     case ExprGlobalBinding:
         emit_get_global_bind(proto_state, dst_slot, int(desc))
 
-    case ExprModuleBinding:
-        emit_get_module_bind(proto_state, dst_slot, proto_state.module_index, int(desc))
-
     case ExprImportedBinding:
-        emit_get_module_bind(proto_state, dst_slot, desc.module_index, desc.binding_index)
+        emit_get_module_bind(proto_state, dst_slot, desc.env_index, desc.binding_index)
 
     case ExprSlot:
         src_slot := int(desc)
@@ -896,20 +884,21 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
         return ExprInvalid{}
     }
 
-    module_index := proto_state.import_module_indexes[import_index]
+    env_index := proto_state.import_env_indexes[import_index]
     member_name := member_token.value.(string)
-    binding_index := binding_table_find(&Active_State.module_envs[module_index], member_name)
+    env := &Active_State.envs[env_index]
+    binding_index := binding_env_find(env, member_name)
     if binding_index < 0 {
         parser_error(proto_state, member_token, fmt.tprintf("invalid access expression; module `%s` has no binding `%s`", namespace_name, member_name))
         return ExprInvalid{}
     }
 
-    if !Active_State.module_exports[module_index][binding_index] {
+    if !env.is_exported[binding_index] {
         parser_error(proto_state, member_token, fmt.tprintf("module `%s` does not export binding `%s`", namespace_name, member_name))
         return ExprInvalid{}
     }
 
-    return ExprImportedBinding{module_index, binding_index}
+    return ExprImportedBinding{env_index, binding_index}
 }
 
 // chainExpr = rootExpr {postfix}.
@@ -1510,13 +1499,11 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     if Parser.failed { return }
 
     child_origin := source_location_at(parent_proto_state.origin.source_name, Scanner.source, origin_token.start)
-    child_proto_state := begin_proto(child_origin, function_name, param_count, true)
-    child_proto_state.is_module = parent_proto_state.is_module
-    child_proto_state.module_index = parent_proto_state.module_index
+    child_proto_state := begin_proto(child_origin, function_name, param_count, true, parent_proto_state.env_index)
 
     for import_index := 0; import_index < parent_proto_state.import_count; import_index += 1 {
         child_proto_state.import_names[import_index] = parent_proto_state.import_names[import_index]
-        child_proto_state.import_module_indexes[import_index] = parent_proto_state.import_module_indexes[import_index]
+        child_proto_state.import_env_indexes[import_index] = parent_proto_state.import_env_indexes[import_index]
     }
     child_proto_state.import_count = parent_proto_state.import_count
 
@@ -1601,7 +1588,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    if proto_state.import_count >= MAX_MODULES {
+    if proto_state.import_count >= MAX_ENVS {
         parser_error(proto_state, import_token, "too many imports")
         return
     }
@@ -1612,28 +1599,27 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    current_top_level_table := &Active_State.main_env
-    if proto_state.is_module {
-        current_top_level_table = &Active_State.module_envs[proto_state.module_index]
-    }
-
-    current_top_level_index := binding_table_find(current_top_level_table, namespace_name)
+    current_env := &Active_State.envs[proto_state.env_index]
+    current_top_level_index := binding_env_find(current_env, namespace_name)
     if current_top_level_index >= 0 {
         parser_error(proto_state, namespace_token, fmt.tprintf("import namespace `%s` conflicts with top-level binding", namespace_name))
         return
     }
 
-    module_index := -1
+    env_index := -1
     resolved_source_path, source_found := resolve_import_source_path(proto_state, path_token, module_path)
     if Parser.failed { return }
 
     if source_found {
-        module_index = module_find(resolved_source_path)
-        if module_index >= 0 {
-            if Active_State.module_loading[module_index] {
-                delete(resolved_source_path)
-                parser_error(proto_state, path_token, fmt.tprintf("cyclic import detected for module `%s`", module_path))
-                return
+        env_index = env_find(resolved_source_path)
+        if env_index >= 0 {
+            // Check loading stack for cycle detection.
+            for loading_i := 0; loading_i < Active_State.loading_env_count; loading_i += 1 {
+                if Active_State.loading_env_indexes[loading_i] == env_index {
+                    delete(resolved_source_path)
+                    parser_error(proto_state, path_token, fmt.tprintf("cyclic import detected for module `%s`", module_path))
+                    return
+                }
             }
             delete(resolved_source_path)
         } else {
@@ -1644,22 +1630,24 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
                 return
             }
 
-            if Active_State.module_count >= MAX_MODULES {
+            if Active_State.env_count >= MAX_ENVS {
                 delete(source_bytes)
                 delete(resolved_source_path)
                 parser_error(proto_state, path_token, "too many modules")
                 return
             }
 
-            module_index = bind_module(resolved_source_path)
-            Active_State.module_loading[module_index] = true
-            defer Active_State.module_loading[module_index] = false
+            env_index = bind_env(resolved_source_path)
+
+            // Push to loading stack for cycle detection.
+            Active_State.loading_env_indexes[Active_State.loading_env_count] = env_index
+            Active_State.loading_env_count += 1
 
             // Module compilation reuses the package-level scanner/parser.
             // Save the importing cursor so import loading can return to this file.
             outer_parser := Parser
             outer_scanner := Scanner
-            module_proto, compile_error := compile_module_source(string(source_bytes), Active_State.module_ids[module_index], module_index)
+            module_proto, compile_error := compile_imported_source(string(source_bytes), Active_State.envs[env_index].id, env_index)
             Parser = outer_parser
             Scanner = outer_scanner
             delete(source_bytes)
@@ -1672,21 +1660,24 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
 
             // Run the imported module after compilation, before the importer continues.
             module_result, run_error := run_proto(Active_State, module_proto)
+            // Pop after module init. Error paths leave State disposable.
+            Active_State.loading_env_count -= 1
+
             if run_error != nil {
                 Parser.failed = true
                 return
             }
         }
     } else {
-        module_index = module_find(module_path)
-        if module_index < 0 {
+        env_index = env_find(module_path)
+        if env_index < 0 {
             parser_error(proto_state, path_token, fmt.tprintf("module `%s` not found", module_path))
             return
         }
     }
 
     for existing_import := 0; existing_import < proto_state.import_count; existing_import += 1 {
-        if proto_state.import_module_indexes[existing_import] == module_index {
+        if proto_state.import_env_indexes[existing_import] == env_index {
             existing_namespace := proto_state.import_names[existing_import]
             parser_error(proto_state, path_token, fmt.tprintf("module `%s` is already imported as `%s`", module_path, existing_namespace))
             return
@@ -1694,26 +1685,25 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     proto_state.import_names[proto_state.import_count] = namespace_name
-    proto_state.import_module_indexes[proto_state.import_count] = module_index
+    proto_state.import_env_indexes[proto_state.import_count] = env_index
     proto_state.import_count += 1
 }
 
 // exportStmt = "export" | "export" "{" ident {"," ident} [","] "}".
-parse_export_stmt :: proc(proto_state: ^ProtoState) {
+parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
     export_token := consume_token(proto_state, .EXPORT, "expected 'export'")
     if Parser.failed { return }
 
-    if !proto_state.is_module {
+    if !allow_export {
         parser_error(proto_state, export_token, "export is only valid in module files")
         return
     }
 
-    module_index := proto_state.module_index
-    module_table := &Active_State.module_envs[module_index]
+    env := &Active_State.envs[proto_state.env_index]
 
     if Parser.current_token.kind != .LEFT_BRACE {
-        for binding_index := 0; binding_index < module_table.count; binding_index += 1 {
-            Active_State.module_exports[module_index][binding_index] = true
+        for binding_index := 0; binding_index < env.count; binding_index += 1 {
+            env.is_exported[binding_index] = true
         }
         return
     }
@@ -1747,7 +1737,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState) {
             }
         }
 
-        binding_index := binding_table_find(module_table, name)
+        binding_index := binding_env_find(env, name)
         if binding_index < 0 {
             parser_error(proto_state, name_token, fmt.tprintf("export binding `%s` is not declared in this module", name))
             return
@@ -1773,7 +1763,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState) {
 
     for export_index := 0; export_index < export_count; export_index += 1 {
         binding_index := export_binding_indexes[export_index]
-        Active_State.module_exports[module_index][binding_index] = true
+        env.is_exported[binding_index] = true
     }
 }
 
@@ -2150,11 +2140,8 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     lhs_count := len(lhs_tokens)
 
     if !proto_state.is_function && len(proto_state.scope_local_marks) == 0 {
+        current_top_level_env := &Active_State.envs[proto_state.env_index]
         binding_indexes: [MAX_BINDINGS]int
-        current_top_level_table := &Active_State.main_env
-        if proto_state.is_module {
-            current_top_level_table = &Active_State.module_envs[proto_state.module_index]
-        }
 
         for check_index := 0; check_index < lhs_count; check_index += 1 {
             check_name := lhs_tokens[check_index].value.(string)
@@ -2166,7 +2153,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
                 }
             }
 
-            current_top_level_index := binding_table_find(current_top_level_table, check_name)
+            current_top_level_index := binding_env_find(current_top_level_env, check_name)
             if current_top_level_index >= 0 {
                 parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` is already declared", check_name))
                 return
@@ -2179,13 +2166,13 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
             }
         }
 
-        if current_top_level_table.count + lhs_count > MAX_BINDINGS {
+        if current_top_level_env.count + lhs_count > MAX_BINDINGS {
             parser_error(proto_state, lhs_tokens[0], "too many top-level bindings")
             return
         }
 
         for target_index := 0; target_index < lhs_count; target_index += 1 {
-            binding_indexes[target_index] = binding_table_append(current_top_level_table, lhs_tokens[target_index].value.(string), is_mutable)
+            binding_indexes[target_index] = binding_env_append(current_top_level_env, lhs_tokens[target_index].value.(string), is_mutable)
         }
 
         rhs_base := proto_state.next_temp_slot
@@ -2195,11 +2182,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
             parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
             if Parser.failed { return }
 
-            if proto_state.is_module {
-                emit_set_module_bind(proto_state, rhs_base, proto_state.module_index, binding_indexes[0])
-            } else {
-                emit_set_main_bind(proto_state, rhs_base, binding_indexes[0])
-            }
+            emit_set_file_bind(proto_state, rhs_base, binding_indexes[0])
             return
         }
 
@@ -2211,34 +2194,13 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
             return
         }
 
-        // Fast path for:
-        //
-        //     name := single_expr
-        //
-        // at top level / module root. This avoids:
-        //
-        //     OP temp, ...
-        //     MOVE rhs_base, temp
-        //     SET_MAIN_BIND rhs_base, B
-        //
-        // and emits:
-        //
-        //     OP temp, ...
-        //     SET_MAIN_BIND temp, B
-        //
-        // Do not use this for final call expressions, because declaration value-list
-        // handling has specific requested-result behavior.
         if lhs_count == 1 && expr_count == 1 {
             _, final_is_call := last_expr.(ExprCall)
             if !final_is_call {
                 src_slot := expr_read_slot(proto_state, last_expr)
                 if Parser.failed { return }
 
-                if proto_state.is_module {
-                    emit_set_module_bind(proto_state, src_slot, proto_state.module_index, binding_indexes[0])
-                } else {
-                    emit_set_main_bind(proto_state, src_slot, binding_indexes[0])
-                }
+                emit_set_file_bind(proto_state, src_slot, binding_indexes[0])
                 return
             }
         }
@@ -2247,11 +2209,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
         if Parser.failed { return }
 
         for target_index := 0; target_index < lhs_count; target_index += 1 {
-            if proto_state.is_module {
-                emit_set_module_bind(proto_state, rhs_base + target_index, proto_state.module_index, binding_indexes[target_index])
-            } else {
-                emit_set_main_bind(proto_state, rhs_base + target_index, binding_indexes[target_index])
-            }
+            emit_set_file_bind(proto_state, rhs_base + target_index, binding_indexes[target_index])
         }
         return
     }
@@ -2329,27 +2287,15 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
             return ExprLocalBinding(local_index)
         }
 
-        if proto_state.is_module {
-            module_index := proto_state.module_index
-            binding_index := binding_table_find(&Active_State.module_envs[module_index], ident_text)
-            if binding_index >= 0 {
-                if !Active_State.module_envs[module_index].is_mutable[binding_index] {
-                    parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
-                    return ExprInvalid{}
-                }
-
-                return ExprModuleBinding(binding_index)
+        env := &Active_State.envs[proto_state.env_index]
+        binding_index := binding_env_find(env, ident_text)
+        if binding_index >= 0 {
+            if !env.is_mutable[binding_index] {
+                parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
+                return ExprInvalid{}
             }
-        } else {
-            main_index := binding_table_find(&Active_State.main_env, ident_text)
-            if main_index >= 0 {
-                if !Active_State.main_env.is_mutable[main_index] {
-                    parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
-                    return ExprInvalid{}
-                }
 
-                return ExprMainBinding(main_index)
-            }
+            return ExprFileBinding(binding_index)
         }
 
         import_index := import_namespace_find(proto_state, ident_text)
@@ -2358,7 +2304,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
             return ExprInvalid{}
         }
 
-        global_index := binding_table_find(&Active_State.global_env, ident_text)
+        global_index := binding_env_find(&Active_State.global_env, ident_text)
         if global_index < 0 {
             if proto_state.is_function {
                 parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is not a declared binding in this function; Kiln does not support closures or upvalues", ident_text))
@@ -2375,7 +2321,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
         return ExprGlobalBinding(global_index)
 
-    case ExprLocalBinding, ExprMainBinding, ExprModuleBinding, ExprGlobalBinding, ExprIndex, ExprArrayIndexConst, ExprMapIndexConst:
+    case ExprLocalBinding, ExprFileBinding, ExprGlobalBinding, ExprIndex, ExprArrayIndexConst, ExprMapIndexConst:
         return target
 
     case ExprCall:
@@ -2383,9 +2329,13 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
         return ExprInvalid{}
 
     case ExprImportedBinding:
-        module_table := &Active_State.module_envs[t.module_index]
-        if !module_table.is_mutable[t.binding_index] {
-            parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", module_table.names[t.binding_index]))
+        env := &Active_State.envs[t.env_index]
+        if !env.is_exported[t.binding_index] {
+            parser_error(proto_state, source_token, fmt.tprintf("module does not export binding `%s`", env.names[t.binding_index]))
+            return ExprInvalid{}
+        }
+        if !env.is_mutable[t.binding_index] {
+            parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", env.names[t.binding_index]))
             return ExprInvalid{}
         }
 
@@ -2403,14 +2353,11 @@ set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprD
             emit_move(proto_state, dst_slot, src_slot)
         }
 
-    case ExprMainBinding:
-        emit_set_main_bind(proto_state, src_slot, int(t))
-
-    case ExprModuleBinding:
-        emit_set_module_bind(proto_state, src_slot, proto_state.module_index, int(t))
+    case ExprFileBinding:
+        emit_set_file_bind(proto_state, src_slot, int(t))
 
     case ExprImportedBinding:
-        emit_set_module_bind(proto_state, src_slot, t.module_index, t.binding_index)
+        emit_set_module_bind(proto_state, src_slot, t.env_index, t.binding_index)
 
     case ExprGlobalBinding:
         emit_set_global_bind(proto_state, src_slot, int(t))
@@ -2717,7 +2664,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             }
         }
 
-        global_index := binding_table_find(&Active_State.global_env, check_name)
+        global_index := binding_env_find(&Active_State.global_env, check_name)
         if global_index >= 0 {
             parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` is already declared", check_name))
             return
@@ -2730,7 +2677,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     for target_index := 0; target_index < lhs_count; target_index += 1 {
-        binding_indexes[target_index] = binding_table_append(&Active_State.global_env, lhs_tokens[target_index].value.(string), is_mutable)
+        binding_indexes[target_index] = binding_env_append(&Active_State.global_env, lhs_tokens[target_index].value.(string), is_mutable)
     }
 
     rhs_base := proto_state.next_temp_slot
@@ -2949,7 +2896,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
 
 // sourceFile = {importStmt} fileBody [exportStmt].
 // Top-level statement temps die at statement end.
-parse_top_level_statements :: proc(proto_state: ^ProtoState) {
+parse_top_level_statements :: proc(proto_state: ^ProtoState, allow_export: bool) {
     for !Parser.failed && Parser.current_token.kind == .IMPORT {
         parse_import_stmt(proto_state)
         if Parser.failed { return }
@@ -2957,7 +2904,7 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 
     for !Parser.failed && Parser.current_token.kind != .EOF {
         if Parser.current_token.kind == .EXPORT {
-            parse_export_stmt(proto_state)
+            parse_export_stmt(proto_state, allow_export)
             if Parser.failed { return }
 
             if Parser.current_token.kind != .EOF {
@@ -2979,6 +2926,13 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState) {
 
 // On success installs Active_State.entry_proto for VM execution.
 compile_source :: proc(source, source_name: string) -> ^Error {
+    Active_State.envs[0].id = strings.clone(source_name)
+    Active_State.envs[0].count = 0
+
+    // Push entry env onto the loading stack for cycle detection.
+    Active_State.loading_env_indexes[Active_State.loading_env_count] = 0
+    Active_State.loading_env_count += 1
+
     begin_scan(source, source_name)
 
     Parser.current_token = Token{}
@@ -2994,8 +2948,8 @@ compile_source :: proc(source, source_name: string) -> ^Error {
         line        = 1,
         column      = 1,
     }
-    entry_proto_state := begin_proto(entry_origin, "entry", 0, false)
-    parse_top_level_statements(&entry_proto_state)
+    entry_proto_state := begin_proto(entry_origin, "entry", 0, false, 0)
+    parse_top_level_statements(&entry_proto_state, false)
     if Parser.failed {
         delete_proto_state(&entry_proto_state)
         return &Active_State.error
@@ -3012,11 +2966,12 @@ compile_source :: proc(source, source_name: string) -> ^Error {
     emit_return(&entry_proto_state, return_slot, 1)
 
     Active_State.entry_proto = end_proto(&entry_proto_state)
+    Active_State.loading_env_count -= 1
     return nil
 }
 
-// On success returns a runnable module proto for the selected module table.
-compile_module_source :: proc(source, source_name: string, module_index: int) -> (module_proto: ^Proto, err: ^Error) {
+// On success returns a runnable module proto.
+compile_imported_source :: proc(source, source_name: string, env_index: int) -> (module_proto: ^Proto, err: ^Error) {
     begin_scan(source, source_name)
 
     Parser.current_token = Token{}
@@ -3032,11 +2987,9 @@ compile_module_source :: proc(source, source_name: string, module_index: int) ->
         line        = 1,
         column      = 1,
     }
-    module_proto_state := begin_proto(module_origin, Active_State.module_ids[module_index], 0, false)
-    module_proto_state.is_module = true
-    module_proto_state.module_index = module_index
+    module_proto_state := begin_proto(module_origin, Active_State.envs[env_index].id, 0, false, env_index)
 
-    parse_top_level_statements(&module_proto_state)
+    parse_top_level_statements(&module_proto_state, true)
     if Parser.failed {
         delete_proto_state(&module_proto_state)
         return nil, &Active_State.error

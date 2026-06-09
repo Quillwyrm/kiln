@@ -3,6 +3,7 @@ package kiln
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import filepath "core:path/filepath"
 
 disasm_value_text :: proc(value: Value) -> string {
     object, is_object := value.(^Object)
@@ -66,9 +67,9 @@ disasm_append_proto_sections :: proc(parts: ^[dynamic]string, state: ^State, pro
         }
     }
 
-    main_refs:   [MAX_BINDINGS]bool
-    global_refs: [MAX_BINDINGS]bool
-    module_refs: [MAX_MODULES][MAX_BINDINGS]bool
+    file_refs:    [MAX_BINDINGS]bool
+    global_refs:  [MAX_BINDINGS]bool
+    env_refs:     [MAX_ENVS][MAX_BINDINGS]bool
     has_bindings := false
 
     for ip := 0; ip < len(proto.bytecode); ip += 1 {
@@ -76,11 +77,11 @@ disasm_append_proto_sections :: proc(parts: ^[dynamic]string, state: ^State, pro
         op := decode_op(word)
 
         #partial switch op {
-        case .GET_MAIN_BIND, .SET_MAIN_BIND:
+        case .GET_FILE_BIND, .SET_FILE_BIND:
             inst := InstABx(word)
             binding_index := int(inst.b)
 
-            main_refs[binding_index] = true
+            file_refs[binding_index] = true
             has_bindings = true
 
         case .GET_GLOBAL_BIND, .SET_GLOBAL_BIND:
@@ -92,10 +93,10 @@ disasm_append_proto_sections :: proc(parts: ^[dynamic]string, state: ^State, pro
 
         case .GET_MODULE_BIND, .SET_MODULE_BIND:
             inst := InstABC(word)
-            module_index := int(inst.b)
+            env_index := int(inst.b)
             binding_index := int(inst.c)
 
-            module_refs[module_index][binding_index] = true
+            env_refs[env_index][binding_index] = true
             has_bindings = true
 
         case:
@@ -106,9 +107,10 @@ disasm_append_proto_sections :: proc(parts: ^[dynamic]string, state: ^State, pro
         append(parts, "\n")
         append(parts, "    bindings\n")
 
-        for binding_index := 0; binding_index < state.main_env.count; binding_index += 1 {
-            if main_refs[binding_index] {
-                append(parts, fmt.tprintf("        B%d = %s\n", binding_index, state.main_env.names[binding_index]))
+        file_env := &state.envs[proto.env_index]
+        for binding_index := 0; binding_index < file_env.count; binding_index += 1 {
+            if file_refs[binding_index] {
+                append(parts, fmt.tprintf("        B%d = %s\n", binding_index, file_env.names[binding_index]))
             }
         }
 
@@ -118,17 +120,17 @@ disasm_append_proto_sections :: proc(parts: ^[dynamic]string, state: ^State, pro
             }
         }
 
-        for module_index := 0; module_index < state.module_count; module_index += 1 {
-            module_env := &state.module_envs[module_index]
+        for env_index := 1; env_index < state.env_count; env_index += 1 {
+            env := &state.envs[env_index]
 
-            for binding_index := 0; binding_index < module_env.count; binding_index += 1 {
-                if module_refs[module_index][binding_index] {
+            for binding_index := 0; binding_index < env.count; binding_index += 1 {
+                if env_refs[env_index][binding_index] {
                     append(parts, fmt.tprintf(
                         "        M%d.B%d = %s.%s\n",
-                        module_index,
+                        env_index,
                         binding_index,
-                        state.module_ids[module_index],
-                        module_env.names[binding_index],
+                        env.id,
+                        env.names[binding_index],
                     ))
                 }
             }
@@ -383,30 +385,30 @@ disasm_append_code :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto
             operands := fmt.tprintf("R%d, %d", inst.a, inst.b)
             disasm_append_inst(parts, ip, "RETURN", operands, "")
 
-        case .GET_MAIN_BIND:
+        case .GET_FILE_BIND:
             inst := InstABx(word)
             operands := fmt.tprintf("R%d, B%d", inst.a, inst.b)
-            comment := state.main_env.names[int(inst.b)]
-            disasm_append_inst(parts, ip, "GET_MAIN_BIND", operands, comment)
+            comment := state.envs[proto.env_index].names[int(inst.b)]
+            disasm_append_inst(parts, ip, "GET_FILE_BIND", operands, comment)
 
-        case .SET_MAIN_BIND:
+        case .SET_FILE_BIND:
             inst := InstABx(word)
             operands := fmt.tprintf("R%d, B%d", inst.a, inst.b)
-            comment := state.main_env.names[int(inst.b)]
-            disasm_append_inst(parts, ip, "SET_MAIN_BIND", operands, comment)
+            comment := state.envs[proto.env_index].names[int(inst.b)]
+            disasm_append_inst(parts, ip, "SET_FILE_BIND", operands, comment)
 
         case .GET_MODULE_BIND:
             inst := InstABC(word)
-            module_env := &state.module_envs[int(inst.b)]
+            module_env := &state.envs[int(inst.b)]
             operands := fmt.tprintf("R%d, M%d.B%d", inst.a, inst.b, inst.c)
-            comment := fmt.tprintf("%s.%s", state.module_ids[int(inst.b)], module_env.names[int(inst.c)])
+            comment := fmt.tprintf("%s.%s", module_env.id, module_env.names[int(inst.c)])
             disasm_append_inst(parts, ip, "GET_MODULE_BIND", operands, comment)
 
         case .SET_MODULE_BIND:
             inst := InstABC(word)
-            module_env := &state.module_envs[int(inst.b)]
+            module_env := &state.envs[int(inst.b)]
             operands := fmt.tprintf("R%d, M%d.B%d", inst.a, inst.b, inst.c)
-            comment := fmt.tprintf("%s.%s", state.module_ids[int(inst.b)], module_env.names[int(inst.c)])
+            comment := fmt.tprintf("%s.%s", module_env.id, module_env.names[int(inst.c)])
             disasm_append_inst(parts, ip, "SET_MODULE_BIND", operands, comment)
 
         case .GET_GLOBAL_BIND:
@@ -444,14 +446,21 @@ disassemble_file :: proc(state: ^State, path: string) -> (string, ^Error) {
     state.has_error = false
     state.error = Error{}
 
-    source_bytes, read_error := os.read_entire_file(path, context.allocator)
-    if read_error != nil {
+    resolved_path, abs_err := filepath.abs(path, context.allocator)
+    if abs_err != nil {
         location := SourceLocation{source_name = path, line = 0, column = 0}
-        return "", set_error(location, fmt.tprintf("failed to read '%s'", path))
+        return "", set_error(location, fmt.tprintf("failed to resolve path '%s'", path))
+    }
+    defer delete(resolved_path)
+
+    source_bytes, read_error := os.read_entire_file(resolved_path, context.allocator)
+    if read_error != nil {
+        location := SourceLocation{source_name = resolved_path, line = 0, column = 0}
+        return "", set_error(location, fmt.tprintf("failed to read '%s'", resolved_path))
     }
     defer delete(source_bytes)
 
-    compile_error := compile_source(string(source_bytes), path)
+    compile_error := compile_source(string(source_bytes), resolved_path)
     if compile_error != nil {
         return "", compile_error
     }
@@ -461,7 +470,7 @@ disassemble_file :: proc(state: ^State, path: string) -> (string, ^Error) {
     parts := make([dynamic]string)
     defer delete(parts)
 
-    append(&parts, path)
+    append(&parts, resolved_path)
     append(&parts, "\n\n")
 
     append(&parts, "entry\n")
