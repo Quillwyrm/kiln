@@ -212,5 +212,25 @@ assert_eq(m["a"], 3, "map tombstone slot reusable")
 
 // ------------------------------------------------------------
 
+iife_result := function(value) {
+    return value + 1
+}(41)
+
+assert_eq(iife_result, 42, "function literal call in declaration rhs")
+
+iife_a, iife_b := function() {
+    return 5, 6
+}()
+
+assert_eq(iife_a, 5, "function literal call expands first result")
+assert_eq(iife_b, 6, "function literal call expands second result")
+
+global global_iife := function(value) {
+    return value + 1
+}(41)
+
+assert_eq(global_iife, 42, "global function literal call in declaration rhs")
+
 print("semantic-ok")
+print(global_iife)
 return "done"

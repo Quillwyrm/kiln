@@ -475,7 +475,8 @@ State :: struct {
     loading_env_indexes: [MAX_ENVS]int,
     loading_env_count:   int,
 
-    // Global environment for builtins. Export flags are ignored here.
+    // Global binding environment. Host builtins are installed here before user code;
+    // user `global` declarations append here during compile. Export flags are ignored.
     global_env: BindingEnv,
 
     // Raw invocation argv chosen by the host, plus the first user script arg index.

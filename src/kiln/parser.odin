@@ -2177,15 +2177,6 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
         rhs_base := proto_state.next_temp_slot
 
-        if lhs_count == 1 && Parser.current_token.kind == .FUNCTION {
-            ident_text := lhs_tokens[0].value.(string)
-            parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
-            if Parser.failed { return }
-
-            emit_set_file_bind(proto_state, rhs_base, binding_indexes[0])
-            return
-        }
-
         expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
         if Parser.failed { return }
 
@@ -2247,22 +2238,16 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     rhs_base := proto_state.local_count
     proto_state.next_temp_slot = rhs_base
 
-    if lhs_count == 1 && Parser.current_token.kind == .FUNCTION {
-        ident_text := lhs_tokens[0].value.(string)
-        parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
-        if Parser.failed { return }
-    } else {
-        expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
-        if Parser.failed { return }
+    expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
+    if Parser.failed { return }
 
-        if expr_count > lhs_count {
-            parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
-            return
-        }
-
-        finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
-        if Parser.failed { return }
+    if expr_count > lhs_count {
+        parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
+        return
     }
+
+    finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
+    if Parser.failed { return }
 
     // Commit local bindings to the slots that already hold the RHS values.
     for target_index := 0; target_index < lhs_count; target_index += 1 {
@@ -2420,7 +2405,7 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
     //
     //     ADD sum, sum, i
     //
-    // This path is intentionally local-only. Main/global/module/indexed targets
+    // This path is intentionally local-only. File/global/module/indexed targets
     // still need their explicit SET/INDEX_SET storage operation.
     if target_count == 1 && expr_count == 1 {
         local_target, target_is_local := targets[0].(ExprLocalBinding)
@@ -2438,7 +2423,7 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
 
         // Fast path for one non-local target:
         //
-        //     main/global/module/indexed = single_rhs_expr
+        //     file/global/module/indexed = single_rhs_expr
         //
         // The target is already resolved before RHS parsing, so this still preserves
         // assignment target resolution order. The write itself still happens after RHS
@@ -2470,95 +2455,32 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     op_token := advance_token()
     if Parser.failed { return }
 
-    // Fast path for simple local compound assignment:
-    //
-    //     local += rhs
-    //
-    // Locals cannot be captured by function literals, so parsing/evaluating the RHS
-    // cannot mutate this local through a called function. It is safe to emit directly
-    // into the local slot.
+    // Read current target value into value_slot.
+    // Locals are safe to mutate in-place; non-locals need a temp + writeback.
+    value_slot := -1
+    needs_writeback := false
+
     local_target, target_is_local := resolved_target.(ExprLocalBinding)
     if target_is_local {
-        target_slot := int(local_target)
-
-        rhs_expr := parse_expr(proto_state)
+        value_slot = int(local_target)
+        needs_writeback = false
+    } else {
+        value_slot = claim_temp_slot(proto_state)
         if Parser.failed { return }
 
-        #partial switch op_token.kind {
-        case .PLUS_ASSIGN:
-            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
-                emit_add_const(proto_state, target_slot, target_slot, rhs_const)
-            } else {
-                rhs_slot := expr_read_slot(proto_state, rhs_expr)
-                if Parser.failed { return }
+        lower_expr_desc(proto_state, resolved_target, value_slot)
+        if Parser.failed { return }
 
-                emit_add(proto_state, target_slot, target_slot, rhs_slot)
-            }
-
-        case .MINUS_ASSIGN:
-            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
-                emit_sub_const(proto_state, target_slot, target_slot, rhs_const)
-            } else {
-                rhs_slot := expr_read_slot(proto_state, rhs_expr)
-                if Parser.failed { return }
-
-                emit_sub(proto_state, target_slot, target_slot, rhs_slot)
-            }
-
-        case .STAR_ASSIGN:
-            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
-                emit_mul_const(proto_state, target_slot, target_slot, rhs_const)
-            } else {
-                rhs_slot := expr_read_slot(proto_state, rhs_expr)
-                if Parser.failed { return }
-
-                emit_mul(proto_state, target_slot, target_slot, rhs_slot)
-            }
-
-        case .SLASH_ASSIGN:
-            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
-                emit_div_const(proto_state, target_slot, target_slot, rhs_const)
-            } else {
-                rhs_slot := expr_read_slot(proto_state, rhs_expr)
-                if Parser.failed { return }
-
-                emit_div(proto_state, target_slot, target_slot, rhs_slot)
-            }
-
-        case .MOD_ASSIGN:
-            if rhs_const, ok := const_index_from_numeric_literal(proto_state, rhs_expr); ok {
-                emit_mod_const(proto_state, target_slot, target_slot, rhs_const)
-            } else {
-                rhs_slot := expr_read_slot(proto_state, rhs_expr)
-                if Parser.failed { return }
-
-                emit_mod(proto_state, target_slot, target_slot, rhs_slot)
-            }
-
-        case:
-            panic("compound assignment reached non-compound operator")
-        }
-
-        return
+        needs_writeback = true
     }
-
-    value_slot := claim_temp_slot(proto_state)
-    if Parser.failed { return }
-
-    // ExprIndex already holds the container and key slots, so arr[i] += rhs
-    // reads and writes the same resolved target.
-    lower_expr_desc(proto_state, resolved_target, value_slot)
-    if Parser.failed { return }
-
-    rhs_slot := claim_temp_slot(proto_state)
-    if Parser.failed { return }
 
     rhs_expr := parse_expr(proto_state)
     if Parser.failed { return }
 
     rhs_const, rhs_is_const := const_index_from_numeric_literal(proto_state, rhs_expr)
+    rhs_slot := -1
     if !rhs_is_const {
-        lower_expr_desc(proto_state, rhs_expr, rhs_slot)
+        rhs_slot = expr_read_slot(proto_state, rhs_expr)
         if Parser.failed { return }
     }
 
@@ -2602,7 +2524,10 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
         panic("compound assignment reached non-compound operator")
     }
 
-    set_assign_target(proto_state, value_slot, resolved_target)
+    if needs_writeback {
+        set_assign_target(proto_state, value_slot, resolved_target)
+        if Parser.failed { return }
+    }
 }
 
 // globalDecl = "global" identList declOp exprList.
@@ -2682,33 +2607,27 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     rhs_base := proto_state.next_temp_slot
 
-    if lhs_count == 1 && Parser.current_token.kind == .FUNCTION {
-        ident_text := lhs_tokens[0].value.(string)
-        parse_function_literal(proto_state, rhs_base, ident_text, lhs_tokens[0])
-        if Parser.failed { return }
-    } else {
-        expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
-        if Parser.failed { return }
+    expr_count, last_expr := parse_expr_list(proto_state, rhs_base)
+    if Parser.failed { return }
 
-        if expr_count > lhs_count {
-            parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
+    if expr_count > lhs_count {
+        parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
+        return
+    }
+
+    if lhs_count == 1 && expr_count == 1 {
+        _, final_is_call := last_expr.(ExprCall)
+        if !final_is_call {
+            src_slot := expr_read_slot(proto_state, last_expr)
+            if Parser.failed { return }
+
+            emit_set_global_bind(proto_state, src_slot, binding_indexes[0])
             return
         }
-
-        if lhs_count == 1 && expr_count == 1 {
-            _, final_is_call := last_expr.(ExprCall)
-            if !final_is_call {
-                src_slot := expr_read_slot(proto_state, last_expr)
-                if Parser.failed { return }
-
-                emit_set_global_bind(proto_state, src_slot, binding_indexes[0])
-                return
-            }
-        }
-
-        finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
-        if Parser.failed { return }
     }
+
+    finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
+    if Parser.failed { return }
 
     for target_index := 0; target_index < lhs_count; target_index += 1 {
         emit_set_global_bind(proto_state, rhs_base + target_index, binding_indexes[target_index])

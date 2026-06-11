@@ -1,0 +1,6 @@
+sum :: function(a,b,c) {
+    return a + b + c
+}
+
+s := sum(0.5, 0.2, 0.1)
+print(s)
