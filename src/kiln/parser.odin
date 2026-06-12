@@ -93,8 +93,13 @@ ExprDesc :: union {
 // Token cursor ===================================================================================
 
 
-advance_token :: proc() -> Token {
+advance_token :: proc(proto_state: ^ProtoState) -> Token {
     token := Parser.current_token
+    if token.kind != .EOF {
+        line, _ := source_line_col_at(Scanner.source, token.start)
+        proto_state.current_inst_line = line
+    }
+
     Parser.current_token = scan_next_token()
 
     if Parser.current_token.kind == .ERROR {
@@ -533,7 +538,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
         compile_error_near(Parser.current_token, "expected '[' to start array literal")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     array_slot := claim_temp_slot(proto_state)
@@ -560,7 +565,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 break
             }
 
-            advance_token()
+            advance_token(proto_state)
             if Parser.failed { return ExprInvalid{} }
             if Parser.current_token.kind == .RIGHT_BRACKET {
                 break
@@ -572,7 +577,7 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
         compile_error_near(Parser.current_token, "expected ']' after array literal")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     if element_count < 65536 {
@@ -588,14 +593,14 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
         compile_error_near(Parser.current_token, "expected 'map' to start map literal")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     if Parser.current_token.kind != .LEFT_BRACE {
         compile_error_near(Parser.current_token, "expected '{' after map")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     map_slot := claim_temp_slot(proto_state)
@@ -615,7 +620,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             #partial switch key_token.kind {
             case .IDENT:
                 key_text = key_token.value.(string)
-                advance_token()
+                advance_token(proto_state)
                 if Parser.failed { return ExprInvalid{} }
 
                 if Parser.current_token.kind == .LEFT_PAREN {
@@ -635,7 +640,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
             case .STRING:
                 key_text = key_token.value.(string)
-                advance_token()
+                advance_token(proto_state)
                 if Parser.failed { return ExprInvalid{} }
 
             case:
@@ -655,7 +660,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 compile_error_near(Parser.current_token, "map entry invalid; expected ':' after map key")
                 return ExprInvalid{}
             }
-            advance_token()
+            advance_token(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
             key_const := const_string(proto_state, key_text)
@@ -699,7 +704,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 break
             }
 
-            advance_token()
+            advance_token(proto_state)
             if Parser.failed { return ExprInvalid{} }
             if Parser.current_token.kind == .RIGHT_BRACE {
                 break
@@ -720,7 +725,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
         compile_error_near(Parser.current_token, "expected '}' after map literal")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     return ExprSlot(map_slot)
@@ -732,7 +737,7 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         compile_error_near(Parser.current_token, "expected '(' to start grouped expression")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     expr := parse_expr(proto_state)
@@ -742,7 +747,7 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         compile_error_near(Parser.current_token, "expected ')' after grouped expression")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     if Parser.current_token.kind == .LEFT_PAREN || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .DOT {
@@ -756,7 +761,7 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 // rootExpr = ident | functionLiteral | arrayLiteral | mapLiteral.
 parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind == .IDENT {
-        return ExprUnresolvedBinding(advance_token())
+        return ExprUnresolvedBinding(advance_token(proto_state))
     }
 
     if Parser.current_token.kind == .FUNCTION {
@@ -789,7 +794,8 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
         compile_error_near(Parser.current_token, "expected '(' to start call arguments")
         return ExprInvalid{}
     }
-    advance_token()
+    call_line, _ := source_line_col_at(Scanner.source, Parser.current_token.start)
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     base_slot: int
@@ -830,7 +836,7 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
                 break
             }
 
-            advance_token()
+            advance_token(proto_state)
             if Parser.failed { return ExprInvalid{} }
             if Parser.current_token.kind == .RIGHT_PAREN {
                 break
@@ -842,10 +848,11 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
         compile_error_near(Parser.current_token, "expected ')' after call arguments")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     call_index := emit_call(proto_state, base_slot, arg_count, 1)
+    set_last_inst_line(proto_state, call_line)
     return ExprCall{base_slot, call_index}
 }
 
@@ -855,7 +862,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
         compile_error_near(Parser.current_token, "expected '[' to start index expression")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     // Preserve evaluation order:
@@ -878,7 +885,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
         compile_error_near(Parser.current_token, "expected ']' after index expression")
         return ExprInvalid{}
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     // If the key expression is an i64 or string literal, encode it as a typed
@@ -917,14 +924,14 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
         compile_error_near(Parser.current_token, "expected '.' to start access expression")
         return ExprInvalid{}
     }
-    dot_token := advance_token()
+    dot_token := advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     if Parser.current_token.kind != .IDENT {
         compile_error_near(Parser.current_token, "expected identifier after '.'")
         return ExprInvalid{}
     }
-    member_token := advance_token()
+    member_token := advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     namespace_token, is_namespace_candidate := left.(ExprUnresolvedBinding)
@@ -1004,22 +1011,22 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     #partial switch Parser.current_token.kind {
     case .INT:
-        token := advance_token()
+        token := advance_token(proto_state)
         return token.value.(i64)
     case .FLOAT:
-        token := advance_token()
+        token := advance_token(proto_state)
         return token.value.(f64)
     case .STRING:
-        token := advance_token()
+        token := advance_token(proto_state)
         return token.value.(string)
     case .TRUE:
-        advance_token()
+        advance_token(proto_state)
         return true
     case .FALSE:
-        advance_token()
+        advance_token(proto_state)
         return false
     case .NIL:
-        advance_token()
+        advance_token(proto_state)
         return ExprNil{}
     case .LEFT_PAREN:
         return parse_grouped_expr(proto_state)
@@ -1035,7 +1042,7 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 // unaryExpr = unaryOp unaryExpr | primaryExpr.
 parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind == .NOT {
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         operand := parse_unary_expr(proto_state)
@@ -1052,7 +1059,7 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 
     if Parser.current_token.kind == .MINUS {
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         operand := parse_unary_expr(proto_state)
@@ -1097,7 +1104,8 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
     // mulOp = "*" | "/" | "%".
     for Parser.current_token.kind == .STAR || Parser.current_token.kind == .SLASH || Parser.current_token.kind == .MOD {
-        op_token := advance_token()
+        op_token := advance_token(proto_state)
+        op_line, _ := source_line_col_at(Scanner.source, op_token.start)
         if Parser.failed { return ExprInvalid{} }
 
         // Materialize the left side before parsing the right side.
@@ -1131,6 +1139,7 @@ parse_mul_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 emit_mod(proto_state, result_slot, lhs_slot, rhs_slot)
             }
         }
+        set_last_inst_line(proto_state, op_line)
 
         // Only the accumulated result remains live after the binary op.
         proto_state.next_temp_slot = result_slot + 1
@@ -1149,7 +1158,8 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     for Parser.current_token.kind == .PLUS ||
         Parser.current_token.kind == .MINUS ||
         Parser.current_token.kind == .CONCAT {
-        op_token := advance_token()
+        op_token := advance_token(proto_state)
+        op_line, _ := source_line_col_at(Scanner.source, op_token.start)
         if Parser.failed { return ExprInvalid{} }
 
         // Materialize the left side before parsing the right side.
@@ -1184,6 +1194,7 @@ parse_add_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 emit_sub(proto_state, result_slot, lhs_slot, rhs_slot)
             }
         }
+        set_last_inst_line(proto_state, op_line)
 
         // Only the accumulated result remains live after the binary op.
         proto_state.next_temp_slot = result_slot + 1
@@ -1201,7 +1212,8 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     // compareOp = "==" | "!=" | "<" | "<=" | ">" | ">=".
     #partial switch Parser.current_token.kind {
     case .EQUAL, .NOT_EQUAL, .LESS, .LESS_OR_EQUAL, .GREATER, .GREATER_OR_EQUAL:
-        op_token := advance_token()
+        op_token := advance_token(proto_state)
+        op_line, _ := source_line_col_at(Scanner.source, op_token.start)
         if Parser.failed { return ExprInvalid{} }
 
         // Materialize the left side before parsing the right side.
@@ -1221,23 +1233,30 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         #partial switch op_token.kind {
         case .EQUAL:
             emit_equal(proto_state, result_slot, lhs_slot, rhs_slot)
+            set_last_inst_line(proto_state, op_line)
 
         case .NOT_EQUAL:
             emit_equal(proto_state, result_slot, lhs_slot, rhs_slot)
+            set_last_inst_line(proto_state, op_line)
             emit_not(proto_state, result_slot, result_slot)
+            set_last_inst_line(proto_state, op_line)
 
         case .LESS:
             emit_less(proto_state, result_slot, lhs_slot, rhs_slot)
+            set_last_inst_line(proto_state, op_line)
 
         case .LESS_OR_EQUAL:
             emit_less_or_equal(proto_state, result_slot, lhs_slot, rhs_slot)
+            set_last_inst_line(proto_state, op_line)
 
         case .GREATER:
             // a > b is emitted as b < a because the VM has LESS, not GREATER.
             emit_less(proto_state, result_slot, rhs_slot, lhs_slot)
+            set_last_inst_line(proto_state, op_line)
 
         case .GREATER_OR_EQUAL:
             emit_less_or_equal(proto_state, result_slot, rhs_slot, lhs_slot)
+            set_last_inst_line(proto_state, op_line)
         }
 
         // Only the comparison result remains live after the binary op.
@@ -1261,7 +1280,7 @@ parse_and_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.failed { return ExprInvalid{} }
 
     for Parser.current_token.kind == .AND {
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         result_slot := claim_temp_slot(proto_state)
@@ -1310,7 +1329,7 @@ parse_or_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.failed { return ExprInvalid{} }
 
     for Parser.current_token.kind == .OR {
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         result_slot := claim_temp_slot(proto_state)
@@ -1379,7 +1398,7 @@ parse_fallback_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
             return left
         }
 
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
         result_slot := claim_temp_slot(proto_state)
@@ -1435,7 +1454,7 @@ parse_expr_list :: proc(proto_state: ^ProtoState, base_slot: int) -> (expr_count
         lower_expr_desc(proto_state, last_expr, dst_slot)
         if Parser.failed { return }
 
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
 
         last_expr = parse_expr(proto_state)
@@ -1511,7 +1530,7 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected '{' to start function body")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     for !Parser.failed && Parser.current_token.kind != .RIGHT_BRACE && Parser.current_token.kind != .EOF {
@@ -1529,7 +1548,7 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected '}' to close function body")
         return
     }
-    advance_token()
+    advance_token(proto_state)
 }
 
 // functionLiteral = "function" "(" [paramList [","]] ")" block.
@@ -1539,14 +1558,14 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
         compile_error_near(Parser.current_token, "expected 'function'")
         return
     }
-    advance_token()
+    advance_token(parent_proto_state)
     if Parser.failed { return }
 
     if Parser.current_token.kind != .LEFT_PAREN {
         compile_error_near(Parser.current_token, "expected '(' after function")
         return
     }
-    advance_token()
+    advance_token(parent_proto_state)
     if Parser.failed { return }
 
     // Parameters are collected before creating the child proto so its arity is known.
@@ -1563,7 +1582,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
                 compile_error_near(Parser.current_token, "expected parameter identifier")
                 return
             }
-            param_tokens[param_count] = advance_token()
+            param_tokens[param_count] = advance_token(parent_proto_state)
             if Parser.failed {
                 return
             }
@@ -1573,7 +1592,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
                 break
             }
 
-            advance_token()
+            advance_token(parent_proto_state)
             if Parser.failed { return }
             if Parser.current_token.kind == .RIGHT_PAREN {
                 break
@@ -1585,7 +1604,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
         compile_error_near(Parser.current_token, "expected ')' after function parameters")
         return
     }
-    advance_token()
+    advance_token(parent_proto_state)
     if Parser.failed { return }
 
     child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
@@ -1638,6 +1657,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     child_proto := end_proto(&child_proto_state)
     child_proto_index := len(parent_proto_state.child_protos)
     append(&parent_proto_state.child_protos, child_proto)
+    parent_proto_state.current_inst_line = child_line
     emit_load_func(parent_proto_state, dst, child_proto_index)
 }
 
@@ -1685,13 +1705,13 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected 'import'")
         return
     }
-    import_token := advance_token()
+    import_token := advance_token(proto_state)
     if Parser.failed { return }
 
     alias_token := Token{}
     has_alias := false
     if Parser.current_token.kind == .IDENT {
-        alias_token = advance_token()
+        alias_token = advance_token(proto_state)
         if Parser.failed { return }
         has_alias = true
     }
@@ -1700,7 +1720,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected module path string after import")
         return
     }
-    path_token := advance_token()
+    path_token := advance_token(proto_state)
     if Parser.failed { return }
 
     module_path := path_token.value.(string)
@@ -1828,7 +1848,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
         compile_error_near(Parser.current_token, "expected 'export'")
         return
     }
-    export_token := advance_token()
+    export_token := advance_token(proto_state)
     if Parser.failed { return }
 
     if !allow_export {
@@ -1849,7 +1869,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
         compile_error_near(Parser.current_token, "expected '{' after export")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     if Parser.current_token.kind == .RIGHT_BRACE {
@@ -1871,7 +1891,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
             compile_error_near(Parser.current_token, "expected binding name in export manifest")
             return
         }
-        name_token := advance_token()
+        name_token := advance_token(proto_state)
         if Parser.failed { return }
 
         name := name_token.value.(string)
@@ -1896,7 +1916,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
             break
         }
 
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
         if Parser.current_token.kind == .RIGHT_BRACE {
             break
@@ -1907,7 +1927,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
         compile_error_near(Parser.current_token, "expected '}' after export manifest")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     for export_index := 0; export_index < export_count; export_index += 1 {
@@ -1922,7 +1942,7 @@ parse_block_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected '{' to start block")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     begin_scope(proto_state)
@@ -1943,7 +1963,7 @@ parse_block_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected '}' to close block")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     end_scope(proto_state)
@@ -1955,7 +1975,7 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected 'if'")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     temp_save := proto_state.next_temp_slot
@@ -1975,7 +1995,7 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     if Parser.current_token.kind == .ELSE {
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
 
         end_jump := emit_jump(proto_state)
@@ -2004,7 +2024,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected 'for'")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     // Break fixups added after this point belong to this loop.
@@ -2062,7 +2082,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected 'switch'")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     // Keep the subject slot live across arms. Arms restore next_temp_slot
@@ -2090,7 +2110,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected '{' after switch subject")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     // Empty switch bodies are valid; any other first token must start an arm.
@@ -2102,7 +2122,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     defer delete(end_jumps)
 
     for Parser.current_token.kind == .CASE {
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
 
         case_slot := claim_temp_slot(proto_state)
@@ -2118,7 +2138,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
             compile_error_near(Parser.current_token, "expected ':' after switch case")
             return
         }
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
 
         cond_slot := case_slot
@@ -2154,13 +2174,13 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .ELSE {
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
         if Parser.current_token.kind != .COLON {
             compile_error_near(Parser.current_token, "expected ':' after switch else")
             return
         }
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
         parse_switch_arm_body(proto_state)
         if Parser.failed { return }
@@ -2174,7 +2194,7 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected '}' to close switch")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     for end_jump in end_jumps {
@@ -2213,7 +2233,7 @@ parse_break_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected 'break'")
         return
     }
-    break_token := advance_token()
+    break_token := advance_token(proto_state)
     if Parser.failed { return }
 
     if len(proto_state.loop_break_fixup_bases) == 0 {
@@ -2231,7 +2251,7 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected 'return'")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     if Parser.current_token.kind == .EOF || Parser.current_token.kind == .RIGHT_BRACE {
@@ -2295,7 +2315,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
         compile_error_near(Parser.current_token, "expected identifier")
         return
     }
-    ident_token = advance_token()
+    ident_token = advance_token(proto_state)
     if Parser.failed { return }
 
     expr = ExprUnresolvedBinding(ident_token)
@@ -2331,7 +2351,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
 
 // declStmt = ["global"] identList declOp exprList.
 finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutable: bool) {
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     lhs_count := len(lhs_tokens)
@@ -2580,7 +2600,7 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
         if Parser.failed { return }
     }
 
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     // RHS expression-list results start after any target-resolution temps.
@@ -2700,7 +2720,8 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     resolved_target := resolve_assign_target(proto_state, lhs_token, target)
     if Parser.failed { return }
 
-    op_token := advance_token()
+    op_token := advance_token(proto_state)
+    op_line, _ := source_line_col_at(Scanner.source, op_token.start)
     if Parser.failed { return }
 
     // Read current target value into value_slot.
@@ -2771,6 +2792,7 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     case:
         panic("compound assignment reached non-compound operator")
     }
+    set_last_inst_line(proto_state, op_line)
 
     if needs_writeback {
         set_assign_target(proto_state, value_slot, resolved_target)
@@ -2780,7 +2802,7 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
 
 // globalDecl = "global" identList declOp exprList.
 parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
-    global_token := advance_token()
+    global_token := advance_token(proto_state)
     if Parser.failed { return }
 
     lhs_tokens: [MAX_BINDINGS]Token
@@ -2798,7 +2820,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             return
         }
 
-        lhs_tokens[lhs_count] = advance_token()
+        lhs_tokens[lhs_count] = advance_token(proto_state)
         if Parser.failed { return }
         lhs_count += 1
 
@@ -2806,7 +2828,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             break
         }
 
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
     }
 
@@ -2824,7 +2846,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
         compile_error_near(Parser.current_token, "expected ':=' or '::' after global binding list")
         return
     }
-    advance_token()
+    advance_token(proto_state)
     if Parser.failed { return }
 
     for check_index := 0; check_index < lhs_count; check_index += 1 {
@@ -2926,7 +2948,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             break
         }
 
-        advance_token()
+        advance_token(proto_state)
         if Parser.failed { return }
     }
 
@@ -3108,12 +3130,14 @@ compile_source :: proc(source, source_name: string) -> string {
     Parser.current_token = Token{}
     Parser.failed = false
 
-    advance_token()
+    entry_proto_state := begin_proto(source_name, 1, "entry", 0, false, 0)
+
+    advance_token(&entry_proto_state)
     if Parser.failed {
+        delete_proto_state(&entry_proto_state)
         return Active_State.error_string
     }
 
-    entry_proto_state := begin_proto(source_name, 1, "entry", 0, false, 0)
     parse_top_level_statements(&entry_proto_state, false)
     if Parser.failed {
         delete_proto_state(&entry_proto_state)
@@ -3142,13 +3166,14 @@ compile_imported_source :: proc(source, source_name: string, env_index: int) -> 
     Parser.current_token = Token{}
     Parser.failed = false
 
-    advance_token()
-    if Parser.failed {
-        return nil, Active_State.error_string
-    }
-
     module_label := module_namespace_from_path(Active_State.envs[env_index].id)
     module_proto_state := begin_proto(source_name, 1, module_label, 0, false, env_index)
+
+    advance_token(&module_proto_state)
+    if Parser.failed {
+        delete_proto_state(&module_proto_state)
+        return nil, Active_State.error_string
+    }
 
     parse_top_level_statements(&module_proto_state, true)
     if Parser.failed {

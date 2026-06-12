@@ -379,6 +379,7 @@ Proto :: struct {
 
     // Compiled data.
     bytecode:     []u32,
+    inst_lines:   []int,
     const_pool:   []Value,
     child_protos: []^Proto,
 }
@@ -955,7 +956,13 @@ runtime_error :: proc(message: string) -> string {
         context_text = proto.proto_label
     }
 
-    return set_error(fmt.tprintf("%s[%d] Error in %s: %s", proto.source_name, proto.source_line, context_text, message))
+    line := proto.source_line
+    inst_index := frame.instruction_index - 1
+    if inst_index >= 0 && inst_index < len(proto.inst_lines) {
+        line = proto.inst_lines[inst_index]
+    }
+
+    return set_error(fmt.tprintf("%s[%d] Error in %s: %s", proto.source_name, line, context_text, message))
 }
 
 
@@ -989,6 +996,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
         // Jump offsets are applied relative to this post-fetch pc.
         word := bytecode[pc]
         pc += 1
+        frame.instruction_index = pc
 
         switch decode_op(word) {
         // case .HALT:
