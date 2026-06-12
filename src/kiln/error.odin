@@ -4,19 +4,11 @@ package kiln
 // Error state ====================================================================================
 
 // Kiln reports one compile or runtime error per host operation.
+// The error string is already the final printable diagnostic.
 
-// SourceLocation identifies one source position.
-// source_name borrows the active source name or a persistent module id.
-SourceLocation :: struct {
-    source_name: string,
-    line:        int,
-    column:      int,
-}
-
-// Converts a source byte offset into persistent one-based diagnostic coordinates.
-source_location_at :: proc(source_name, source: string, offset: int) -> SourceLocation {
-    line := 1
-    column := 1
+source_line_col_at :: proc(source: string, offset: int) -> (line: int, column: int) {
+    line = 1
+    column = 1
 
     for index := 0; index < offset; index += 1 {
         if source[index] == '\n' {
@@ -27,28 +19,14 @@ source_location_at :: proc(source_name, source: string, offset: int) -> SourceLo
         }
     }
 
-    return SourceLocation{
-        source_name = source_name,
-        line        = line,
-        column      = column,
-    }
+    return
 }
 
-// Error is the current operation diagnostic surfaced to the host.
-// Its strings are borrowed and remain valid for the current host operation.
-Error :: struct {
-    location:     SourceLocation,
-    runtime_context: string, // function context, e.g. "in helper()"
-    message:      string,
-}
-
-// Each state keeps one active error slot; subsequent errors overwrite.
-set_error :: proc(location: SourceLocation, message: string, context_text: string = "") -> ^Error {
-    Active_State.has_error = true
-    Active_State.error = Error{
-        location    = location,
-        runtime_context = context_text,
-        message      = message,
+set_error :: proc(text: string) -> string {
+    if text == "" {
+        panic("set_error called with empty error string")
     }
-    return &Active_State.error
+
+    Active_State.error_string = text
+    return Active_State.error_string
 }

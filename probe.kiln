@@ -26,7 +26,7 @@ current := counts[ext] else 0
 counts[ext] = current + 1
 
 current = counts[ext] else 0
-counts[ext] = current + 1
+counts[ext] = current + 1d
 
 assert_eq(counts[ext], 2, "fallback merge slot reused through map update")
 

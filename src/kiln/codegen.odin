@@ -1,5 +1,6 @@
 package kiln
 
+import "core:fmt"
 import "core:strings"
 
 // Proto-local bindings ===========================================================================
@@ -17,8 +18,9 @@ LocalBinding :: struct {
 // begin_proto creates its dynamic arrays; end_proto or delete_proto_state releases them.
 ProtoState :: struct {
     // Proto identity and current-file compile context.
-    origin:       SourceLocation,
-    name:         string,
+    source_name:  string,
+    source_line:  int,
+    proto_label:  string,
     param_count:  int,
     is_function:  bool,
     env_index:    int,
@@ -61,12 +63,12 @@ record_slots :: proc(proto_state: ^ProtoState, slots: ..int) {
 
 // Proto construction =============================================================================
 
-// origin identifies where this proto originated for diagnostics.
-// name is cloned because it can come from source token text.
-begin_proto :: proc(origin: SourceLocation, name: string, param_count: int, is_function: bool, env_index: int) -> ProtoState {
+// source_name and proto_label are cloned because they can come from source or host strings.
+begin_proto :: proc(source_name: string, source_line: int, proto_label: string, param_count: int, is_function: bool, env_index: int) -> ProtoState {
     return ProtoState{
-        origin                  = origin,
-        name                    = strings.clone(name),
+        source_name             = strings.clone(source_name),
+        source_line             = source_line,
+        proto_label             = strings.clone(proto_label),
         param_count             = param_count,
         is_function             = is_function,
         env_index               = env_index,
@@ -99,8 +101,10 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
 
     proto := new(Proto)
     proto^ = Proto{
-        origin           = proto_state.origin,
-        name             = proto_state.name,
+        source_name      = proto_state.source_name,
+        source_line      = proto_state.source_line,
+        proto_label      = proto_state.proto_label,
+        is_function      = proto_state.is_function,
         bytecode         = bytecode,
         const_pool       = const_pool,
         child_protos     = child_protos,
@@ -114,7 +118,8 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
 
 // Releases an unfinished ProtoState after compile failure. Successful compilation uses end_proto.
 delete_proto_state :: proc(proto_state: ^ProtoState) {
-    delete(proto_state.name)
+    delete(proto_state.source_name)
+    delete(proto_state.proto_label)
     delete(proto_state.bytecode)
     delete(proto_state.const_pool)
     delete(proto_state.child_protos)
@@ -133,7 +138,7 @@ const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(proto_state.origin, "too many constants in function")
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", proto_state.source_name, proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -153,7 +158,7 @@ const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(proto_state.origin, "too many constants in function")
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", proto_state.source_name, proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -178,7 +183,7 @@ const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(proto_state.origin, "too many constants in function")
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", proto_state.source_name, proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -482,7 +487,7 @@ emit_jump :: proc(proto_state: ^ProtoState, target_index: int = -1) -> int {
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
         if offset < MIN_JUMP_OFFSET || offset > MAX_JUMP_OFFSET {
-            set_error(proto_state.origin, "jump is too far")
+            set_error(fmt.tprintf("%s[%d] Error: jump is too far", proto_state.source_name, proto_state.source_line))
             Parser.failed = true
             return jump_index
         }
@@ -502,7 +507,7 @@ emit_jump_false :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: 
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
         if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
-            set_error(proto_state.origin, "conditional jump is too far")
+            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", proto_state.source_name, proto_state.source_line))
             Parser.failed = true
             return jump_index
         }
@@ -522,7 +527,7 @@ emit_jump_not_nil :: proc(proto_state: ^ProtoState, cond_slot: int, target_index
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
         if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
-            set_error(proto_state.origin, "conditional jump is too far")
+            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", proto_state.source_name, proto_state.source_line))
             Parser.failed = true
             return jump_index
         }
@@ -542,7 +547,7 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
     op := decode_op(word)
     if op == .JUMP {
         if offset < MIN_JUMP_OFFSET || offset > MAX_JUMP_OFFSET {
-            set_error(proto_state.origin, "jump is too far")
+            set_error(fmt.tprintf("%s[%d] Error: jump is too far", proto_state.source_name, proto_state.source_line))
             Parser.failed = true
             return
         }
@@ -554,7 +559,7 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
 
     if op == .JUMP_FALSE || op == .JUMP_NOT_NIL {
         if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
-            set_error(proto_state.origin, "conditional jump is too far")
+            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", proto_state.source_name, proto_state.source_line))
             Parser.failed = true
             return
         }
@@ -601,7 +606,7 @@ set_call_requested_results :: proc(proto_state: ^ProtoState, call_index, result_
     }
 
     if result_count >= CALL_OPEN_RESULTS {
-        set_error(proto_state.origin, "too many call results")
+        set_error(fmt.tprintf("%s[%d] Error: too many call results", proto_state.source_name, proto_state.source_line))
         Parser.failed = true
         return
     }

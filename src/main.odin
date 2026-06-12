@@ -7,32 +7,20 @@ import "core:strings"
 import "kiln"
 
 print_help :: proc() {
-    fmt.println("kiln")
+    fmt.println("kiln 0.0.0-pre-alpha")
     fmt.println("")
     fmt.println("Usage:")
     fmt.println("  kiln <file.kiln> [args...]")
-    fmt.println("  kiln disasm <file.kiln>")
+    fmt.println("  kiln dis <file.kiln>")
+    fmt.println("  kiln help")
+    fmt.println("  kiln version")
     fmt.println("")
-    fmt.println("Examples:")
-    fmt.println("  kiln tool.kiln")
-    fmt.println("  kiln copy-file.kiln input.txt out")
-    fmt.println("  kiln disasm bench.kiln")
+    fmt.println("The `.kiln` extension may be omitted.")
     fmt.println("")
-    fmt.println("The .kiln extension may be omitted.")
-}
+    fmt.println("Options:")
+    fmt.println("  -h, --help    Show help")
+    fmt.println("  -v, --version Show version")
 
-print_kiln_error :: proc(err: ^kiln.Error) {
-    name    := err.location.source_name
-    line    := err.location.line
-    col     := err.location.column
-    run_ctx := err.runtime_context
-    msg     := err.message
-
-    if run_ctx != "" {
-        fmt.eprintfln("%s[%d:%d] Error %s: %s", name, line, col, run_ctx, msg)
-    } else {
-        fmt.eprintfln("%s[%d:%d] Error: %s", name, line, col, msg)
-    }
 }
 
 main :: proc() {
@@ -48,9 +36,14 @@ main :: proc() {
         return
     }
 
-    if first_arg == "dis" || first_arg == "--dis" || first_arg == "-dis" {
+    if first_arg == "version" || first_arg == "--version" || first_arg == "-v" {
+        fmt.println("kiln 0.0.0-pre-alpha")
+        return
+    }
+
+    if first_arg == "dis" {
         if len(os.args) != 3 {
-            fmt.eprintln("usage: kiln disasm <file.kiln>")
+            fmt.eprintln("usage: kiln dis <file.kiln>")
             os.exit(1)
         }
 
@@ -81,8 +74,8 @@ main :: proc() {
         kiln.set_argv(kstate, os.args, 3)
 
         kasm, err := kiln.disassemble_file(kstate, source_path)
-        if err != nil {
-            print_kiln_error(err)
+        if err != "" {
+            fmt.eprintln(err)
             os.exit(1)
         }
 
@@ -118,8 +111,8 @@ main :: proc() {
     kiln.set_argv(kstate, os.args, script_args_start)
 
     _, err := kiln.run_file(kstate, source_path)
-    if err != nil {
-        print_kiln_error(err)
+    if err != "" {
+        fmt.eprintln(err)
         os.exit(1)
     }
 }

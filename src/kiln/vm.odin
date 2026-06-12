@@ -367,8 +367,10 @@ map_grow :: proc(map_object: ^MapObject) {
 // const-pool and child-proto tables.
 Proto :: struct {
     // Source identity used by runtime diagnostics.
-    origin:    SourceLocation,
-    name:      string,
+    source_name: string,
+    source_line: int,
+    proto_label: string,
+    is_function: bool,
 
     // Execution shape.
     frame_slot_count: int,
@@ -454,9 +456,8 @@ MAX_ENVS :: 256 // env binding operands use u8 env indexes
 
 // State is one host-owned Kiln runtime instance.
 State :: struct {
-    // Current host-operation diagnostic.
-    has_error: bool,
-    error:     Error,
+    // Current host-operation diagnostic. Empty means no current error.
+    error_string: string,
 
     // Compiled entry file.
     entry_proto: ^Proto,
@@ -528,8 +529,7 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
         // Existing builtin binding is being refreshed during host setup.
     } else {
         if Active_State.global_env.count >= MAX_BINDINGS {
-            set_error(SourceLocation{}, "too many global bindings")
-            return
+            panic("too many global bindings")
         }
 
         binding_index = binding_env_append(&Active_State.global_env, name, false)
@@ -556,11 +556,14 @@ env_find :: proc(id: string) -> int {
 }
 
 // Returns the existing env index for id or appends a new stable env index.
-// Caller must ensure capacity before creating a new env.
 bind_env :: proc(id: string) -> int {
     existing_index := env_find(id)
     if existing_index >= 0 {
         return existing_index
+    }
+
+    if Active_State.env_count >= MAX_ENVS {
+        panic("too many environments")
     }
 
     env_index := Active_State.env_count
@@ -576,8 +579,7 @@ bind_env_native_function :: proc(env_index: int, name: string, native_proc: Nati
 
     if binding_index < 0 {
         if env.count >= MAX_BINDINGS {
-            set_error(SourceLocation{}, "too many native env bindings")
-            return
+            panic("too many native env bindings")
         }
 
         binding_index = binding_env_append(env, name, false)
@@ -936,31 +938,30 @@ value_less_or_equal :: #force_inline proc(lhs, rhs: Value) -> bool {
 
 // Runtime errors =================================================================================
 
-runtime_error :: proc(message: string) -> ^Error {
+runtime_error :: proc(message: string) -> string {
     frame := &Active_State.frame_stack[Active_State.frame_count - 1]
     proto := frame.proto
 
-    // A one-frame run is file top-level execution. Deeper frames are user function calls.
-    context_text := "in entry file"
-    if Active_State.frame_count == 1 {
-        if proto.env_index != 0 {
-            context_text = "in module file"
+    context_text := ""
+    if !proto.is_function {
+        if proto.env_index == 0 {
+            context_text = "entry file"
+        } else {
+            env := &Active_State.envs[proto.env_index]
+            module_name := module_namespace_from_path(env.id)
+            context_text = fmt.tprintf("module %s", module_name)
         }
     } else {
-        if proto.name == "<function>" {
-            context_text = "in anonymous function"
-        } else {
-            context_text = fmt.tprintf("in `%s()`", proto.name)
-        }
+        context_text = proto.proto_label
     }
 
-    return set_error(proto.origin, message, context_text)
+    return set_error(fmt.tprintf("%s[%d] Error in %s: %s", proto.source_name, proto.source_line, context_text, message))
 }
 
 
 // VM runner ======================================================================================
 
-run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) {
+run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) {
     // Seed the first frame at slot window base 0.
     state.slot_count = proto.frame_slot_count
     state.frame_stack[0] = CallFrame {
@@ -1346,9 +1347,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_add(state.slots[lhs], state.slots[rhs])
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .SUB:
@@ -1386,9 +1387,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_sub(state.slots[lhs], state.slots[rhs])
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .CONCAT:
@@ -1397,9 +1398,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             lhs := slot_base + int(inst.b)
             rhs := slot_base + int(inst.c)
             state.slots[dst] = value_concat(state.slots[lhs], state.slots[rhs])
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .MUL:
@@ -1437,9 +1438,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_mul(state.slots[lhs], state.slots[rhs])
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .DIV:
@@ -1477,9 +1478,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_div(state.slots[lhs], state.slots[rhs])
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .MOD:
@@ -1498,9 +1499,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_mod(state.slots[lhs], state.slots[rhs])
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .ADD_CONST:
@@ -1538,9 +1539,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_add(state.slots[lhs], rhs)
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .SUB_CONST:
@@ -1578,9 +1579,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_sub(state.slots[lhs], rhs)
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .MUL_CONST:
@@ -1618,9 +1619,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_mul(state.slots[lhs], rhs)
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .DIV_CONST:
@@ -1658,9 +1659,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_div(state.slots[lhs], rhs)
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .MOD_CONST:
@@ -1679,9 +1680,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_mod(state.slots[lhs], rhs)
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .NEG:
@@ -1702,9 +1703,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = value_neg(state.slots[src])
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .EQUAL:
@@ -1824,9 +1825,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = Value(value_less(state.slots[lhs], state.slots[rhs]))
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .LESS_OR_EQUAL:
@@ -1864,9 +1865,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
             }
 
             state.slots[dst] = Value(value_less_or_equal(state.slots[lhs], state.slots[rhs]))
-            if state.has_error {
+            if state.error_string != "" {
                 frame.instruction_index = pc
-                return Value{}, &state.error
+                return Value{}, state.error_string
             }
 
         case .NOT:
@@ -1930,8 +1931,8 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 // Executes immediately in the caller frame. Writes results then shapes to requested.
                 native_function := cast(^NativeFunctionObject)callee_header
                 produced_results := native_function.impl(state, args_base, arg_count, call_base)
-                if state.has_error {
-                    return Value{}, &state.error
+                if state.error_string != "" {
+                    return Value{}, state.error_string
                 }
 
                 if requested_results == CALL_OPEN_RESULTS {
@@ -1978,7 +1979,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
 
                 // Extra fixed args are rejected; missing params filled with nil.
                 if arg_count > callee_proto.param_count {
-                    message := fmt.tprintf("too many arguments for `%s()`: expected %d, got %d", callee_proto.name, callee_proto.param_count, arg_count)
+                    message := fmt.tprintf("too many arguments for `%s()`: expected %d, got %d", callee_proto.proto_label, callee_proto.param_count, arg_count)
                     return Value{}, runtime_error(message)
                 }
 
@@ -2069,9 +2070,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: ^Error) 
                 // Top-level RETURN ends execution and returns to the host.
                 // Return first produced value when present, else nil.
                 if produced_results > 0 {
-                    return state.slots[produced_slot_base], nil
+                    return state.slots[produced_slot_base], ""
                 }
-                return Value{}, nil
+                return Value{}, ""
             }
 
             caller_result_base := slot_base - 1

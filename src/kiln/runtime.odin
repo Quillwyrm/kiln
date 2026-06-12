@@ -27,43 +27,40 @@ set_argv :: proc(state: ^State, argv: []string, args_start: int) {
 
 // run_source selects Active_State, clears previous error, compiles the import graph,
 // then executes the entry proto. Imports initialize during compilation.
-// When err != nil, result is undefined.
-run_source :: proc(state: ^State, source, source_name: string) -> (Value, ^Error) {
+// When err != "", result is undefined.
+run_source :: proc(state: ^State, source, source_name: string) -> (Value, string) {
     Active_State = state
-    state.has_error = false
-    state.error = Error{}
+    state.error_string = ""
 
     compile_error := compile_source(source, source_name)
-    if compile_error != nil {
+    if compile_error != "" {
         return Value{}, compile_error
     }
 
     vm_result, vm_error := run_proto(state, state.entry_proto)
-    if vm_error != nil {
+    if vm_error != "" {
         return vm_result, vm_error
     }
 
-    return vm_result, nil
+    return vm_result, ""
 }
 
 // run_file loads source text from disk and forwards to run_source.
 // The path is resolved to canonical form so envs[0].id matches import resolution.
-run_file :: proc(state: ^State, path: string) -> (result: Value, err: ^Error) {
+run_file :: proc(state: ^State, path: string) -> (result: Value, err: string) {
     Active_State = state
 
     resolved_path, abs_err := filepath.abs(path, context.allocator)
     if abs_err != nil {
         result := Value{}
-        location := SourceLocation{source_name = path, line = 0, column = 0}
-        return result, set_error(location, fmt.tprintf("failed to resolve path '%s'", path))
+        return result, set_error(fmt.tprintf("Error: failed to resolve path `%s`", path))
     }
     defer delete(resolved_path)
 
     source_bytes, read_error := os.read_entire_file(resolved_path, context.allocator)
     if read_error != nil {
         result := Value{}
-        location := SourceLocation{source_name = resolved_path, line = 0, column = 0}
-        return result, set_error(location, fmt.tprintf("failed to read '%s'", resolved_path))
+        return result, set_error(fmt.tprintf("Error: failed to read `%s`", resolved_path))
     }
     defer delete(source_bytes)
     return run_source(state, string(source_bytes), resolved_path)

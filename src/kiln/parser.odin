@@ -99,9 +99,7 @@ advance_token :: proc() -> Token {
 
     if Parser.current_token.kind == .ERROR {
         message := Parser.current_token.value.(string)
-        location := source_location_at(Scanner.source_name, Scanner.source, Parser.current_token.start)
-        set_error(location, message)
-        Parser.failed = true
+        compile_error(Parser.current_token, message)
     }
 
     return token
@@ -118,21 +116,33 @@ current_token_text :: proc() -> string {
     return Scanner.source[Parser.current_token.start:Scanner.index]
 }
 
-parser_error :: proc(proto_state: ^ProtoState, token: Token, message: string) {
-    location := source_location_at(proto_state.origin.source_name, Scanner.source, token.start)
-    set_error(location, message)
+token_text_for_error :: proc(token: Token) -> string {
+    if token.kind == .EOF {
+        return "end of file"
+    }
+
+    if token.kind == Parser.current_token.kind && token.start == Parser.current_token.start {
+        return current_token_text()
+    }
+
+    #partial switch token.kind {
+    case .IDENT, .STRING, .ERROR:
+        return token.value.(string)
+    }
+
+    return current_token_text()
+}
+
+compile_error :: proc(token: Token, message: string) {
+    line, column := source_line_col_at(Scanner.source, token.start)
+    set_error(fmt.tprintf("%s[%d:%d] Error: %s", Scanner.source_name, line, column, message))
     Parser.failed = true
 }
 
-// On mismatch records an error and returns zero token value.
-consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string) -> Token {
-    if Parser.current_token.kind == kind {
-        return advance_token()
-    }
-
-    token := Parser.current_token
-    parser_error(proto_state, token, message)
-    return Token{}
+compile_error_near :: proc(token: Token, message: string) {
+    line, column := source_line_col_at(Scanner.source, token.start)
+    set_error(fmt.tprintf("%s[%d:%d] Error near %s: %s", Scanner.source_name, line, column, token_text_for_error(token), message))
+    Parser.failed = true
 }
 
 
@@ -145,7 +155,7 @@ consume_token :: proc(proto_state: ^ProtoState, kind: TokenKind, message: string
 // while frame_slot_count only grows.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
-        parser_error(proto_state, Parser.current_token, "function uses too many values")
+        compile_error(Parser.current_token, "function uses too many values")
         return 0
     }
 
@@ -158,7 +168,7 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 // preventing temp reuse of slots that hold live expression results.
 reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
     if slot_after_last > MAX_FRAME_SLOTS {
-        parser_error(proto_state, Parser.current_token, "function uses too many values")
+        compile_error(Parser.current_token, "function uses too many values")
         return
     }
 
@@ -259,13 +269,13 @@ resolve_import_source_path :: proc(proto_state: ^ProtoState, path_token: Token, 
     candidate_path := source_path
     joined_path := ""
     if !filepath.is_abs(source_path) {
-        importer_dir := filepath.dir(proto_state.origin.source_name)
+        importer_dir := filepath.dir(proto_state.source_name)
         defer delete(importer_dir)
 
         join_parts := [?]string{importer_dir, source_path}
         path, join_error := filepath.join(join_parts[:], context.allocator)
         if join_error != nil {
-            parser_error(proto_state, path_token, fmt.tprintf("failed to resolve module path `%s`", module_path))
+            compile_error(path_token, fmt.tprintf("failed to resolve module path `%s`", module_path))
             return "", false
         }
 
@@ -279,7 +289,7 @@ resolve_import_source_path :: proc(proto_state: ^ProtoState, path_token: Token, 
     }
 
     if abs_error != nil {
-        parser_error(proto_state, path_token, fmt.tprintf("failed to resolve module path `%s`", module_path))
+        compile_error(path_token, fmt.tprintf("failed to resolve module path `%s`", module_path))
         return "", false
     }
 
@@ -347,16 +357,16 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
 
         import_index := import_namespace_find(proto_state, ident_name)
         if import_index >= 0 {
-            parser_error(proto_state, Token(desc), fmt.tprintf("namespace `%s` cannot be used as a value; access an exported binding with '.'", ident_name))
+            compile_error(Token(desc), fmt.tprintf("namespace `%s` cannot be used as a value; access an exported binding with '.'", ident_name))
             return
         }
 
         global_index := binding_env_find(&Active_State.global_env, ident_name)
         if global_index < 0 {
             if proto_state.is_function {
-                parser_error(proto_state, Token(desc), fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
+                compile_error(Token(desc), fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
             } else {
-                parser_error(proto_state, Token(desc), fmt.tprintf("binding `%s` is not declared", ident_name))
+                compile_error(Token(desc), fmt.tprintf("binding `%s` is not declared", ident_name))
             }
             return
         }
@@ -519,7 +529,11 @@ expr_writable_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
 
 // arrayLiteral = "[" [exprList [","]] "]".
 parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    consume_token(proto_state, .LEFT_BRACKET, "expected '[' to start array literal")
+    if Parser.current_token.kind != .LEFT_BRACKET {
+        compile_error_near(Parser.current_token, "expected '[' to start array literal")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     array_slot := claim_temp_slot(proto_state)
@@ -554,7 +568,11 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
         }
     }
 
-    consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after array literal")
+    if Parser.current_token.kind != .RIGHT_BRACKET {
+        compile_error_near(Parser.current_token, "expected ']' after array literal")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     if element_count < 65536 {
@@ -566,10 +584,18 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
 // mapLiteral = "map" "{" [mapEntryList [","]] "}".
 parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    consume_token(proto_state, .MAP, "expected 'map' to start map literal")
+    if Parser.current_token.kind != .MAP {
+        compile_error_near(Parser.current_token, "expected 'map' to start map literal")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
-    consume_token(proto_state, .LEFT_BRACE, "expected '{' after map")
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "expected '{' after map")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     map_slot := claim_temp_slot(proto_state)
@@ -593,17 +619,17 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 if Parser.failed { return ExprInvalid{} }
 
                 if Parser.current_token.kind == .LEFT_PAREN {
-                    parser_error(proto_state, Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got call expression")
+                    compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got call expression")
                     return ExprInvalid{}
                 }
 
                 if Parser.current_token.kind == .LEFT_BRACKET {
-                    parser_error(proto_state, Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got indexed expression")
+                    compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got indexed expression")
                     return ExprInvalid{}
                 }
 
                 if Parser.current_token.kind == .DOT {
-                    parser_error(proto_state, Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got field or namespace expression")
+                    compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got field or namespace expression")
                     return ExprInvalid{}
                 }
 
@@ -613,19 +639,23 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 if Parser.failed { return ExprInvalid{} }
 
             case:
-                parser_error(proto_state, key_token, "map key invalid; expected identifier shorthand or string literal")
+                compile_error_near(key_token, "map key invalid; expected identifier shorthand or string literal")
                 return ExprInvalid{}
             }
 
             for existing_key in key_texts {
                 if existing_key == key_text {
-                    parser_error(proto_state, key_token, fmt.tprintf("duplicate map key `%s`", key_text))
+                    compile_error(key_token, fmt.tprintf("duplicate map key `%s`", key_text))
                     return ExprInvalid{}
                 }
             }
             append(&key_texts, key_text)
 
-            consume_token(proto_state, .COLON, "map entry invalid; expected ':' after map key")
+            if Parser.current_token.kind != .COLON {
+                compile_error_near(Parser.current_token, "map entry invalid; expected ':' after map key")
+                return ExprInvalid{}
+            }
+            advance_token()
             if Parser.failed { return ExprInvalid{} }
 
             key_const := const_string(proto_state, key_text)
@@ -633,7 +663,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
             value_token := Parser.current_token
             if value_token.kind == .NIL {
-                parser_error(proto_state, value_token, fmt.tprintf("invalid value for key `%s` in map literal; nil literals are not valid in map literals", key_text))
+                compile_error(value_token, fmt.tprintf("invalid value for key `%s` in map literal; nil literals are not valid in map literals", key_text))
                 return ExprInvalid{}
             }
 
@@ -682,11 +712,15 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 
     if Parser.current_token.kind != .RIGHT_BRACE {
-        parser_error(proto_state, Parser.current_token, "map entry invalid; expected ',' or '}' after map value")
+        compile_error_near(Parser.current_token, "map entry invalid; expected ',' or '}' after map value")
         return ExprInvalid{}
     }
 
-    consume_token(proto_state, .RIGHT_BRACE, "expected '}' after map literal")
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "expected '}' after map literal")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     return ExprSlot(map_slot)
@@ -694,17 +728,25 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
 // groupedExpr = "(" expr ")".
 parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
-    consume_token(proto_state, .LEFT_PAREN, "expected '(' to start grouped expression")
+    if Parser.current_token.kind != .LEFT_PAREN {
+        compile_error_near(Parser.current_token, "expected '(' to start grouped expression")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     expr := parse_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    consume_token(proto_state, .RIGHT_PAREN, "expected ')' after grouped expression")
+    if Parser.current_token.kind != .RIGHT_PAREN {
+        compile_error_near(Parser.current_token, "expected ')' after grouped expression")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     if Parser.current_token.kind == .LEFT_PAREN || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .DOT {
-        parser_error(proto_state, Parser.current_token, "grouped expression cannot be used as a chain root")
+        compile_error(Parser.current_token, "grouped expression cannot be used as a chain root")
         return ExprInvalid{}
     }
 
@@ -721,7 +763,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        parse_function_literal(proto_state, slot, "<function>", Parser.current_token)
+        parse_function_literal(proto_state, slot, "function", Parser.current_token)
         if Parser.failed { return ExprInvalid{} }
         return ExprSlot(slot)
     }
@@ -735,7 +777,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 
     token := Parser.current_token
-    parser_error(proto_state, token, fmt.tprintf("expected chain expression, got `%s`", current_token_text()))
+    compile_error_near(token, fmt.tprintf("expected chain expression, got `%s`", current_token_text()))
     return ExprInvalid{}
 }
 
@@ -743,7 +785,11 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 // Layout: callee_slot, arg0, arg1, ...
 // Arguments are single-valued; call expansion only happens in return/assignment lists.
 parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDesc {
-    consume_token(proto_state, .LEFT_PAREN, "expected '(' to start call arguments")
+    if Parser.current_token.kind != .LEFT_PAREN {
+        compile_error_near(Parser.current_token, "expected '(' to start call arguments")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     base_slot: int
@@ -765,7 +811,7 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
         for {
             arg_slot := base_slot + 1 + arg_count
             if arg_slot >= MAX_FRAME_SLOTS {
-                parser_error(proto_state, Parser.current_token, "call uses too many values")
+                compile_error(Parser.current_token, "call uses too many values")
                 return ExprInvalid{}
             }
 
@@ -792,7 +838,11 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
         }
     }
 
-    consume_token(proto_state, .RIGHT_PAREN, "expected ')' after call arguments")
+    if Parser.current_token.kind != .RIGHT_PAREN {
+        compile_error_near(Parser.current_token, "expected ')' after call arguments")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     call_index := emit_call(proto_state, base_slot, arg_count, 1)
@@ -801,7 +851,11 @@ parse_call_postfix :: proc(proto_state: ^ProtoState, callee: ExprDesc) -> ExprDe
 
 // indexPostfix = "[" expr "]".
 parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> ExprDesc {
-    consume_token(proto_state, .LEFT_BRACKET, "expected '[' to start index expression")
+    if Parser.current_token.kind != .LEFT_BRACKET {
+        compile_error_near(Parser.current_token, "expected '[' to start index expression")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     // Preserve evaluation order:
@@ -820,7 +874,11 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     key_expr := parse_expr(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
-    consume_token(proto_state, .RIGHT_BRACKET, "expected ']' after index expression")
+    if Parser.current_token.kind != .RIGHT_BRACKET {
+        compile_error_near(Parser.current_token, "expected ']' after index expression")
+        return ExprInvalid{}
+    }
+    advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     // If the key expression is an i64 or string literal, encode it as a typed
@@ -855,15 +913,23 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
 // fieldPostfix = "." ident.
 // Current implementation supports imported module namespace access only.
 parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDesc {
-    dot_token := consume_token(proto_state, .DOT, "expected '.' to start access expression")
+    if Parser.current_token.kind != .DOT {
+        compile_error_near(Parser.current_token, "expected '.' to start access expression")
+        return ExprInvalid{}
+    }
+    dot_token := advance_token()
     if Parser.failed { return ExprInvalid{} }
 
-    member_token := consume_token(proto_state, .IDENT, "expected identifier after '.'")
+    if Parser.current_token.kind != .IDENT {
+        compile_error_near(Parser.current_token, "expected identifier after '.'")
+        return ExprInvalid{}
+    }
+    member_token := advance_token()
     if Parser.failed { return ExprInvalid{} }
 
     namespace_token, is_namespace_candidate := left.(ExprUnresolvedBinding)
     if !is_namespace_candidate {
-        parser_error(proto_state, dot_token, "invalid access expression; expected imported namespace before '.'")
+        compile_error(dot_token, "invalid access expression; expected imported namespace before '.'")
         return ExprInvalid{}
     }
 
@@ -872,15 +938,15 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
     local_index := local_binding_find(proto_state, namespace_name)
     if local_index >= 0 {
         if import_index >= 0 {
-            parser_error(proto_state, Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` shadows imported namespace", namespace_name))
+            compile_error(Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` shadows imported namespace", namespace_name))
         } else {
-            parser_error(proto_state, Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` is not an imported namespace", namespace_name))
+            compile_error(Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` is not an imported namespace", namespace_name))
         }
         return ExprInvalid{}
     }
 
     if import_index < 0 {
-        parser_error(proto_state, Token(namespace_token), fmt.tprintf("invalid access expression; namespace `%s` not found", namespace_name))
+        compile_error(Token(namespace_token), fmt.tprintf("invalid access expression; namespace `%s` not found", namespace_name))
         return ExprInvalid{}
     }
 
@@ -889,12 +955,12 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
     env := &Active_State.envs[env_index]
     binding_index := binding_env_find(env, member_name)
     if binding_index < 0 {
-        parser_error(proto_state, member_token, fmt.tprintf("invalid access expression; module `%s` has no binding `%s`", namespace_name, member_name))
+        compile_error(member_token, fmt.tprintf("invalid access expression; module `%s` has no binding `%s`", namespace_name, member_name))
         return ExprInvalid{}
     }
 
     if !(.EXPORTED in env.flags[binding_index]) {
-        parser_error(proto_state, member_token, fmt.tprintf("module `%s` does not export binding `%s`", namespace_name, member_name))
+        compile_error(member_token, fmt.tprintf("module `%s` does not export binding `%s`", namespace_name, member_name))
         return ExprInvalid{}
     }
 
@@ -961,7 +1027,7 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         return parse_chain_expr(proto_state)
     case:
         token := Parser.current_token
-        parser_error(proto_state, token, fmt.tprintf("expected expression, got `%s`", current_token_text()))
+        compile_error_near(token, fmt.tprintf("expected expression, got `%s`", current_token_text()))
         return ExprInvalid{}
     }
 }
@@ -1181,7 +1247,7 @@ parse_compare_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         // compareExpr allows one compareOp, not a chain.
         #partial switch Parser.current_token.kind {
         case .EQUAL, .NOT_EQUAL, .LESS, .LESS_OR_EQUAL, .GREATER, .GREATER_OR_EQUAL:
-            parser_error(proto_state, Parser.current_token, "comparison chaining is not valid; use parentheses or split the expression")
+            compile_error(Parser.current_token, "comparison chaining is not valid; use parentheses or split the expression")
             return ExprInvalid{}
         }
     }
@@ -1441,7 +1507,11 @@ finish_expr_list_to_slots :: proc(proto_state: ^ProtoState, base_slot: int, expr
 // Parameters and body-root locals share the function root scope.
 // Nested blocks still create scopes through normal statement parsing.
 parse_function_body :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .LEFT_BRACE, "expected '{' to start function body")
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "expected '{' to start function body")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     for !Parser.failed && Parser.current_token.kind != .RIGHT_BRACE && Parser.current_token.kind != .EOF {
@@ -1451,20 +1521,32 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .EOF {
-        parser_error(proto_state, Parser.current_token, "expected '}' to close function body")
+        compile_error_near(Parser.current_token, "expected '}' to close function body")
         return
     }
 
-    consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close function body")
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "expected '}' to close function body")
+        return
+    }
+    advance_token()
 }
 
 // functionLiteral = "function" "(" [paramList [","]] ")" block.
 // The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
 parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
-    consume_token(parent_proto_state, .FUNCTION, "expected 'function'")
+    if Parser.current_token.kind != .FUNCTION {
+        compile_error_near(Parser.current_token, "expected 'function'")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
-    consume_token(parent_proto_state, .LEFT_PAREN, "expected '(' after function")
+    if Parser.current_token.kind != .LEFT_PAREN {
+        compile_error_near(Parser.current_token, "expected '(' after function")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     // Parameters are collected before creating the child proto so its arity is known.
@@ -1473,11 +1555,15 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     if Parser.current_token.kind != .RIGHT_PAREN {
         for {
             if param_count >= MAX_CALL_ARGS {
-                parser_error(parent_proto_state, Parser.current_token, "too many function parameters")
+                compile_error(Parser.current_token, "too many function parameters")
                 return
             }
 
-            param_tokens[param_count] = consume_token(parent_proto_state, .IDENT, "expected parameter identifier")
+            if Parser.current_token.kind != .IDENT {
+                compile_error_near(Parser.current_token, "expected parameter identifier")
+                return
+            }
+            param_tokens[param_count] = advance_token()
             if Parser.failed {
                 return
             }
@@ -1495,11 +1581,15 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
         }
     }
 
-    consume_token(parent_proto_state, .RIGHT_PAREN, "expected ')' after function parameters")
+    if Parser.current_token.kind != .RIGHT_PAREN {
+        compile_error_near(Parser.current_token, "expected ')' after function parameters")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
-    child_origin := source_location_at(parent_proto_state.origin.source_name, Scanner.source, origin_token.start)
-    child_proto_state := begin_proto(child_origin, function_name, param_count, true, parent_proto_state.env_index)
+    child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
+    child_proto_state := begin_proto(parent_proto_state.source_name, child_line, function_name, param_count, true, parent_proto_state.env_index)
 
     for import_index := 0; import_index < parent_proto_state.import_count; import_index += 1 {
         child_proto_state.import_names[import_index] = parent_proto_state.import_names[import_index]
@@ -1514,7 +1604,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
         for prev_index := 0; prev_index < param_index; prev_index += 1 {
             if param_tokens[prev_index].value.(string) == param_name {
-                parser_error(&child_proto_state, param_tokens[param_index], fmt.tprintf("parameter binding `%s` is already declared in this function", param_name))
+                compile_error(param_tokens[param_index], fmt.tprintf("parameter binding `%s` is already declared in this function", param_name))
                 delete_proto_state(&child_proto_state)
                 return
             }
@@ -1541,7 +1631,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     // LOAD_FUNC creates the runtime function object when the parent executes.
     if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
         delete_proto_state(&child_proto_state)
-        parser_error(parent_proto_state, origin_token, "too many functions in function")
+        compile_error(origin_token, "too many functions in function")
         return
     }
 
@@ -1551,12 +1641,51 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     emit_load_func(parent_proto_state, dst, child_proto_index)
 }
 
+try_label_function :: proc(proto_state: ^ProtoState, rhs_expr: ExprDesc, label: string) -> bool {
+    rhs_slot, is_slot := rhs_expr.(ExprSlot)
+    if !is_slot {
+        return false
+    }
+
+    if len(proto_state.bytecode) == 0 {
+        return false
+    }
+
+    word := proto_state.bytecode[len(proto_state.bytecode) - 1]
+    if decode_op(word) != .LOAD_FUNC {
+        return false
+    }
+
+    inst := InstABx(word)
+    if int(inst.a) != int(rhs_slot) {
+        return false
+    }
+
+    child_proto_index := int(inst.b)
+    if child_proto_index >= len(proto_state.child_protos) {
+        panic("LOAD_FUNC child proto index out of range")
+    }
+
+    child_proto := proto_state.child_protos[child_proto_index]
+    if !child_proto.is_function || child_proto.proto_label != "function" {
+        return false
+    }
+
+    delete(child_proto.proto_label)
+    child_proto.proto_label = strings.clone(label)
+    return true
+}
+
 
 // Statements =====================================================================================
 
 // importStmt = "import" [ident] stringLiteral.
 parse_import_stmt :: proc(proto_state: ^ProtoState) {
-    import_token := consume_token(proto_state, .IMPORT, "expected 'import'")
+    if Parser.current_token.kind != .IMPORT {
+        compile_error_near(Parser.current_token, "expected 'import'")
+        return
+    }
+    import_token := advance_token()
     if Parser.failed { return }
 
     alias_token := Token{}
@@ -1567,7 +1696,11 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         has_alias = true
     }
 
-    path_token := consume_token(proto_state, .STRING, "expected module path string after import")
+    if Parser.current_token.kind != .STRING {
+        compile_error_near(Parser.current_token, "expected module path string after import")
+        return
+    }
+    path_token := advance_token()
     if Parser.failed { return }
 
     module_path := path_token.value.(string)
@@ -1579,30 +1712,30 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if namespace_name == "" {
-        parser_error(proto_state, path_token, "import namespace invalid; expected non-empty module name or explicit alias")
+        compile_error(path_token, "import namespace invalid; expected non-empty module name or explicit alias")
         return
     }
 
     if !module_namespace_is_valid(namespace_name) {
-        parser_error(proto_state, namespace_token, fmt.tprintf("import namespace `%s` invalid; expected identifier", namespace_name))
+        compile_error(namespace_token, fmt.tprintf("import namespace `%s` invalid; expected identifier", namespace_name))
         return
     }
 
     if proto_state.import_count >= MAX_ENVS {
-        parser_error(proto_state, import_token, "too many imports")
+        compile_error(import_token, "too many imports")
         return
     }
 
     import_index := import_namespace_find(proto_state, namespace_name)
     if import_index >= 0 {
-        parser_error(proto_state, namespace_token, fmt.tprintf("import namespace `%s` is already declared", namespace_name))
+        compile_error(namespace_token, fmt.tprintf("import namespace `%s` is already declared", namespace_name))
         return
     }
 
     current_env := &Active_State.envs[proto_state.env_index]
     current_top_level_index := binding_env_find(current_env, namespace_name)
     if current_top_level_index >= 0 {
-        parser_error(proto_state, namespace_token, fmt.tprintf("import namespace `%s` conflicts with top-level binding", namespace_name))
+        compile_error(namespace_token, fmt.tprintf("import namespace `%s` conflicts with top-level binding", namespace_name))
         return
     }
 
@@ -1617,7 +1750,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
             for loading_i := 0; loading_i < Active_State.loading_env_count; loading_i += 1 {
                 if Active_State.loading_env_indexes[loading_i] == env_index {
                     delete(resolved_source_path)
-                    parser_error(proto_state, path_token, fmt.tprintf("cyclic import detected for module `%s`", module_path))
+                    compile_error(path_token, fmt.tprintf("cyclic import detected for module `%s`", module_path))
                     return
                 }
             }
@@ -1626,14 +1759,14 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
             source_bytes, read_error := os.read_entire_file(resolved_source_path, context.allocator)
             if read_error != nil {
                 delete(resolved_source_path)
-                parser_error(proto_state, path_token, fmt.tprintf("failed to read module `%s`", module_path))
+                compile_error(path_token, fmt.tprintf("failed to read module `%s`", module_path))
                 return
             }
 
             if Active_State.env_count >= MAX_ENVS {
                 delete(source_bytes)
                 delete(resolved_source_path)
-                parser_error(proto_state, path_token, "too many modules")
+                compile_error(path_token, "too many modules")
                 return
             }
 
@@ -1653,7 +1786,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
             delete(source_bytes)
             delete(resolved_source_path)
 
-            if compile_error != nil {
+            if compile_error != "" {
                 Parser.failed = true
                 return
             }
@@ -1663,7 +1796,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
             // Pop after module init. Error paths leave State disposable.
             Active_State.loading_env_count -= 1
 
-            if run_error != nil {
+            if run_error != "" {
                 Parser.failed = true
                 return
             }
@@ -1671,7 +1804,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     } else {
         env_index = env_find(module_path)
         if env_index < 0 {
-            parser_error(proto_state, path_token, fmt.tprintf("module `%s` not found", module_path))
+            compile_error(path_token, fmt.tprintf("module `%s` not found", module_path))
             return
         }
     }
@@ -1679,7 +1812,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     for existing_import := 0; existing_import < proto_state.import_count; existing_import += 1 {
         if proto_state.import_env_indexes[existing_import] == env_index {
             existing_namespace := proto_state.import_names[existing_import]
-            parser_error(proto_state, path_token, fmt.tprintf("module `%s` is already imported as `%s`", module_path, existing_namespace))
+            compile_error(path_token, fmt.tprintf("module `%s` is already imported as `%s`", module_path, existing_namespace))
             return
         }
     }
@@ -1691,11 +1824,15 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
 
 // exportStmt = "export" | "export" "{" ident {"," ident} [","] "}".
 parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
-    export_token := consume_token(proto_state, .EXPORT, "expected 'export'")
+    if Parser.current_token.kind != .EXPORT {
+        compile_error_near(Parser.current_token, "expected 'export'")
+        return
+    }
+    export_token := advance_token()
     if Parser.failed { return }
 
     if !allow_export {
-        parser_error(proto_state, export_token, "export is only valid in module files")
+        compile_error(export_token, "export is only valid in module files")
         return
     }
 
@@ -1708,11 +1845,15 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
         return
     }
 
-    consume_token(proto_state, .LEFT_BRACE, "expected '{' after export")
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "expected '{' after export")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     if Parser.current_token.kind == .RIGHT_BRACE {
-        parser_error(proto_state, Parser.current_token, "export manifest invalid; expected at least one binding name")
+        compile_error(Parser.current_token, "export manifest invalid; expected at least one binding name")
         return
     }
 
@@ -1722,24 +1863,28 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
 
     for {
         if export_count >= MAX_BINDINGS {
-            parser_error(proto_state, Parser.current_token, "too many bindings in export manifest")
+            compile_error(Parser.current_token, "too many bindings in export manifest")
             return
         }
 
-        name_token := consume_token(proto_state, .IDENT, "expected binding name in export manifest")
+        if Parser.current_token.kind != .IDENT {
+            compile_error_near(Parser.current_token, "expected binding name in export manifest")
+            return
+        }
+        name_token := advance_token()
         if Parser.failed { return }
 
         name := name_token.value.(string)
         for prev_index := 0; prev_index < export_count; prev_index += 1 {
             if export_tokens[prev_index].value.(string) == name {
-                parser_error(proto_state, name_token, fmt.tprintf("duplicate export binding `%s`", name))
+                compile_error(name_token, fmt.tprintf("duplicate export binding `%s`", name))
                 return
             }
         }
 
         binding_index := binding_env_find(env, name)
         if binding_index < 0 {
-            parser_error(proto_state, name_token, fmt.tprintf("export binding `%s` is not declared in this module", name))
+            compile_error(name_token, fmt.tprintf("export binding `%s` is not declared in this module", name))
             return
         }
 
@@ -1758,7 +1903,11 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
         }
     }
 
-    consume_token(proto_state, .RIGHT_BRACE, "expected '}' after export manifest")
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "expected '}' after export manifest")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     for export_index := 0; export_index < export_count; export_index += 1 {
@@ -1769,7 +1918,11 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
 
 // block = "{" {stmt} "}".
 parse_block_stmt :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .LEFT_BRACE, "expected '{' to start block")
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "expected '{' to start block")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     begin_scope(proto_state)
@@ -1782,11 +1935,15 @@ parse_block_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .EOF {
-        parser_error(proto_state, Parser.current_token, "expected '}' to close block")
+        compile_error_near(Parser.current_token, "expected '}' to close block")
         return
     }
 
-    consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close block")
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "expected '}' to close block")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     end_scope(proto_state)
@@ -1794,7 +1951,11 @@ parse_block_stmt :: proc(proto_state: ^ProtoState) {
 
 // ifStmt = "if" expr block ["else" (ifStmt | block)].
 parse_if_stmt :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .IF, "expected 'if'")
+    if Parser.current_token.kind != .IF {
+        compile_error_near(Parser.current_token, "expected 'if'")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     temp_save := proto_state.next_temp_slot
@@ -1839,7 +2000,11 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
 
 // forStmt = "for" expr block | "for" block.
 parse_for_stmt :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .FOR, "expected 'for'")
+    if Parser.current_token.kind != .FOR {
+        compile_error_near(Parser.current_token, "expected 'for'")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     // Break fixups added after this point belong to this loop.
@@ -1893,7 +2058,11 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
 
 // switchStmt = "switch" expr switchBody | "switch" switchBody.
 parse_switch_stmt :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .SWITCH, "expected 'switch'")
+    if Parser.current_token.kind != .SWITCH {
+        compile_error_near(Parser.current_token, "expected 'switch'")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     // Keep the subject slot live across arms. Arms restore next_temp_slot
@@ -1917,12 +2086,16 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         proto_state.next_temp_slot = subject_live_cursor
     }
 
-    consume_token(proto_state, .LEFT_BRACE, "expected '{' after switch subject")
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "expected '{' after switch subject")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     // Empty switch bodies are valid; any other first token must start an arm.
     if Parser.current_token.kind != .CASE && Parser.current_token.kind != .ELSE && Parser.current_token.kind != .RIGHT_BRACE {
-        parser_error(proto_state, Parser.current_token, "expected 'case', 'else', or '}' in switch")
+        compile_error_near(Parser.current_token, "expected 'case', 'else', or '}' in switch")
         return
     }
     end_jumps := make([dynamic]int)
@@ -1941,7 +2114,11 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
         lower_expr_desc(proto_state, case_expr, case_slot)
         if Parser.failed { return }
 
-        consume_token(proto_state, .COLON, "expected ':' after switch case")
+        if Parser.current_token.kind != .COLON {
+            compile_error_near(Parser.current_token, "expected ':' after switch case")
+            return
+        }
+        advance_token()
         if Parser.failed { return }
 
         cond_slot := case_slot
@@ -1979,17 +2156,25 @@ parse_switch_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.current_token.kind == .ELSE {
         advance_token()
         if Parser.failed { return }
-        consume_token(proto_state, .COLON, "expected ':' after switch else")
+        if Parser.current_token.kind != .COLON {
+            compile_error_near(Parser.current_token, "expected ':' after switch else")
+            return
+        }
+        advance_token()
         if Parser.failed { return }
         parse_switch_arm_body(proto_state)
         if Parser.failed { return }
         if Parser.current_token.kind == .CASE {
-            parser_error(proto_state, Parser.current_token, "case cannot appear after else")
+            compile_error(Parser.current_token, "case cannot appear after else")
             return
         }
     }
 
-    consume_token(proto_state, .RIGHT_BRACE, "expected '}' to close switch")
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "expected '}' to close switch")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     for end_jump in end_jumps {
@@ -2015,7 +2200,7 @@ parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
 
     if statement_count == 0 {
         end_scope(proto_state)
-        parser_error(proto_state, Parser.current_token, "switch arm must have at least one statement")
+        compile_error(Parser.current_token, "switch arm must have at least one statement")
         return
     }
 
@@ -2024,11 +2209,15 @@ parse_switch_arm_body :: proc(proto_state: ^ProtoState) {
 
 // breakStmt = "break".
 parse_break_stmt :: proc(proto_state: ^ProtoState) {
-    break_token := consume_token(proto_state, .BREAK, "expected 'break'")
+    if Parser.current_token.kind != .BREAK {
+        compile_error_near(Parser.current_token, "expected 'break'")
+        return
+    }
+    break_token := advance_token()
     if Parser.failed { return }
 
     if len(proto_state.loop_break_fixup_bases) == 0 {
-        parser_error(proto_state, break_token, "break is only valid inside loops")
+        compile_error(break_token, "break is only valid inside loops")
         return
     }
 
@@ -2038,7 +2227,11 @@ parse_break_stmt :: proc(proto_state: ^ProtoState) {
 
 // returnStmt = "return" [exprList].
 parse_return_stmt :: proc(proto_state: ^ProtoState) {
-    consume_token(proto_state, .RETURN, "expected 'return'")
+    if Parser.current_token.kind != .RETURN {
+        compile_error_near(Parser.current_token, "expected 'return'")
+        return
+    }
+    advance_token()
     if Parser.failed { return }
 
     if Parser.current_token.kind == .EOF || Parser.current_token.kind == .RIGHT_BRACE {
@@ -2052,7 +2245,7 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     if expr_count > MAX_FRAME_SLOTS {
-        parser_error(proto_state, Parser.current_token, "return has too many values")
+        compile_error(Parser.current_token, "return has too many values")
         return
     }
 
@@ -2098,7 +2291,11 @@ parse_return_stmt :: proc(proto_state: ^ProtoState) {
 
 // simpleStmtPrefix = ident {postfix}.
 parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Token, expr: ExprDesc) {
-    ident_token = consume_token(proto_state, .IDENT, "expected identifier")
+    if Parser.current_token.kind != .IDENT {
+        compile_error_near(Parser.current_token, "expected identifier")
+        return
+    }
+    ident_token = advance_token()
     if Parser.failed { return }
 
     expr = ExprUnresolvedBinding(ident_token)
@@ -2148,26 +2345,26 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
             for prev_index := 0; prev_index < check_index; prev_index += 1 {
                 if lhs_tokens[prev_index].value.(string) == check_name {
-                    parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in top-level declaration", check_name))
+                    compile_error(lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in top-level declaration", check_name))
                     return
                 }
             }
 
             current_top_level_index := binding_env_find(current_top_level_env, check_name)
             if current_top_level_index >= 0 {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` is already declared", check_name))
+                compile_error(lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` is already declared", check_name))
                 return
             }
 
             import_index := import_namespace_find(proto_state, check_name)
             if import_index >= 0 {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` conflicts with imported namespace", check_name))
+                compile_error(lhs_tokens[check_index], fmt.tprintf("top-level binding `%s` conflicts with imported namespace", check_name))
                 return
             }
         }
 
         if current_top_level_env.count + lhs_count > MAX_BINDINGS {
-            parser_error(proto_state, lhs_tokens[0], "too many top-level bindings")
+            compile_error(lhs_tokens[0], "too many top-level bindings")
             return
         }
 
@@ -2181,11 +2378,19 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
         if Parser.failed { return }
 
         if expr_count > lhs_count {
-            parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
+            compile_error(Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
             return
         }
 
         if lhs_count == 1 && expr_count == 1 {
+            binding_name := lhs_tokens[0].value.(string)
+            label := binding_name
+            if proto_state.env_index != 0 {
+                module_name := module_namespace_from_path(Active_State.envs[proto_state.env_index].id)
+                label = fmt.tprintf("%s.%s", module_name, binding_name)
+            }
+            try_label_function(proto_state, last_expr, label)
+
             _, final_is_call := last_expr.(ExprCall)
             if !final_is_call {
                 src_slot := expr_read_slot(proto_state, last_expr)
@@ -2211,7 +2416,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
         for prev_index := 0; prev_index < check_index; prev_index += 1 {
             if lhs_tokens[prev_index].value.(string) == check_name {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in local declaration", check_name))
+                compile_error(lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in local declaration", check_name))
                 return
             }
         }
@@ -2223,14 +2428,14 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 
         for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
             if proto_state.local_bindings[local_index].name == check_name {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("local binding `%s` is already declared in this scope", check_name))
+                compile_error(lhs_tokens[check_index], fmt.tprintf("local binding `%s` is already declared in this scope", check_name))
                 return
             }
         }
     }
 
     if proto_state.local_count + lhs_count > MAX_FRAME_SLOTS {
-        parser_error(proto_state, lhs_tokens[0], "too many local bindings in function")
+        compile_error(lhs_tokens[0], "too many local bindings in function")
         return
     }
 
@@ -2242,8 +2447,13 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     if Parser.failed { return }
 
     if expr_count > lhs_count {
-        parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
+        compile_error(Parser.current_token, fmt.tprintf("too many values in declaration: expected %d", lhs_count))
         return
+    }
+
+    if lhs_count == 1 && expr_count == 1 {
+        label := lhs_tokens[0].value.(string)
+        try_label_function(proto_state, last_expr, label)
     }
 
     finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
@@ -2265,7 +2475,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
         local_index := local_binding_find(proto_state, ident_text)
         if local_index >= 0 {
             if !proto_state.local_bindings[local_index].is_mutable {
-                parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
+                compile_error(source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
                 return ExprInvalid{}
             }
 
@@ -2276,7 +2486,7 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
         binding_index := binding_env_find(env, ident_text)
         if binding_index >= 0 {
             if !(.MUTABLE in env.flags[binding_index]) {
-                parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
+                compile_error(source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
                 return ExprInvalid{}
             }
 
@@ -2285,22 +2495,22 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
         import_index := import_namespace_find(proto_state, ident_text)
         if import_index >= 0 {
-            parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is an imported namespace; namespace names are not assignable", ident_text))
+            compile_error(source_token, fmt.tprintf("assignment target `%s` is an imported namespace; namespace names are not assignable", ident_text))
             return ExprInvalid{}
         }
 
         global_index := binding_env_find(&Active_State.global_env, ident_text)
         if global_index < 0 {
             if proto_state.is_function {
-                parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is not a declared binding in this function; Kiln does not support closures or upvalues", ident_text))
+                compile_error(source_token, fmt.tprintf("assignment target `%s` is not a declared binding in this function; Kiln does not support closures or upvalues", ident_text))
             } else {
-                parser_error(proto_state, source_token, fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
+                compile_error(source_token, fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
             }
             return ExprInvalid{}
         }
 
         if !(.MUTABLE in Active_State.global_env.flags[global_index]) {
-            parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
+            compile_error(source_token, fmt.tprintf("cannot assign to immutable binding `%s`", ident_text))
             return ExprInvalid{}
         }
 
@@ -2310,17 +2520,17 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
         return target
 
     case ExprCall:
-        parser_error(proto_state, source_token, fmt.tprintf("call expression `%s` is not an assignment target; expected identifier or indexed expression", source_token.value.(string)))
+        compile_error(source_token, fmt.tprintf("call expression `%s` is not an assignment target; expected identifier or indexed expression", source_token.value.(string)))
         return ExprInvalid{}
 
     case ExprImportedBinding:
         env := &Active_State.envs[t.env_index]
         if !(.EXPORTED in env.flags[t.binding_index]) {
-            parser_error(proto_state, source_token, fmt.tprintf("module does not export binding `%s`", env.names[t.binding_index]))
+            compile_error(source_token, fmt.tprintf("module does not export binding `%s`", env.names[t.binding_index]))
             return ExprInvalid{}
         }
         if !(.MUTABLE in env.flags[t.binding_index]) {
-            parser_error(proto_state, source_token, fmt.tprintf("cannot assign to immutable binding `%s`", env.names[t.binding_index]))
+            compile_error(source_token, fmt.tprintf("cannot assign to immutable binding `%s`", env.names[t.binding_index]))
             return ExprInvalid{}
         }
 
@@ -2380,8 +2590,46 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
     if Parser.failed { return }
 
     if expr_count > target_count {
-        parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in assignment: expected %d", target_count))
+        compile_error(Parser.current_token, fmt.tprintf("too many values in assignment: expected %d", target_count))
         return
+    }
+
+    if target_count == 1 && expr_count == 1 {
+        has_label := false
+        label := ""
+
+        #partial switch target in targets[0] {
+        case ExprLocalBinding:
+            label = proto_state.local_bindings[int(target)].name
+            has_label = true
+
+        case ExprFileBinding:
+            binding_name := Active_State.envs[proto_state.env_index].names[int(target)]
+            if proto_state.env_index != 0 {
+                module_name := module_namespace_from_path(Active_State.envs[proto_state.env_index].id)
+                label = fmt.tprintf("%s.%s", module_name, binding_name)
+            } else {
+                label = binding_name
+            }
+            has_label = true
+
+        case ExprGlobalBinding:
+            label = Active_State.global_env.names[int(target)]
+            has_label = true
+
+        case ExprImportedBinding:
+            env := &Active_State.envs[target.env_index]
+            module_name := module_namespace_from_path(env.id)
+            binding_name := env.names[target.binding_index]
+            label = fmt.tprintf("%s.%s", module_name, binding_name)
+            has_label = true
+
+        case:
+        }
+
+        if has_label {
+            try_label_function(proto_state, last_expr, label)
+        }
     }
 
     // Fast path for:
@@ -2541,12 +2789,12 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     for {
         if lhs_count >= MAX_BINDINGS {
-            parser_error(proto_state, Parser.current_token, "too many global bindings in declaration")
+            compile_error(Parser.current_token, "too many global bindings in declaration")
             return
         }
 
         if Parser.current_token.kind != .IDENT {
-            parser_error(proto_state, Parser.current_token, "expected identifier in global declaration")
+            compile_error_near(Parser.current_token, "expected identifier in global declaration")
             return
         }
 
@@ -2563,7 +2811,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .ASSIGN {
-        parser_error(proto_state, Parser.current_token, "global declarations use ':=' or '::', not '='")
+        compile_error(Parser.current_token, "global declarations use ':=' or '::', not '='")
         return
     }
 
@@ -2573,7 +2821,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     } else if Parser.current_token.kind == .IMMUTABLE_DECL {
         is_mutable = false
     } else {
-        parser_error(proto_state, Parser.current_token, "expected ':=' or '::' after global binding list")
+        compile_error_near(Parser.current_token, "expected ':=' or '::' after global binding list")
         return
     }
     advance_token()
@@ -2584,20 +2832,20 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
         for prev_index := 0; prev_index < check_index; prev_index += 1 {
             if lhs_tokens[prev_index].value.(string) == check_name {
-                parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in global declaration", check_name))
+                compile_error(lhs_tokens[check_index], fmt.tprintf("duplicate binding `%s` in global declaration", check_name))
                 return
             }
         }
 
         global_index := binding_env_find(&Active_State.global_env, check_name)
         if global_index >= 0 {
-            parser_error(proto_state, lhs_tokens[check_index], fmt.tprintf("global binding `%s` is already declared", check_name))
+            compile_error(lhs_tokens[check_index], fmt.tprintf("global binding `%s` is already declared", check_name))
             return
         }
     }
 
     if Active_State.global_env.count + lhs_count > MAX_BINDINGS {
-        parser_error(proto_state, global_token, "too many global bindings")
+        compile_error(global_token, "too many global bindings")
         return
     }
 
@@ -2611,11 +2859,14 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     if expr_count > lhs_count {
-        parser_error(proto_state, Parser.current_token, fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
+        compile_error(Parser.current_token, fmt.tprintf("too many values in global declaration: expected %d", lhs_count))
         return
     }
 
     if lhs_count == 1 && expr_count == 1 {
+        label := lhs_tokens[0].value.(string)
+        try_label_function(proto_state, last_expr, label)
+
         _, final_is_call := last_expr.(ExprCall)
         if !final_is_call {
             src_slot := expr_read_slot(proto_state, last_expr)
@@ -2641,7 +2892,7 @@ parse_call_stmt :: proc(proto_state: ^ProtoState) {
 
     call_expr, is_call := expr.(ExprCall)
     if !is_call {
-        parser_error(proto_state, Parser.current_token, "call statement must end in a call")
+        compile_error(Parser.current_token, "call statement must end in a call")
         return
     }
 
@@ -2663,7 +2914,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
     for {
         if lhs_count >= MAX_FRAME_SLOTS {
-            parser_error(proto_state, Parser.current_token, "too many assignment targets")
+            compile_error(Parser.current_token, "too many assignment targets")
             return
         }
 
@@ -2685,7 +2936,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             #partial switch target in targets[target_index] {
             case ExprUnresolvedBinding:
             case:
-                parser_error(proto_state, lhs_tokens[target_index], "declaration target must be an identifier")
+                compile_error(lhs_tokens[target_index], "declaration target must be an identifier")
                 return
             }
         }
@@ -2699,7 +2950,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             #partial switch target in targets[target_index] {
             case ExprUnresolvedBinding:
             case:
-                parser_error(proto_state, lhs_tokens[target_index], "declaration target must be an identifier")
+                compile_error(lhs_tokens[target_index], "declaration target must be an identifier")
                 return
             }
         }
@@ -2719,7 +2970,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
        Parser.current_token.kind == .SLASH_ASSIGN ||
        Parser.current_token.kind == .MOD_ASSIGN {
         if lhs_count != 1 {
-            parser_error(proto_state, Parser.current_token, "compound assignment expects one assignment target")
+            compile_error(Parser.current_token, "compound assignment expects one assignment target")
             return
         }
 
@@ -2736,16 +2987,16 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
 
         #partial switch target in targets[0] {
         case ExprUnresolvedBinding:
-            parser_error(proto_state, lhs_tokens[0], fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
+            compile_error(lhs_tokens[0], fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
         case ExprIndex, ExprArrayIndexConst, ExprMapIndexConst:
-            parser_error(proto_state, lhs_tokens[0], fmt.tprintf("indexed expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)))
+            compile_error(lhs_tokens[0], fmt.tprintf("indexed expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)))
         case:
-            parser_error(proto_state, lhs_tokens[0], fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
+            compile_error(lhs_tokens[0], fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
         }
         return
     }
 
-    parser_error(proto_state, Parser.current_token, "expected declaration or assignment after target list")
+    compile_error_near(Parser.current_token, "expected declaration or assignment after target list")
 }
 
 // stmt = block | simpleStmt | ifStmt | forStmt | switchStmt | returnStmt | breakStmt.
@@ -2781,11 +3032,11 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .CASE {
-        parser_error(proto_state, Parser.current_token, "case is only valid inside switch")
+        compile_error(Parser.current_token, "case is only valid inside switch")
         return
     }
     if Parser.current_token.kind == .ELSE {
-        parser_error(proto_state, Parser.current_token, "else is only valid after if or inside switch")
+        compile_error(Parser.current_token, "else is only valid after if or inside switch")
         return
     }
 
@@ -2795,12 +3046,12 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .IMPORT {
-        parser_error(proto_state, Parser.current_token, "import statements must appear before other top-level statements")
+        compile_error(Parser.current_token, "import statements must appear before other top-level statements")
         return
     }
 
     if Parser.current_token.kind == .EXPORT {
-        parser_error(proto_state, Parser.current_token, "export is only valid as final top-level module statement")
+        compile_error(Parser.current_token, "export is only valid as final top-level module statement")
         return
     }
 
@@ -2810,7 +3061,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     token := Parser.current_token
-    parser_error(proto_state, token, fmt.tprintf("expected statement, got `%s`", current_token_text()))
+    compile_error_near(token, fmt.tprintf("expected statement, got `%s`", current_token_text()))
 }
 
 // sourceFile = {importStmt} fileBody [exportStmt].
@@ -2827,7 +3078,7 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState, allow_export: bool)
             if Parser.failed { return }
 
             if Parser.current_token.kind != .EOF {
-                parser_error(proto_state, Parser.current_token, "export must be final top-level statement")
+                compile_error(Parser.current_token, "export must be final top-level statement")
                 return
             }
 
@@ -2844,7 +3095,7 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState, allow_export: bool)
 // Source compilation =============================================================================
 
 // On success installs Active_State.entry_proto for VM execution.
-compile_source :: proc(source, source_name: string) -> ^Error {
+compile_source :: proc(source, source_name: string) -> string {
     Active_State.envs[0].id = strings.clone(source_name)
     Active_State.envs[0].count = 0
 
@@ -2859,19 +3110,14 @@ compile_source :: proc(source, source_name: string) -> ^Error {
 
     advance_token()
     if Parser.failed {
-        return &Active_State.error
+        return Active_State.error_string
     }
 
-    entry_origin := SourceLocation{
-        source_name = source_name,
-        line        = 1,
-        column      = 1,
-    }
-    entry_proto_state := begin_proto(entry_origin, "entry", 0, false, 0)
+    entry_proto_state := begin_proto(source_name, 1, "entry", 0, false, 0)
     parse_top_level_statements(&entry_proto_state, false)
     if Parser.failed {
         delete_proto_state(&entry_proto_state)
-        return &Active_State.error
+        return Active_State.error_string
     }
 
     // Source fallthrough is defined as implicit `return nil`.
@@ -2879,18 +3125,18 @@ compile_source :: proc(source, source_name: string) -> ^Error {
     return_slot := claim_temp_slot(&entry_proto_state)
     if Parser.failed {
         delete_proto_state(&entry_proto_state)
-        return &Active_State.error
+        return Active_State.error_string
     }
     emit_load_nil(&entry_proto_state, return_slot)
     emit_return(&entry_proto_state, return_slot, 1)
 
     Active_State.entry_proto = end_proto(&entry_proto_state)
     Active_State.loading_env_count -= 1
-    return nil
+    return ""
 }
 
 // On success returns a runnable module proto.
-compile_imported_source :: proc(source, source_name: string, env_index: int) -> (module_proto: ^Proto, err: ^Error) {
+compile_imported_source :: proc(source, source_name: string, env_index: int) -> (module_proto: ^Proto, err: string) {
     begin_scan(source, source_name)
 
     Parser.current_token = Token{}
@@ -2898,31 +3144,27 @@ compile_imported_source :: proc(source, source_name: string, env_index: int) -> 
 
     advance_token()
     if Parser.failed {
-        return nil, &Active_State.error
+        return nil, Active_State.error_string
     }
 
-    module_origin := SourceLocation{
-        source_name = source_name,
-        line        = 1,
-        column      = 1,
-    }
-    module_proto_state := begin_proto(module_origin, Active_State.envs[env_index].id, 0, false, env_index)
+    module_label := module_namespace_from_path(Active_State.envs[env_index].id)
+    module_proto_state := begin_proto(source_name, 1, module_label, 0, false, env_index)
 
     parse_top_level_statements(&module_proto_state, true)
     if Parser.failed {
         delete_proto_state(&module_proto_state)
-        return nil, &Active_State.error
+        return nil, Active_State.error_string
     }
 
     // Module fallthrough is defined as implicit `return nil`.
     return_slot := claim_temp_slot(&module_proto_state)
     if Parser.failed {
         delete_proto_state(&module_proto_state)
-        return nil, &Active_State.error
+        return nil, Active_State.error_string
     }
     emit_load_nil(&module_proto_state, return_slot)
     emit_return(&module_proto_state, return_slot, 1)
 
     module_proto = end_proto(&module_proto_state)
-    return module_proto, nil
+    return module_proto, ""
 }
