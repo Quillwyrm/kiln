@@ -7,4 +7,10 @@ bar :: function(value) {
     return value + hidden
 }
 
+m := [function() { }]
+
+m[0]()
+
+
+
 export { bar, counter }

@@ -169,7 +169,7 @@ const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", proto_state.source_name, proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -189,7 +189,7 @@ const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", proto_state.source_name, proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -214,7 +214,7 @@ const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", proto_state.source_name, proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -518,7 +518,7 @@ emit_jump :: proc(proto_state: ^ProtoState, target_index: int = -1) -> int {
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
         if offset < MIN_JUMP_OFFSET || offset > MAX_JUMP_OFFSET {
-            set_error(fmt.tprintf("%s[%d] Error: jump is too far", proto_state.source_name, proto_state.source_line))
+            set_error(fmt.tprintf("%s[%d] Error: jump is too far", error_source_name(proto_state.source_name), proto_state.source_line))
             Parser.failed = true
             return jump_index
         }
@@ -538,7 +538,7 @@ emit_jump_false :: proc(proto_state: ^ProtoState, cond_slot: int, target_index: 
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
         if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
-            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", proto_state.source_name, proto_state.source_line))
+            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", error_source_name(proto_state.source_name), proto_state.source_line))
             Parser.failed = true
             return jump_index
         }
@@ -558,7 +558,7 @@ emit_jump_not_nil :: proc(proto_state: ^ProtoState, cond_slot: int, target_index
     if target_index >= 0 {
         offset = target_index - (jump_index + 1)
         if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
-            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", proto_state.source_name, proto_state.source_line))
+            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", error_source_name(proto_state.source_name), proto_state.source_line))
             Parser.failed = true
             return jump_index
         }
@@ -578,7 +578,7 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
     op := decode_op(word)
     if op == .JUMP {
         if offset < MIN_JUMP_OFFSET || offset > MAX_JUMP_OFFSET {
-            set_error(fmt.tprintf("%s[%d] Error: jump is too far", proto_state.source_name, proto_state.source_line))
+            set_error(fmt.tprintf("%s[%d] Error: jump is too far", error_source_name(proto_state.source_name), proto_state.source_line))
             Parser.failed = true
             return
         }
@@ -590,7 +590,7 @@ patch_jump :: proc(proto_state: ^ProtoState, jump_index: int) {
 
     if op == .JUMP_FALSE || op == .JUMP_NOT_NIL {
         if offset < MIN_COND_JUMP_OFFSET || offset > MAX_COND_JUMP_OFFSET {
-            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", proto_state.source_name, proto_state.source_line))
+            set_error(fmt.tprintf("%s[%d] Error: conditional jump is too far", error_source_name(proto_state.source_name), proto_state.source_line))
             Parser.failed = true
             return
         }
@@ -637,7 +637,7 @@ set_call_requested_results :: proc(proto_state: ^ProtoState, call_index, result_
     }
 
     if result_count >= CALL_OPEN_RESULTS {
-        set_error(fmt.tprintf("%s[%d] Error: too many call results", proto_state.source_name, proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many call results", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return
     }

@@ -140,13 +140,13 @@ token_text_for_error :: proc(token: Token) -> string {
 
 compile_error :: proc(token: Token, message: string) {
     line, column := source_line_col_at(Scanner.source, token.start)
-    set_error(fmt.tprintf("%s[%d:%d] Error: %s", Scanner.source_name, line, column, message))
+    set_error(fmt.tprintf("%s[%d:%d] Error: %s", error_source_name(Scanner.source_name), line, column, message))
     Parser.failed = true
 }
 
 compile_error_near :: proc(token: Token, message: string) {
     line, column := source_line_col_at(Scanner.source, token.start)
-    set_error(fmt.tprintf("%s[%d:%d] Error near %s: %s", Scanner.source_name, line, column, token_text_for_error(token), message))
+    set_error(fmt.tprintf("%s[%d:%d] Error near %s: %s", error_source_name(Scanner.source_name), line, column, token_text_for_error(token), message))
     Parser.failed = true
 }
 

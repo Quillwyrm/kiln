@@ -940,29 +940,57 @@ value_less_or_equal :: #force_inline proc(lhs, rhs: Value) -> bool {
 // Runtime errors =================================================================================
 
 runtime_error :: proc(message: string) -> string {
+    frame_context :: proc(proto: ^Proto) -> string {
+        if !proto.is_function {
+            if proto.env_index == 0 {
+                return "entry file"
+            }
+
+            env := &Active_State.envs[proto.env_index]
+            module_name := module_namespace_from_path(env.id)
+            return fmt.tprintf("module %s", module_name)
+        }
+
+        return fmt.tprintf("%s()", proto.proto_label)
+    }
+
+    frame_line :: proc(frame: ^CallFrame) -> int {
+        proto := frame.proto
+        line := proto.source_line
+
+        inst_index := frame.instruction_index - 1
+        if inst_index >= 0 && inst_index < len(proto.inst_lines) {
+            line = proto.inst_lines[inst_index]
+        }
+
+        return line
+    }
+
     frame := &Active_State.frame_stack[Active_State.frame_count - 1]
     proto := frame.proto
 
-    context_text := ""
-    if !proto.is_function {
-        if proto.env_index == 0 {
-            context_text = "entry file"
-        } else {
-            env := &Active_State.envs[proto.env_index]
-            module_name := module_namespace_from_path(env.id)
-            context_text = fmt.tprintf("module %s", module_name)
-        }
-    } else {
-        context_text = proto.proto_label
+    text := fmt.tprintf(
+        "%s[%d] Error in %s: %s\nStack traceback:",
+        error_source_name(proto.source_name),
+        frame_line(frame),
+        frame_context(proto),
+        message,
+    )
+
+    for frame_index := Active_State.frame_count; frame_index > 0; frame_index -= 1 {
+        trace_frame := &Active_State.frame_stack[frame_index - 1]
+        trace_proto := trace_frame.proto
+
+        text = fmt.tprintf(
+            "%s\n  %s[%d]: in %s",
+            text,
+            error_source_name(trace_proto.source_name),
+            frame_line(trace_frame),
+            frame_context(trace_proto),
+        )
     }
 
-    line := proto.source_line
-    inst_index := frame.instruction_index - 1
-    if inst_index >= 0 && inst_index < len(proto.inst_lines) {
-        line = proto.inst_lines[inst_index]
-    }
-
-    return set_error(fmt.tprintf("%s[%d] Error in %s: %s", proto.source_name, line, context_text, message))
+    return set_error(text)
 }
 
 
