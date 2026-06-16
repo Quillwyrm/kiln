@@ -67,7 +67,7 @@ ExprDesc :: union {
     bool,
     i64,
     f64,
-    string,
+    ^StringObject,
 
     // Binding references. Context decides whether to read, write, or reject.
     ExprUnresolvedBinding,
@@ -131,8 +131,11 @@ token_text_for_error :: proc(token: Token) -> string {
     }
 
     #partial switch token.kind {
-    case .IDENT, .STRING, .ERROR:
+    case .IDENT, .ERROR:
         return token.value.(string)
+
+    case .STRING:
+        return token.value.(^StringObject).data
     }
 
     return current_token_text()
@@ -337,8 +340,8 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
-    case string:
-        const_index := const_string(proto_state, desc)
+    case ^StringObject:
+        const_index := const_string_object(proto_state, desc)
         if Parser.failed { return }
         emit_load_const(proto_state, dst_slot, const_index)
 
@@ -615,11 +618,11 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind != .RIGHT_BRACE {
         for {
             key_token := Parser.current_token
-            key_text: string
+            key_object: ^StringObject
 
             #partial switch key_token.kind {
             case .IDENT:
-                key_text = key_token.value.(string)
+                key_object = new_string_object(key_token.value.(string))
                 advance_token(proto_state)
                 if Parser.failed { return ExprInvalid{} }
 
@@ -639,7 +642,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 }
 
             case .STRING:
-                key_text = key_token.value.(string)
+                key_object = key_token.value.(^StringObject)
                 advance_token(proto_state)
                 if Parser.failed { return ExprInvalid{} }
 
@@ -648,6 +651,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 return ExprInvalid{}
             }
 
+            key_text := key_object.data
             for existing_key in key_texts {
                 if existing_key == key_text {
                     compile_error(key_token, fmt.tprintf("duplicate map key `%s`", key_text))
@@ -663,7 +667,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
             advance_token(proto_state)
             if Parser.failed { return ExprInvalid{} }
 
-            key_const := const_string(proto_state, key_text)
+            key_const := const_string_object(proto_state, key_object)
             if Parser.failed { return ExprInvalid{} }
 
             value_token := Parser.current_token
@@ -899,8 +903,8 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
             return ExprArrayIndexConst{container_slot, key_const}
         }
 
-    case string:
-        key_const := const_string(proto_state, key)
+    case ^StringObject:
+        key_const := const_string_object(proto_state, key)
         if Parser.failed { return ExprInvalid{} }
 
         if key_const < 256 {
@@ -1018,7 +1022,7 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         return token.value.(f64)
     case .STRING:
         token := advance_token(proto_state)
-        return token.value.(string)
+        return token.value.(^StringObject)
     case .TRUE:
         advance_token(proto_state)
         return true
@@ -1723,7 +1727,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     path_token := advance_token(proto_state)
     if Parser.failed { return }
 
-    module_path := path_token.value.(string)
+    module_path := path_token.value.(^StringObject).data
     namespace_name := module_namespace_from_path(module_path)
     namespace_token := path_token
     if has_alias {

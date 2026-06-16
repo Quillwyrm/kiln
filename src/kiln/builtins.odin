@@ -3,18 +3,7 @@ package kiln
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
-
-
 // Value helpers ==================================================================================
-
-// StringObject owns stable text; callers may pass slices from source or temp strings.
-new_string_value :: proc(text: string) -> Value {
-    string_object := new(StringObject)
-    string_object.header.kind = .STRING
-    string_object.data = strings.clone(text)
-    string_object.hash = 0
-    return Value(cast(^Object)string_object)
-}
 
 value_type_to_string :: proc(value: Value) -> string {
     if value == nil {
@@ -187,7 +176,7 @@ native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_s
         value = kiln_state.slots[args_base]
     }
 
-    kiln_state.slots[return_slot_base] = new_string_value(value_type_to_string(value))
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(value_type_to_string(value)))
     return 1
 }
 
@@ -279,7 +268,7 @@ native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
         return 1
     }
 
-    kiln_state.slots[return_slot_base] = new_string_value(value_to_string(value))
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(value_to_string(value)))
     return 1
 }
 

@@ -85,11 +85,13 @@ TokenKind :: enum {
 }
 
 // TokenValue stores payload data for IDENT/INT/FLOAT/STRING/ERROR tokens.
+// IDENT and ERROR use string. STRING uses ^StringObject.
 // Other token kinds leave Token.value empty.
 TokenValue :: union {
     i64,
     f64,
     string,
+    ^StringObject,
 }
 
 // Token stores semantic scanner output and its source-start byte offset.
@@ -349,7 +351,9 @@ scan_string :: proc() -> Token {
 
     str_content := Scanner.source[string_start:Scanner.index]
     advance_char()
-    return make_token(.STRING, TokenValue(str_content))
+
+    string_object := new_string_object(str_content)
+    return make_token(.STRING, TokenValue(string_object))
 }
 
 // Emits no token; comments are not preserved in the token stream.

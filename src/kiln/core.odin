@@ -100,7 +100,7 @@ native_system_argv :: proc(kiln_state: ^State, args_base: int, arg_count: int, r
     argv.header.kind = .ARRAY
     argv.data = make([dynamic]Value)
     for arg in kiln_state.argv {
-        append(&argv.data, new_string_value(arg))
+        append(&argv.data, Value(cast(^Object)new_string_object(arg)))
     }
 
     kiln_state.slots[return_slot_base] = Value(cast(^Object)argv)
@@ -119,7 +119,7 @@ native_system_args :: proc(kiln_state: ^State, args_base: int, arg_count: int, r
     args.header.kind = .ARRAY
     args.data = make([dynamic]Value)
     for arg in kiln_state.argv[kiln_state.args_start:] {
-        append(&args.data, new_string_value(arg))
+        append(&args.data, Value(cast(^Object)new_string_object(arg)))
     }
 
     kiln_state.slots[return_slot_base] = Value(cast(^Object)args)
@@ -165,12 +165,12 @@ native_filesystem_read_file :: proc(kiln_state: ^State, args_base: int, arg_coun
     bytes, read_error := os.read_entire_file(path, context.allocator)
     if read_error != nil {
         kiln_state.slots[return_slot_base] = Value{}
-        kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`filesystem.read_file()` failed for `%s`: %v", path, read_error))
+        kiln_state.slots[return_slot_base + 1] = Value(cast(^Object)new_string_object(fmt.tprintf("`filesystem.read_file()` failed for `%s`: %v", path, read_error)))
         return 2
     }
     defer delete(bytes)
 
-    kiln_state.slots[return_slot_base] = new_string_value(string(bytes))
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(string(bytes)))
     kiln_state.slots[return_slot_base + 1] = Value{}
     return 2
 }
@@ -190,7 +190,7 @@ native_filesystem_write_file :: proc(kiln_state: ^State, args_base: int, arg_cou
 
     write_error := os.write_entire_file(path, text)
     if write_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`filesystem.write_file()` failed for `%s`: %v", path, write_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`filesystem.write_file()` failed for `%s`: %v", path, write_error)))
         return 1
     }
 
@@ -209,12 +209,12 @@ native_filesystem_get_cwd :: proc(kiln_state: ^State, args_base: int, arg_count:
     cwd, cwd_error := os.get_working_directory(context.allocator)
     if cwd_error != nil {
         kiln_state.slots[return_slot_base] = Value{}
-        kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`filesystem.get_cwd()` failed: %v", cwd_error))
+        kiln_state.slots[return_slot_base + 1] = Value(cast(^Object)new_string_object(fmt.tprintf("`filesystem.get_cwd()` failed: %v", cwd_error)))
         return 2
     }
     defer delete(cwd)
 
-    kiln_state.slots[return_slot_base] = new_string_value(cwd)
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(cwd))
     kiln_state.slots[return_slot_base + 1] = Value{}
     return 2
 }
@@ -232,7 +232,7 @@ native_filesystem_set_cwd :: proc(kiln_state: ^State, args_base: int, arg_count:
 
     cwd_error := os.set_working_directory(path)
     if cwd_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`filesystem.set_cwd()` failed for `%s`: %v", path, cwd_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`filesystem.set_cwd()` failed for `%s`: %v", path, cwd_error)))
         return 1
     }
 
@@ -299,7 +299,7 @@ native_filesystem_list_dir :: proc(kiln_state: ^State, args_base: int, arg_count
     entries, list_error := os.read_all_directory_by_path(path, context.allocator)
     if list_error != nil {
         kiln_state.slots[return_slot_base] = Value{}
-        kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`filesystem.list_dir()` failed for `%s`: %v", path, list_error))
+        kiln_state.slots[return_slot_base + 1] = Value(cast(^Object)new_string_object(fmt.tprintf("`filesystem.list_dir()` failed for `%s`: %v", path, list_error)))
         return 2
     }
     defer os.file_info_slice_delete(entries, context.allocator)
@@ -308,7 +308,7 @@ native_filesystem_list_dir :: proc(kiln_state: ^State, args_base: int, arg_count
     entry_names.header.kind = .ARRAY
     entry_names.data = make([dynamic]Value)
     for entry in entries {
-        append(&entry_names.data, new_string_value(entry.name))
+        append(&entry_names.data, Value(cast(^Object)new_string_object(entry.name)))
     }
 
     kiln_state.slots[return_slot_base] = Value(cast(^Object)entry_names)
@@ -329,7 +329,7 @@ native_filesystem_make_dir :: proc(kiln_state: ^State, args_base: int, arg_count
 
     make_error := os.make_directory(path)
     if make_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`filesystem.make_dir()` failed for `%s`: %v", path, make_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`filesystem.make_dir()` failed for `%s`: %v", path, make_error)))
         return 1
     }
 
@@ -367,7 +367,7 @@ native_path_join :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
     }
     defer delete(joined)
 
-    kiln_state.slots[return_slot_base] = new_string_value(joined)
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(joined))
     return 1
 }
 
@@ -382,7 +382,7 @@ native_path_base_name :: proc(kiln_state: ^State, args_base: int, arg_count: int
     path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "path.base_name", "first")
     if !path_is_string { return 0 }
 
-    kiln_state.slots[return_slot_base] = new_string_value(os.base(path))
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(os.base(path)))
     return 1
 }
 
@@ -398,7 +398,7 @@ native_path_dir_name :: proc(kiln_state: ^State, args_base: int, arg_count: int,
     if !path_is_string { return 0 }
 
     dir, _ := os.split_path(path)
-    kiln_state.slots[return_slot_base] = new_string_value(dir)
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(dir))
     return 1
 }
 
@@ -413,7 +413,7 @@ native_path_extension :: proc(kiln_state: ^State, args_base: int, arg_count: int
     path, path_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "path.extension", "first")
     if !path_is_string { return 0 }
 
-    kiln_state.slots[return_slot_base] = new_string_value(os.ext(path))
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(os.ext(path)))
     return 1
 }
 
@@ -429,11 +429,11 @@ native_path_stem :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
     if !path_is_string { return 0 }
 
     if path == "" {
-        kiln_state.slots[return_slot_base] = new_string_value("")
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(""))
         return 1
     }
 
-    kiln_state.slots[return_slot_base] = new_string_value(os.stem(path))
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(os.stem(path)))
     return 1
 }
 
@@ -455,7 +455,7 @@ native_path_normalize :: proc(kiln_state: ^State, args_base: int, arg_count: int
     }
     defer delete(normalized)
 
-    kiln_state.slots[return_slot_base] = new_string_value(normalized)
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(normalized))
     return 1
 }
 
@@ -485,13 +485,13 @@ native_io_read_all :: proc(kiln_state: ^State, args_base: int, arg_count: int, r
         if read_error != nil {
             read_io_error, read_is_io_error := read_error.(io.Error)
             if read_is_io_error && read_io_error == .EOF {
-                kiln_state.slots[return_slot_base] = new_string_value(string(data[:]))
+                kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(string(data[:])))
                 kiln_state.slots[return_slot_base + 1] = Value{}
                 return 2
             }
 
             kiln_state.slots[return_slot_base] = Value{}
-            kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`io.read_all()` failed: %v", read_error))
+            kiln_state.slots[return_slot_base + 1] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.read_all()` failed: %v", read_error)))
             return 2
         }
     }
@@ -517,7 +517,7 @@ native_io_read_line :: proc(kiln_state: ^State, args_base: int, arg_count: int, 
                     pop(&line)
                 }
 
-                kiln_state.slots[return_slot_base] = new_string_value(string(line[:]))
+                kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(string(line[:])))
                 kiln_state.slots[return_slot_base + 1] = Value{}
                 return 2
             }
@@ -538,13 +538,13 @@ native_io_read_line :: proc(kiln_state: ^State, args_base: int, arg_count: int, 
                     pop(&line)
                 }
 
-                kiln_state.slots[return_slot_base] = new_string_value(string(line[:]))
+                kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(string(line[:])))
                 kiln_state.slots[return_slot_base + 1] = Value{}
                 return 2
             }
 
             kiln_state.slots[return_slot_base] = Value{}
-            kiln_state.slots[return_slot_base + 1] = new_string_value(fmt.tprintf("`io.read_line()` failed: %v", read_error))
+            kiln_state.slots[return_slot_base + 1] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.read_line()` failed: %v", read_error)))
             return 2
         }
     }
@@ -563,7 +563,7 @@ native_io_write :: proc(kiln_state: ^State, args_base: int, arg_count: int, retu
 
     _, write_error := os.write_string(os.stdout, text)
     if write_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.write()` failed: %v", write_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.write()` failed: %v", write_error)))
         return 1
     }
 
@@ -584,13 +584,13 @@ native_io_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, retu
 
     _, write_error := os.write_string(os.stdout, text)
     if write_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print()` failed: %v", write_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.print()` failed: %v", write_error)))
         return 1
     }
 
     _, newline_error := os.write_string(os.stdout, "\n")
     if newline_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print()` failed: %v", newline_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.print()` failed: %v", newline_error)))
         return 1
     }
 
@@ -611,7 +611,7 @@ native_io_write_error :: proc(kiln_state: ^State, args_base: int, arg_count: int
 
     _, write_error := os.write_string(os.stderr, text)
     if write_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.write_error()` failed: %v", write_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.write_error()` failed: %v", write_error)))
         return 1
     }
 
@@ -632,13 +632,13 @@ native_io_print_error :: proc(kiln_state: ^State, args_base: int, arg_count: int
 
     _, write_error := os.write_string(os.stderr, text)
     if write_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print_error()` failed: %v", write_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.print_error()` failed: %v", write_error)))
         return 1
     }
 
     _, newline_error := os.write_string(os.stderr, "\n")
     if newline_error != nil {
-        kiln_state.slots[return_slot_base] = new_string_value(fmt.tprintf("`io.print_error()` failed: %v", newline_error))
+        kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(fmt.tprintf("`io.print_error()` failed: %v", newline_error)))
         return 1
     }
 
@@ -984,7 +984,7 @@ native_string_split :: proc(kiln_state: ^State, args_base: int, arg_count: int, 
     parts_array.header.kind = .ARRAY
     parts_array.data = make([dynamic]Value)
     for part in parts {
-        append(&parts_array.data, new_string_value(part))
+        append(&parts_array.data, Value(cast(^Object)new_string_object(part)))
     }
 
     kiln_state.slots[return_slot_base] = Value(cast(^Object)parts_array)
@@ -1013,7 +1013,7 @@ native_string_slice :: proc(kiln_state: ^State, args_base: int, arg_count: int, 
         return 0
     }
 
-    kiln_state.slots[return_slot_base] = new_string_value(text[start:start + count])
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(text[start:start + count]))
     return 1
 }
 
@@ -1037,7 +1037,7 @@ native_string_replace :: proc(kiln_state: ^State, args_base: int, arg_count: int
         defer delete(result)
     }
 
-    kiln_state.slots[return_slot_base] = new_string_value(result)
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(result))
     return 1
 }
 
@@ -1052,7 +1052,7 @@ native_string_trim :: proc(kiln_state: ^State, args_base: int, arg_count: int, r
     text, text_is_string := native_arg_string(kiln_state, args_base, arg_count, 0, "string.trim", "first")
     if !text_is_string { return 0 }
 
-    kiln_state.slots[return_slot_base] = new_string_value(strings.trim_space(text))
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(strings.trim_space(text)))
     return 1
 }
 
@@ -1074,7 +1074,7 @@ native_string_to_lower :: proc(kiln_state: ^State, args_base: int, arg_count: in
     }
     defer delete(lower)
 
-    kiln_state.slots[return_slot_base] = new_string_value(lower)
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(lower))
     return 1
 }
 
@@ -1096,7 +1096,7 @@ native_string_to_upper :: proc(kiln_state: ^State, args_base: int, arg_count: in
     }
     defer delete(upper)
 
-    kiln_state.slots[return_slot_base] = new_string_value(upper)
+    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(upper))
     return 1
 }
 

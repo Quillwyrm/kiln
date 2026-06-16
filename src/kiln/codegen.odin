@@ -200,15 +200,15 @@ const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
     return const_index
 }
 
-const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
+const_string_object :: proc(proto_state: ^ProtoState, string_object: ^StringObject) -> int {
     for const_index := 0; const_index < len(proto_state.const_pool); const_index += 1 {
         object, is_object := proto_state.const_pool[const_index].(^Object)
         if !is_object || object.kind != .STRING {
             continue
         }
 
-        string_object := cast(^StringObject)object
-        if string_object.data == text {
+        existing := cast(^StringObject)object
+        if existing.data == string_object.data {
             return const_index
         }
     }
@@ -220,7 +220,7 @@ const_string :: proc(proto_state: ^ProtoState, text: string) -> int {
     }
 
     const_index := len(proto_state.const_pool)
-    append(&proto_state.const_pool, new_string_value(text))
+    append(&proto_state.const_pool, Value(cast(^Object)string_object))
 
     return const_index
 }

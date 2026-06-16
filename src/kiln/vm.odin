@@ -5,7 +5,7 @@ import "core:hash"
 import "core:strings"
 
 
-// Opcodes ========================================================================================
+// Bytecode =======================================================================================
 // Instruction layout and operand meaning is documented inline on each opcode name.
 
 Opcode :: enum u8 {
@@ -80,7 +80,6 @@ Opcode :: enum u8 {
     SET_GLOBAL_BIND, // ABx: A=src, B=binding_index
 }
 
-// Bytecode format limits =========================================================================
 // These limits are imposed by instruction operand widths.
 
 MAX_FRAME_SLOTS :: 256       // u8 slot operands
@@ -99,7 +98,6 @@ CALL_OPEN_RESULTS :: 255
 RETURN_OPEN_RESULTS :: 65535
 
 
-// Instruction layout types =======================================================================
 // Types used to pack and decode instruction words.
 // The opcode decides which layout applies to a given instruction word.
 
@@ -132,8 +130,12 @@ InstJump :: bit_field u32 {
     offset: i32    | 24, // wide signed jump offset
 }
 
+decode_op :: #force_inline proc(word: u32) -> Opcode {
+   return Opcode(u8(word & 0xff))
+}
 
-// Values and heap objects ========================================================================
+
+// Runtime data ===================================================================================
 // Heap-backed values store ^Object. Object must be the first field of every heap object.
 // The VM reads Object.kind before casting to the concrete struct.
 
@@ -165,6 +167,7 @@ StringObject :: struct {
     hash:   u64,
 }
 
+
 ArrayObject :: struct {
     header: Object,
     data:  [dynamic]Value,
@@ -185,7 +188,142 @@ MapObject :: struct {
 }
 
 
-// Map primitives ==================================================================================
+// Proto is one finished compiled file or function body executed by the VM.
+// Bytecode operands address frame-relative runtime slots and index this proto's
+// const-pool and child-proto tables.
+Proto :: struct {
+    source_name: string,
+    source_line: int,
+    proto_label: string,
+    is_function: bool,
+
+    // Execution shape.
+    frame_slot_count: int,
+    param_count:      int,
+    env_index:        int,
+
+    // Compiled data.
+    bytecode:     []u32,
+    inst_lines:   []int,
+    const_pool:   []Value,
+    child_protos: []^Proto,
+}
+
+// NativeFunction reads arg_count values starting at args_base, writes produced values
+// starting at return_slot_base, and returns its produced result count.
+// CALL then shapes those results to its requested count.
+NativeFunction :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int
+
+// Runtime callable backed by one compiled Proto.
+ProtoFunctionObject :: struct {
+    header: Object,
+    impl:   ^Proto,
+}
+
+// Runtime callable backed by an Odin procedure.
+NativeFunctionObject :: struct {
+    header: Object,
+    impl:   NativeFunction,
+}
+
+MAX_BINDINGS :: 256 // binding operands use u8 binding indexes
+
+BindingFlag :: enum u8 {
+    MUTABLE,
+    EXPORTED,
+}
+
+BindingFlags :: bit_set[BindingFlag; u8]
+
+// BindingEnv is one fixed-size named value namespace.
+// Entries occupy 0..<count. names[i], values[i], and flags[i] describe the same binding.
+// Bytecode stores i and indexes the arrays directly.
+// Bindings are appended and never removed, so their indexes remain stable.
+// flags[i] stores per-binding policy bits such as mutability and namespace export visibility.
+BindingEnv :: struct {
+    id:     string,
+    names:  [MAX_BINDINGS]string,
+    values: [MAX_BINDINGS]Value,
+    flags:  [MAX_BINDINGS]BindingFlags,
+    count:  int,
+}
+
+// CallFrame is one active Proto execution window.
+// Stored slot bases are absolute State.slots indexes; bytecode slot operands are frame-relative.
+CallFrame :: struct {
+    // Current execution position.
+    proto:             ^Proto,
+    instruction_index: int,
+
+    // Frame-local slot window and caller slot high-water mark restored on return.
+    slot_base:         int,
+    caller_slot_count: int,
+
+    // Fixed caller result count or CALL_OPEN_RESULTS.
+    // The caller result base is one slot before this frame's slot_base.
+    requested_results: int,
+
+    // Latest open-result range in State.slots produced inside this frame.
+    open_result_base:  int,
+    open_result_count: int,
+}
+
+MAX_VM_SLOTS :: 4096
+MAX_CALL_FRAMES :: 256
+MAX_ENVS :: 256 // env binding operands use u8 env indexes
+
+// State is one host-owned Kiln runtime instance.
+State :: struct {
+    // Current host-operation diagnostic. Empty means no current error.
+    error_string: string,
+
+    // Compiled entry file.
+    entry_proto: ^Proto,
+
+    // Active VM execution and current used slot high-water mark.
+    slots:       [MAX_VM_SLOTS]Value,
+    slot_count:  int,
+    frame_stack: [MAX_CALL_FRAMES]CallFrame,
+    frame_count: int,
+
+    // Binding environments. envs[0] is the entry file. envs[1..] are imported and core modules.
+    envs:        [MAX_ENVS]BindingEnv,
+    env_count:   int,
+
+    // Import-chain stack for cycle detection. Indices in envs[0..<env_count].
+    loading_env_indexes: [MAX_ENVS]int,
+    loading_env_count:   int,
+
+    // Global binding environment. Host builtins are installed here before user code;
+    // user `global` declarations append here during compile. Export flags are ignored.
+    global_env: BindingEnv,
+
+    // Raw invocation argv chosen by the host, plus the first user script arg index.
+    argv:       []string,
+    args_start: int,
+}
+
+// Active_State is the host-selected State used by compiler and runtime internals.
+Active_State: ^State
+
+// Object operations ==============================================================================
+
+// Creates a runtime string object by cloning text.
+// Use for borrowed text, source slices, identifier text, and temp strings.
+new_string_object :: proc(text: string) -> ^StringObject {
+    string_object := new(StringObject)
+    string_object.header.kind = .STRING
+    string_object.data = strings.clone(text)
+    string_object.hash = 0
+    return string_object
+}
+
+string_hash :: #force_inline proc(s: ^StringObject) -> u64 {
+    if s.hash == 0 {
+        s.hash = hash.fnv64a(transmute([]byte)s.data)
+    }
+    return s.hash
+}
 
 // Map storage is an open-addressed string-key table.
 // Non-empty bucket arrays always have power-of-two length.
@@ -360,137 +498,7 @@ map_grow :: proc(map_object: ^MapObject) {
 }
 
 
-// Functions ======================================================================================
-
-// Proto is one finished compiled file or function body executed by the VM.
-// Bytecode operands address frame-relative runtime slots and index this proto's
-// const-pool and child-proto tables.
-Proto :: struct {
-    // Source identity used by runtime diagnostics.
-    source_name: string,
-    source_line: int,
-    proto_label: string,
-    is_function: bool,
-
-    // Execution shape.
-    frame_slot_count: int,
-    param_count:      int,
-    env_index:        int,
-
-    // Compiled data.
-    bytecode:     []u32,
-    inst_lines:   []int,
-    const_pool:   []Value,
-    child_protos: []^Proto,
-}
-
-// NativeFunction reads arg_count values starting at args_base, writes produced values
-// starting at return_slot_base, and returns its produced result count.
-// CALL then shapes those results to its requested count.
-NativeFunction :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int
-
-// Runtime callable backed by one compiled Proto.
-ProtoFunctionObject :: struct {
-    header: Object,
-    impl:   ^Proto,
-}
-
-// Runtime callable backed by an Odin procedure.
-NativeFunctionObject :: struct {
-    header: Object,
-    impl:   NativeFunction,
-}
-
-
-// Binding environments ===========================================================================
-
-MAX_BINDINGS :: 256 // binding operands use u8 binding indexes
-
-BindingFlag :: enum u8 {
-    MUTABLE,
-    EXPORTED,
-}
-
-BindingFlags :: bit_set[BindingFlag; u8]
-
-// BindingEnv is one fixed-size named value namespace.
-// Entries occupy 0..<count. names[i], values[i], and flags[i] describe the same binding.
-// Bytecode stores i and indexes the arrays directly.
-// Bindings are appended and never removed, so their indexes remain stable.
-// flags[i] stores per-binding policy bits such as mutability and namespace export visibility.
-BindingEnv :: struct {
-    id:     string,
-    names:  [MAX_BINDINGS]string,
-    values: [MAX_BINDINGS]Value,
-    flags:  [MAX_BINDINGS]BindingFlags,
-    count:  int,
-}
-
-
-// Call frames ====================================================================================
-
-// CallFrame is one active Proto execution window.
-// Stored slot bases are absolute State.slots indexes; bytecode slot operands are frame-relative.
-CallFrame :: struct {
-    // Current execution position.
-    proto:             ^Proto,
-    instruction_index: int,
-
-    // Frame-local slot window and caller slot high-water mark restored on return.
-    slot_base:         int,
-    caller_slot_count: int,
-
-    // Fixed caller result count or CALL_OPEN_RESULTS.
-    // The caller result base is one slot before this frame's slot_base.
-    requested_results: int,
-
-    // Latest open-result range in State.slots produced inside this frame.
-    open_result_base:  int,
-    open_result_count: int,
-}
-
-
-// VM state =======================================================================================
-MAX_VM_SLOTS :: 4096
-MAX_CALL_FRAMES :: 256
-MAX_ENVS :: 256 // env binding operands use u8 env indexes
-
-// State is one host-owned Kiln runtime instance.
-State :: struct {
-    // Current host-operation diagnostic. Empty means no current error.
-    error_string: string,
-
-    // Compiled entry file.
-    entry_proto: ^Proto,
-
-    // Active VM execution and current used slot high-water mark.
-    slots:       [MAX_VM_SLOTS]Value,
-    slot_count:  int,
-    frame_stack: [MAX_CALL_FRAMES]CallFrame,
-    frame_count: int,
-
-    // Binding environments. envs[0] is the entry file. envs[1..] are imported and core modules.
-    envs:        [MAX_ENVS]BindingEnv,
-    env_count:   int,
-
-    // Import-chain stack for cycle detection. Indices in envs[0..<env_count].
-    loading_env_indexes: [MAX_ENVS]int,
-    loading_env_count:   int,
-
-    // Global binding environment. Host builtins are installed here before user code;
-    // user `global` declarations append here during compile. Export flags are ignored.
-    global_env: BindingEnv,
-
-    // Raw invocation argv chosen by the host, plus the first user script arg index.
-    argv:       []string,
-    args_start: int,
-}
-
-// Active_State is the host-selected State used by compiler and runtime internals.
-Active_State: ^State
-
-
-// Binding env primitives ==========================================================================
+// Binding operations =============================================================================
 
 // binding_env_find returns the binding index for name, or -1 when name is absent.
 binding_env_find :: proc(env: ^BindingEnv, name: string) -> int {
@@ -518,11 +526,6 @@ binding_env_append :: proc(env: ^BindingEnv, name: string, is_mutable: bool) -> 
     return binding_index
 }
 
-
-// Global bindings ================================================================================
-// Global binding helpers operate on Active_State.global_env.
-// Public host entry points select Active_State before these helpers run.
-
 bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     binding_index := binding_env_find(&Active_State.global_env, name)
 
@@ -543,8 +546,6 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
 
     Active_State.global_env.values[binding_index] = Value(cast(^Object)native_function)
 }
-
-// Environment management ==========================================================================
 
 env_find :: proc(id: string) -> int {
     for env_index := 0; env_index < Active_State.env_count; env_index += 1 {
@@ -595,15 +596,7 @@ bind_env_native_function :: proc(env_index: int, name: string, native_proc: Nati
     env.values[binding_index] = Value(cast(^Object)native_function)
 }
 
-
-// Instruction decoding ==========================================================================
-
-
-decode_op :: proc(word: u32) -> Opcode {
-   return Opcode(u8(word & 0xff))
-}
-
-// Value helpers ==================================================================================
+// Value operations ===============================================================================
 
 value_concat :: #force_inline proc(lhs, rhs: Value) -> Value {
     left_object, left_is_object := lhs.(^Object)
@@ -632,13 +625,6 @@ value_concat :: #force_inline proc(lhs, rhs: Value) -> Value {
     result.data = strings.concatenate(parts[:])
     result.hash = 0
     return Value(cast(^Object)result)
-}
-
-string_hash :: #force_inline proc(s: ^StringObject) -> u64 {
-    if s.hash == 0 {
-        s.hash = hash.fnv64a(transmute([]byte)s.data)
-    }
-    return s.hash
 }
 
 value_add :: #force_inline proc(lhs, rhs: Value) -> Value {
@@ -796,8 +782,6 @@ value_neg :: #force_inline proc(value: Value) -> Value {
     return Value{}
 }
 
-// Comparison/truthiness helpers ==================================================================
-
 value_is_falsey :: #force_inline proc(value: Value) -> bool {
     bool_value, is_bool := value.(bool)
     if is_bool {
@@ -937,7 +921,7 @@ value_less_or_equal :: #force_inline proc(lhs, rhs: Value) -> bool {
     return false
 }
 
-// Runtime errors =================================================================================
+// Runtime diagnostics ============================================================================
 
 runtime_error :: proc(message: string) -> string {
     frame_context :: proc(proto: ^Proto) -> string {
@@ -994,7 +978,7 @@ runtime_error :: proc(message: string) -> string {
 }
 
 
-// VM runner ======================================================================================
+// VM execution ===================================================================================
 
 run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) {
     // Seed the first frame at slot window base 0.
