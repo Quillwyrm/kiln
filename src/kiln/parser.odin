@@ -2135,7 +2135,6 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
 
         proto_state.next_temp_slot = proto_state.local_count
         condition_start := next_inst_index(proto_state)
-        temp_save := proto_state.next_temp_slot
 
         expr := parse_expr(proto_state)
         if Parser.failed { return }
@@ -2145,7 +2144,7 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
 
         exit_jump := emit_jump_false(proto_state, condition_slot)
 
-        proto_state.next_temp_slot = temp_save
+        proto_state.next_temp_slot = proto_state.local_count
 
         if Parser.current_token.kind != .SEMICOLON {
             compile_error_near(Parser.current_token, "expected ';' after for condition")
@@ -2154,24 +2153,32 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
         advance_token(proto_state)
         if Parser.failed { return }
 
-        body_jump := emit_jump(proto_state)
-        if Parser.failed { return }
-
+        // The post clause is parsed before the body but executes after it.
+        // Stage its emitted instructions, emit the body, then append the post.
         post_start := next_inst_index(proto_state)
         parse_for_post_stmt(proto_state)
         if Parser.failed { return }
 
-        proto_state.next_temp_slot = proto_state.local_count
-        emit_jump(proto_state, condition_start)
-        if Parser.failed { return }
+        post_bytecode := make([]u32, len(proto_state.bytecode[post_start:]))
+        post_inst_lines := make([]int, len(proto_state.inst_lines[post_start:]))
+        defer delete(post_bytecode)
+        defer delete(post_inst_lines)
 
-        patch_jump(proto_state, body_jump)
-        if Parser.failed { return }
+        copy(post_bytecode, proto_state.bytecode[post_start:])
+        copy(post_inst_lines, proto_state.inst_lines[post_start:])
+
+        resize(&proto_state.bytecode, post_start)
+        resize(&proto_state.inst_lines, post_start)
+
+        proto_state.next_temp_slot = proto_state.local_count
 
         parse_block_stmt(proto_state)
         if Parser.failed { return }
 
-        emit_jump(proto_state, post_start)
+        append(&proto_state.bytecode, ..post_bytecode)
+        append(&proto_state.inst_lines, ..post_inst_lines)
+
+        emit_jump(proto_state, condition_start)
         if Parser.failed { return }
 
         patch_jump(proto_state, exit_jump)
