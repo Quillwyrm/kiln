@@ -2022,7 +2022,24 @@ parse_if_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 }
 
-// forStmt = "for" expr block | "for" block.
+patch_loop_breaks :: proc(proto_state: ^ProtoState) {
+    break_fixup_base := pop(&proto_state.loop_break_fixup_bases)
+
+    // Patch breaks from this loop only.
+    for fixup_index := break_fixup_base; fixup_index < len(proto_state.break_jump_fixups); fixup_index += 1 {
+        patch_jump(proto_state, proto_state.break_jump_fixups[fixup_index])
+        if Parser.failed { return }
+    }
+
+    resize(&proto_state.break_jump_fixups, break_fixup_base)
+}
+
+// forStmt = "for" block | "for" expr block | "for" forClause block.
+// forClause = forInit ";" expr ";" forPost.
+// forInit = ident declOp expr | assignTarget "=" expr.
+// forPost = assignTarget "=" expr | assignTarget compoundAssignOp expr | callStmt.
+//
+// forInit and forPost allow one target only.
 parse_for_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.current_token.kind != .FOR {
         compile_error_near(Parser.current_token, "expected 'for'")
@@ -2034,13 +2051,90 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
     // Break fixups added after this point belong to this loop.
     append(&proto_state.loop_break_fixup_bases, len(proto_state.break_jump_fixups))
 
-    loop_start := next_inst_index(proto_state)
-    has_exit_jump := false
-    exit_jump := 0
+    begin_scope(proto_state)
 
-    // `for { ... }` has no condition expression.
-    // It loops until `break`, `return`, or runtime termination.
-    if Parser.current_token.kind != .LEFT_BRACE {
+    if Parser.current_token.kind == .LEFT_BRACE {
+        loop_start := next_inst_index(proto_state)
+
+        parse_block_stmt(proto_state)
+        if Parser.failed { return }
+
+        emit_jump(proto_state, loop_start)
+        if Parser.failed { return }
+
+        patch_loop_breaks(proto_state)
+        if Parser.failed { return }
+
+        end_scope(proto_state)
+        return
+    }
+
+    header_start := next_inst_index(proto_state)
+    temp_save := proto_state.next_temp_slot
+
+    // Parse the first header expression once. If the next token is clause-shaped,
+    // this expression becomes the for initializer target. Otherwise it is the
+    // condition expression for `for expr { ... }`.
+    first_token := Parser.current_token
+    first_expr := parse_expr(proto_state)
+    if Parser.failed { return }
+
+    is_for_clause := false
+    #partial switch Parser.current_token.kind {
+    case .DECL, .IMMUTABLE_DECL, .ASSIGN, .SEMICOLON:
+        is_for_clause = true
+    }
+
+    if is_for_clause {
+        // forInit = ident declOp expr | assignTarget "=" expr.
+        // forInit allows one target only.
+        lhs_tokens: [1]Token
+        targets: [1]ExprDesc
+
+        lhs_tokens[0] = first_token
+        targets[0] = first_expr
+
+        if Parser.current_token.kind == .DECL || Parser.current_token.kind == .IMMUTABLE_DECL {
+            #partial switch target in first_expr {
+            case ExprUnresolvedBinding:
+            case:
+                compile_error(first_token, "declaration target must be an identifier")
+                return
+            }
+
+            finish_decl_stmt(proto_state, lhs_tokens[:], Parser.current_token.kind == .DECL)
+            if Parser.failed { return }
+        } else if Parser.current_token.kind == .ASSIGN {
+            #partial switch target in first_expr {
+            case ExprUnresolvedBinding,
+                 ExprLocalBinding,
+                 ExprFileBinding,
+                 ExprGlobalBinding,
+                 ExprImportedBinding,
+                 ExprIndex,
+                 ExprArrayIndexConst,
+                 ExprMapIndexConst:
+            case:
+                compile_error(first_token, "assignment target must be an identifier or indexed expression")
+                return
+            }
+
+            finish_assign_stmt(proto_state, lhs_tokens[:], targets[:])
+            if Parser.failed { return }
+        } else {
+            compile_error_near(Parser.current_token, "expected declaration or assignment in for initializer")
+            return
+        }
+
+        if Parser.current_token.kind != .SEMICOLON {
+            compile_error_near(Parser.current_token, "expected ';' after for initializer")
+            return
+        }
+        advance_token(proto_state)
+        if Parser.failed { return }
+
+        proto_state.next_temp_slot = proto_state.local_count
+        condition_start := next_inst_index(proto_state)
         temp_save := proto_state.next_temp_slot
 
         expr := parse_expr(proto_state)
@@ -2049,33 +2143,68 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
         condition_slot := expr_read_slot(proto_state, expr)
         if Parser.failed { return }
 
-        exit_jump = emit_jump_false(proto_state, condition_slot)
+        exit_jump := emit_jump_false(proto_state, condition_slot)
 
-        // Condition is dead after the branch; reclaim its temp slots.
         proto_state.next_temp_slot = temp_save
-        has_exit_jump = true
+
+        if Parser.current_token.kind != .SEMICOLON {
+            compile_error_near(Parser.current_token, "expected ';' after for condition")
+            return
+        }
+        advance_token(proto_state)
+        if Parser.failed { return }
+
+        body_jump := emit_jump(proto_state)
+        if Parser.failed { return }
+
+        post_start := next_inst_index(proto_state)
+        parse_for_post_stmt(proto_state)
+        if Parser.failed { return }
+
+        proto_state.next_temp_slot = proto_state.local_count
+        emit_jump(proto_state, condition_start)
+        if Parser.failed { return }
+
+        patch_jump(proto_state, body_jump)
+        if Parser.failed { return }
+
+        parse_block_stmt(proto_state)
+        if Parser.failed { return }
+
+        emit_jump(proto_state, post_start)
+        if Parser.failed { return }
+
+        patch_jump(proto_state, exit_jump)
+        if Parser.failed { return }
+
+        patch_loop_breaks(proto_state)
+        if Parser.failed { return }
+
+        end_scope(proto_state)
+        return
     }
+
+    condition_slot := expr_read_slot(proto_state, first_expr)
+    if Parser.failed { return }
+
+    exit_jump := emit_jump_false(proto_state, condition_slot)
+
+    // Condition is dead after the branch; reclaim its temp slots.
+    proto_state.next_temp_slot = temp_save
 
     parse_block_stmt(proto_state)
     if Parser.failed { return }
 
-    emit_jump(proto_state, loop_start)
+    emit_jump(proto_state, header_start)
     if Parser.failed { return }
 
-    if has_exit_jump {
-        patch_jump(proto_state, exit_jump)
-        if Parser.failed { return }
-    }
+    patch_jump(proto_state, exit_jump)
+    if Parser.failed { return }
 
-    break_fixup_base := pop(&proto_state.loop_break_fixup_bases)
+    patch_loop_breaks(proto_state)
+    if Parser.failed { return }
 
-    // Patch breaks from this loop body only.
-    for fixup_index := break_fixup_base; fixup_index < len(proto_state.break_jump_fixups); fixup_index += 1 {
-        patch_jump(proto_state, proto_state.break_jump_fixups[fixup_index])
-        if Parser.failed { return }
-    }
-
-    resize(&proto_state.break_jump_fixups, break_fixup_base)
+    end_scope(proto_state)
 }
 
 // Switch parsing ==================================================================================
@@ -2923,6 +3052,61 @@ parse_call_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     set_call_requested_results(proto_state, call_expr.call_index, 0)
+}
+
+// forPost = assignTarget "=" expr | assignTarget compoundAssignOp expr | callStmt.
+// forPost allows one assignment target only.
+parse_for_post_stmt :: proc(proto_state: ^ProtoState) {
+    if Parser.current_token.kind == .FUNCTION {
+        parse_call_stmt(proto_state)
+        return
+    }
+
+    if Parser.current_token.kind != .IDENT {
+        compile_error_near(Parser.current_token, "expected assignment or call in for post statement")
+        return
+    }
+
+    lhs_token, target := parse_simple_stmt_prefix(proto_state)
+    if Parser.failed { return }
+
+    if Parser.current_token.kind == .COMMA {
+        compile_error_near(Parser.current_token, "multiple for post targets are not allowed")
+        return
+    }
+
+    if Parser.current_token.kind == .ASSIGN {
+        lhs_tokens: [1]Token
+        targets: [1]ExprDesc
+
+        lhs_tokens[0] = lhs_token
+        targets[0] = target
+
+        finish_assign_stmt(proto_state, lhs_tokens[:], targets[:])
+        return
+    }
+
+    if Parser.current_token.kind == .PLUS_ASSIGN ||
+       Parser.current_token.kind == .MINUS_ASSIGN ||
+       Parser.current_token.kind == .STAR_ASSIGN ||
+       Parser.current_token.kind == .SLASH_ASSIGN ||
+       Parser.current_token.kind == .MOD_ASSIGN {
+        finish_compound_assign_stmt(proto_state, lhs_token, target)
+        return
+    }
+
+    if Parser.current_token.kind == .DECL || Parser.current_token.kind == .IMMUTABLE_DECL {
+        compile_error(Parser.current_token, "for post statement cannot be a declaration")
+        return
+    }
+
+    call_expr, is_call := target.(ExprCall)
+    if is_call {
+        set_call_requested_results(proto_state, call_expr.call_index, 0)
+        return
+    }
+
+    compile_error_near(Parser.current_token, "expected assignment or call in for post statement")
 }
 
 parse_simple_stmt :: proc(proto_state: ^ProtoState) {

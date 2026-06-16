@@ -21,8 +21,8 @@ if err != nil {
 
 counts := map {}
 
-i := 0
-for i < length(names) {
+
+for i := 0; i < length(names); i += 1 {
     name := names[i]
     ext := path.extension(name)
 
@@ -33,14 +33,12 @@ for i < length(names) {
     current := counts[ext] else 0
     counts[ext] = current + 1
 
-    i += 1
 }
 
 keys := maps.get_keys(counts)
 
-i = 0
-for i < length(keys) {
+
+for i := 0; i < length(keys); i += 1 {
     key := keys[i]
     io.print(key .. ": " .. to_string(counts[key]))
-    i += 1
 }

@@ -1,7 +1,7 @@
 $script_dir = $PSScriptRoot
 Set-Location $script_dir
 
-$runs = 5
+$runs = 25
 $workloads = @("bench_arith", "bench_array", "bench_map", "bench_string", "bench_call", "bench_control", "bench_sieve")
 $workload_labels = @("arith", "array", "map", "string", "call", "control", "sieve")
 $lang_configs = @(
