@@ -778,6 +778,15 @@ if true {
     print(shadow_source)
 }
 
+print("--- string escapes ---")
+print("a\nb")
+print("a\tb")
+print("a\rb")
+print("\\")
+print("\"")
+print("a\\b")
+print("say \"hi\"")
+
 // Top-level return exits the chunk.
 print("--- return ---")
 return "done"

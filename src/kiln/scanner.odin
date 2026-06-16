@@ -333,27 +333,94 @@ scan_number :: proc() -> Token {
     return make_token(.INT, TokenValue(value))
 }
 
-// No escape decoding; backslash sequences are literal.
+// Short interpreted strings support: \n, \t, \r, \\, \".
+// Literal newlines are rejected; raw/multiline strings are a separate future form.
 scan_string :: proc() -> Token {
-    advance_char()
+    advance_char() // opening "
     string_start := Scanner.index
 
-    for Scanner.index < len(Scanner.source) && Scanner.source[Scanner.index] != '"' {
-        if Scanner.source[Scanner.index] == '\n' {
+    has_escapes := false
+    decoded: [dynamic]byte
+
+    for Scanner.index < len(Scanner.source) {
+        ch := Scanner.source[Scanner.index]
+
+        switch ch {
+        case '"':
+            if has_escapes {
+                advance_char()
+
+                decoded_text := string(decoded[:])
+                string_object := new_string_object(decoded_text)
+
+                delete(decoded)
+                return make_token(.STRING, TokenValue(string_object))
+            }
+
+            str_content := Scanner.source[string_start:Scanner.index]
+            advance_char()
+
+            string_object := new_string_object(str_content)
+            return make_token(.STRING, TokenValue(string_object))
+
+        case '\n':
+            if has_escapes {
+                delete(decoded)
+            }
             return scanner_error("unterminated string")
+
+        case '\\':
+            if !has_escapes {
+                has_escapes = true
+                decoded = make([dynamic]byte)
+
+                // Copy the no-escape prefix before this first backslash.
+                for i := string_start; i < Scanner.index; i += 1 {
+                    append(&decoded, Scanner.source[i])
+                }
+            }
+
+            advance_char() // consume backslash
+
+            if Scanner.index >= len(Scanner.source) {
+                delete(decoded)
+                return scanner_error("unterminated string")
+            }
+
+            escaped := advance_char()
+            if escaped == '\n' {
+                delete(decoded)
+                return scanner_error("unterminated string")
+            }
+
+            switch escaped {
+            case 'n':
+                append(&decoded, '\n')
+            case 't':
+                append(&decoded, '\t')
+            case 'r':
+                append(&decoded, '\r')
+            case '\\':
+                append(&decoded, '\\')
+            case '"':
+                append(&decoded, '"')
+            case:
+                delete(decoded)
+                return scanner_error(fmt.tprintf("invalid escape sequence '\\%c'", escaped))
+            }
+
+        case:
+            if has_escapes {
+                append(&decoded, ch)
+            }
+            advance_char()
         }
-        advance_char()
     }
 
-    if Scanner.index >= len(Scanner.source) {
-        return scanner_error("unterminated string")
+    if has_escapes {
+        delete(decoded)
     }
-
-    str_content := Scanner.source[string_start:Scanner.index]
-    advance_char()
-
-    string_object := new_string_object(str_content)
-    return make_token(.STRING, TokenValue(string_object))
+    return scanner_error("unterminated string")
 }
 
 // Emits no token; comments are not preserved in the token stream.
