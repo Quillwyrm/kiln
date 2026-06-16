@@ -1,11 +1,11 @@
-import fs "filesystem"
+import "fs"
 import "path"
 import "maps"
 import "array"
 import "io"
-import "system"
+import "os"
 
-args := system.args()
+args := os.args()
 
 dir := "."
 if length(args) > 0 {
@@ -16,7 +16,7 @@ names, err := fs.list_dir(dir)
 
 if err != nil {
     io.print_error(err)
-    system.exit(1)
+    os.exit(1)
 }
 
 counts := map {}

@@ -1,13 +1,13 @@
-import fs "filesystem"
+import "fs"
 import "path"
 import "io"
-import "system"
+import "os"
 
-args := system.args()
+args := os.args()
 
 if length(args) < 2 {
     io.print_error("usage: copy-file <src> <dst-dir>")
-    system.exit(1)
+    os.exit(1)
 }
 
 src := args[0]
@@ -39,14 +39,14 @@ text, err := fs.read_file(src)
 
 if err != nil {
     io.print_error(err)
-    system.exit(1)
+    os.exit(1)
 }
 
 err = fs.write_file(dst, text)
 
 if err != nil {
     io.print_error(err)
-    system.exit(1)
+    os.exit(1)
 }
 
 io.print("copied " .. src .. " -> " .. dst)
