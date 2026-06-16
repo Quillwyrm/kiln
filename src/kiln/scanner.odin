@@ -333,8 +333,8 @@ scan_number :: proc() -> Token {
     return make_token(.INT, TokenValue(value))
 }
 
-// Short interpreted strings support: \n, \t, \r, \\, \".
-// Literal newlines are rejected; raw/multiline strings are a separate future form.
+// Interpreted strings support: \n, \t, \r, \\, \".
+// Literal newlines are rejected; use raw strings for multiline source text.
 scan_string :: proc() -> Token {
     advance_char() // opening "
     string_start := Scanner.index
@@ -421,6 +421,29 @@ scan_string :: proc() -> Token {
         delete(decoded)
     }
     return scanner_error("unterminated string")
+}
+
+// Raw strings preserve source bytes between backticks.
+// Backslashes, double quotes, and literal newlines are ordinary string bytes.
+scan_raw_string :: proc() -> Token {
+    advance_char() // opening `
+    string_start := Scanner.index
+
+    for Scanner.index < len(Scanner.source) {
+        ch := Scanner.source[Scanner.index]
+
+        if ch == '`' {
+            str_content := Scanner.source[string_start:Scanner.index]
+            advance_char()
+
+            string_object := new_string_object(str_content)
+            return make_token(.STRING, TokenValue(string_object))
+        }
+
+        advance_char()
+    }
+
+    return scanner_error("unterminated raw string")
 }
 
 // Emits no token; comments are not preserved in the token stream.
@@ -577,6 +600,10 @@ scan_next_token :: proc() -> Token {
 
     if ch == '"' {
         return scan_string()
+    }
+
+    if ch == '`' {
+        return scan_raw_string()
     }
 
     return scan_symbol()
