@@ -342,7 +342,7 @@ native_fs_make_dir :: proc(kiln_state: ^State, args_base: int, arg_count: int, r
 // Path functions are pure path-string transforms. They do not touch the filesystem.
 // Caller contract errors are runtime errors. Allocation failure is a runtime error.
 
-// join(...parts) -> string
+// join(parts...) -> string
 // joins path parts using host path rules
 native_path_join :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     parts := make([dynamic]string)

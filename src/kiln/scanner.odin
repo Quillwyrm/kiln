@@ -54,6 +54,7 @@ TokenKind :: enum {
     PLUS,
     MINUS,
     CONCAT,
+    ELLIPSIS,
     STAR,
     SLASH,
     MOD,
@@ -537,6 +538,9 @@ scan_symbol :: proc() -> Token {
         return make_token(.COMMA)
     case '.':
         if match_next('.') {
+            if match_next('.') {
+                return make_token(.ELLIPSIS)
+            }
             return make_token(.CONCAT)
         }
         return make_token(.DOT)

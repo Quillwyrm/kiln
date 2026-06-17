@@ -1556,6 +1556,7 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
 }
 
 // functionLiteral = "function" "(" [paramList [","]] ")" block.
+// param = IDENT ["..."]; a vararg parameter must be final.
 // The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
 parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
     if Parser.current_token.kind != .FUNCTION {
@@ -1575,6 +1576,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     // Parameters are collected before creating the child proto so its arity is known.
     param_tokens: [MAX_CALL_ARGS]Token
     param_count := 0
+    has_vararg := false
     if Parser.current_token.kind != .RIGHT_PAREN {
         for {
             if param_count >= MAX_CALL_ARGS {
@@ -1591,6 +1593,27 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
                 return
             }
             param_count += 1
+
+            if Parser.current_token.kind == .ELLIPSIS {
+                advance_token(parent_proto_state)
+                if Parser.failed { return }
+
+                has_vararg = true
+
+                if Parser.current_token.kind == .COMMA {
+                    advance_token(parent_proto_state)
+                    if Parser.failed { return }
+                    if Parser.current_token.kind != .RIGHT_PAREN {
+                        compile_error_near(Parser.current_token, "vararg parameter must be last")
+                        return
+                    }
+                } else if Parser.current_token.kind != .RIGHT_PAREN {
+                    compile_error_near(Parser.current_token, "vararg parameter must be last")
+                    return
+                }
+
+                break
+            }
 
             if Parser.current_token.kind != .COMMA {
                 break
@@ -1612,13 +1635,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     if Parser.failed { return }
 
     child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
-    child_proto_state := begin_proto(parent_proto_state.source_name, child_line, function_name, param_count, true, parent_proto_state.env_index)
-
-    for import_index := 0; import_index < parent_proto_state.import_count; import_index += 1 {
-        child_proto_state.import_names[import_index] = parent_proto_state.import_names[import_index]
-        child_proto_state.import_env_indexes[import_index] = parent_proto_state.import_env_indexes[import_index]
-    }
-    child_proto_state.import_count = parent_proto_state.import_count
+    child_proto_state := begin_function_proto(parent_proto_state, function_name, child_line, param_count, has_vararg)
 
     // Parameters are local slots starting at slot 0.
     // The VM call path places arguments directly into those slots.
@@ -3325,7 +3342,7 @@ compile_source :: proc(source, source_name: string) -> string {
     Parser.current_token = Token{}
     Parser.failed = false
 
-    entry_proto_state := begin_proto(source_name, 1, "entry", 0, false, 0)
+    entry_proto_state := begin_entry_proto()
 
     advance_token(&entry_proto_state)
     if Parser.failed {
@@ -3361,8 +3378,7 @@ compile_imported_source :: proc(source, source_name: string, env_index: int) -> 
     Parser.current_token = Token{}
     Parser.failed = false
 
-    module_label := module_namespace_from_path(Active_State.envs[env_index].id)
-    module_proto_state := begin_proto(source_name, 1, module_label, 0, false, env_index)
+    module_proto_state := begin_module_proto(env_index)
 
     advance_token(&module_proto_state)
     if Parser.failed {

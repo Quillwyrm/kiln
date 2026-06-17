@@ -201,6 +201,7 @@ Proto :: struct {
     // Execution shape.
     frame_slot_count: int,
     param_count:      int,
+    has_vararg:       bool,
     env_index:        int,
 
     // Compiled data.
@@ -317,6 +318,18 @@ new_string_object :: proc(text: string) -> ^StringObject {
     string_object.data = strings.clone(text)
     string_object.hash = 0
     return string_object
+}
+
+new_array_object :: #force_inline proc(capacity: int = 0) -> ^ArrayObject {
+    array_object := new(ArrayObject)
+    array_object.header.kind = .ARRAY
+    array_object.data = make([dynamic]Value)
+
+    if capacity > 0 {
+        reserve(&array_object.data, capacity)
+    }
+
+    return array_object
 }
 
 string_hash :: #force_inline proc(s: ^StringObject) -> u64 {
@@ -1072,15 +1085,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             dst := slot_base + int(inst.a)
             capacity := int(inst.b)
 
-            array_object := new(ArrayObject)
-            array_object.header.kind = .ARRAY
-            array_object.data = make([dynamic]Value)
-
-            if capacity > 0 {
-                reserve(&array_object.data, capacity)
-            }
-
-            state.slots[dst] = Value(cast(^Object)array_object)
+            state.slots[dst] = Value(cast(^Object)new_array_object(capacity))
 
         // case .ARRAY_LEN:
         //     inst := InstABx(word)
@@ -2068,14 +2073,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
                     state.slot_count = callee_slot_top
                 }
 
-                // Extra fixed args are rejected; missing params filled with nil.
-                if arg_count > callee_proto.param_count {
-                    message := fmt.tprintf("too many arguments for `%s()`: expected %d, got %d", callee_proto.proto_label, callee_proto.param_count, arg_count)
-                    return Value{}, runtime_error(message)
-                }
+                if !callee_proto.has_vararg {
+                    // Extra fixed args are rejected; missing fixed params are filled with nil.
+                    if arg_count > callee_proto.param_count {
+                        message := fmt.tprintf("too many arguments for `%s()`: expected %d, got %d", callee_proto.proto_label, callee_proto.param_count, arg_count)
+                        return Value{}, runtime_error(message)
+                    }
 
-                for param_index := arg_count; param_index < callee_proto.param_count; param_index += 1 {
-                    state.slots[callee_slot_base + param_index] = Value{}
+                    for param_index := arg_count; param_index < callee_proto.param_count; param_index += 1 {
+                        state.slots[callee_slot_base + param_index] = Value{}
+                    }
+                } else {
+                    fixed_param_count := callee_proto.param_count - 1
+
+                    for param_index := arg_count; param_index < fixed_param_count; param_index += 1 {
+                        state.slots[callee_slot_base + param_index] = Value{}
+                    }
+
+                    rest_count := arg_count - fixed_param_count
+                    if rest_count < 0 {
+                        rest_count = 0
+                    }
+
+                    rest_array := new_array_object(rest_count)
+                    for rest_index := 0; rest_index < rest_count; rest_index += 1 {
+                        arg_slot := callee_slot_base + fixed_param_count + rest_index
+                        append(&rest_array.data, state.slots[arg_slot])
+                    }
+
+                    state.slots[callee_slot_base + fixed_param_count] = Value(cast(^Object)rest_array)
                 }
 
                 state.frame_stack[state.frame_count] = CallFrame{

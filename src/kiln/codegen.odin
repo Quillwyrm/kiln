@@ -15,13 +15,14 @@ LocalBinding :: struct {
 // Proto state ====================================================================================
 
 // ProtoState is the mutable compiler working state for one unfinished Proto.
-// begin_proto creates its dynamic arrays; end_proto or delete_proto_state releases them.
+// begin_*_proto creates its dynamic arrays; end_proto or delete_proto_state releases them.
 ProtoState :: struct {
     // Proto identity and current-file compile context.
     source_name:  string,
     source_line:  int,
     proto_label:  string,
     param_count:  int,
+    has_vararg:   bool,
     is_function:  bool,
     env_index:    int,
 
@@ -82,15 +83,59 @@ set_last_inst_line :: proc(proto_state: ^ProtoState, line: int) {
 
 // Proto construction =============================================================================
 
-// source_name and proto_label are cloned because they can come from source or host strings.
-begin_proto :: proc(source_name: string, source_line: int, proto_label: string, param_count: int, is_function: bool, env_index: int) -> ProtoState {
+begin_entry_proto :: proc() -> ProtoState {
     return ProtoState{
-        source_name             = strings.clone(source_name),
+        source_name             = strings.clone(Scanner.source_name),
+        source_line             = 1,
+        proto_label             = strings.clone("entry"),
+        param_count             = 0,
+        has_vararg              = false,
+        is_function             = false,
+        env_index               = 0,
+        frame_slot_count        = 0,
+        bytecode                = make([dynamic]u32),
+        inst_lines              = make([dynamic]int),
+        const_pool              = make([dynamic]Value),
+        child_protos            = make([dynamic]^Proto),
+        current_inst_line       = 1,
+        scope_local_marks       = make([dynamic]int),
+        break_jump_fixups       = make([dynamic]int),
+        loop_break_fixup_bases  = make([dynamic]int),
+    }
+}
+
+begin_module_proto :: proc(env_index: int) -> ProtoState {
+    proto_label := module_namespace_from_path(Active_State.envs[env_index].id)
+
+    return ProtoState{
+        source_name             = strings.clone(Scanner.source_name),
+        source_line             = 1,
+        proto_label             = strings.clone(proto_label),
+        param_count             = 0,
+        has_vararg              = false,
+        is_function             = false,
+        env_index               = env_index,
+        frame_slot_count        = 0,
+        bytecode                = make([dynamic]u32),
+        inst_lines              = make([dynamic]int),
+        const_pool              = make([dynamic]Value),
+        child_protos            = make([dynamic]^Proto),
+        current_inst_line       = 1,
+        scope_local_marks       = make([dynamic]int),
+        break_jump_fixups       = make([dynamic]int),
+        loop_break_fixup_bases  = make([dynamic]int),
+    }
+}
+
+begin_function_proto :: proc(parent_proto_state: ^ProtoState, proto_label: string, source_line, param_count: int, has_vararg: bool) -> ProtoState {
+    child_proto_state := ProtoState{
+        source_name             = strings.clone(parent_proto_state.source_name),
         source_line             = source_line,
         proto_label             = strings.clone(proto_label),
         param_count             = param_count,
-        is_function             = is_function,
-        env_index               = env_index,
+        has_vararg              = has_vararg,
+        is_function             = true,
+        env_index               = parent_proto_state.env_index,
         frame_slot_count        = param_count,
         bytecode                = make([dynamic]u32),
         inst_lines              = make([dynamic]int),
@@ -101,6 +146,14 @@ begin_proto :: proc(source_name: string, source_line: int, proto_label: string, 
         break_jump_fixups       = make([dynamic]int),
         loop_break_fixup_bases  = make([dynamic]int),
     }
+
+    for import_index := 0; import_index < parent_proto_state.import_count; import_index += 1 {
+        child_proto_state.import_names[import_index] = parent_proto_state.import_names[import_index]
+        child_proto_state.import_env_indexes[import_index] = parent_proto_state.import_env_indexes[import_index]
+    }
+    child_proto_state.import_count = parent_proto_state.import_count
+
+    return child_proto_state
 }
 
 end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
@@ -140,6 +193,7 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
         child_protos     = child_protos,
         frame_slot_count = proto_state.frame_slot_count,
         param_count      = proto_state.param_count,
+        has_vararg       = proto_state.has_vararg,
         env_index        = proto_state.env_index,
     }
 

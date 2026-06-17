@@ -432,7 +432,11 @@ disasm_append_code :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto
 disasm_append_child_proto :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto) {
     append(parts, "\n")
     append(parts, fmt.tprintf("proto %s\n", proto.proto_label))
-    append(parts, fmt.tprintf("    params %d\n", proto.param_count))
+    if proto.has_vararg {
+        append(parts, fmt.tprintf("    params %d + vararg\n", proto.param_count - 1))
+    } else {
+        append(parts, fmt.tprintf("    params %d\n", proto.param_count))
+    }
     append(parts, fmt.tprintf("    slots %d\n", proto.frame_slot_count))
     append(parts, fmt.tprintf("    ops %d\n", len(proto.bytecode)))
 
