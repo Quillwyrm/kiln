@@ -2,6 +2,7 @@ package kiln
 
 import "core:fmt"
 import "core:hash"
+import "core:math"
 import "core:strings"
 
 
@@ -750,21 +751,35 @@ value_div :: #force_inline proc(lhs, rhs: Value) -> Value {
 }
 
 value_mod :: #force_inline proc(lhs, rhs: Value) -> Value {
-    left_int, is_int := lhs.(i64)
-    if is_int {
-        right_int, is_int := rhs.(i64)
-        if is_int {
-            if right_int == 0 {
-                runtime_error("invalid `%`; divisor cannot be zero")
-                return Value{}
-            }
+    left_int, left_is_int := lhs.(i64)
+    left_float, left_is_float := lhs.(f64)
+    right_int, right_is_int := rhs.(i64)
+    right_float, right_is_float := rhs.(f64)
 
-            return Value(left_int % right_int)
-        }
+    if (!left_is_int && !left_is_float) || (!right_is_int && !right_is_float) {
+        runtime_error(fmt.tprintf("invalid `%%`; expected numbers, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
+        return Value{}
     }
 
-    runtime_error(fmt.tprintf("invalid `%`; expected ints, got `%s` and `%s`", value_type_to_string(lhs), value_type_to_string(rhs)))
-    return Value{}
+    if (right_is_int && right_int == 0) || (right_is_float && right_float == 0.0) {
+        runtime_error("invalid `%`; divisor cannot be zero")
+        return Value{}
+    }
+
+    if left_is_int {
+        if right_is_int {
+            return Value(left_int %% right_int)
+        }
+
+        left := f64(left_int)
+        return Value(left - math.floor(left / right_float) * right_float)
+    }
+
+    if right_is_int {
+        right := f64(right_int)
+        return Value(left_float - math.floor(left_float / right) * right)
+    }
+    return Value(left_float - math.floor(left_float / right_float) * right_float)
 }
 
 value_neg :: #force_inline proc(value: Value) -> Value {
@@ -1513,7 +1528,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             if left_is_int {
                 right_int, right_is_int := state.slots[rhs].(i64)
                 if right_is_int && right_int != 0 {
-                    state.slots[dst] = Value(left_int % right_int)
+                    if left_int >= 0 && right_int > 0 {
+                        state.slots[dst] = Value(left_int % right_int)
+                        continue
+                    }
+
+                    state.slots[dst] = Value(left_int %% right_int)
+                    continue
+                }
+
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float && right_float != 0.0 {
+                    left := f64(left_int)
+                    state.slots[dst] = Value(left - math.floor(left / right_float) * right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := state.slots[rhs].(i64)
+                if right_is_int && right_int != 0 {
+                    right := f64(right_int)
+                    state.slots[dst] = Value(left_float - math.floor(left_float / right) * right)
+                    continue
+                }
+
+                right_float, right_is_float := state.slots[rhs].(f64)
+                if right_is_float && right_float != 0.0 {
+                    state.slots[dst] = Value(left_float - math.floor(left_float / right_float) * right_float)
                     continue
                 }
             }
@@ -1694,7 +1737,35 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             if left_is_int {
                 right_int, right_is_int := rhs.(i64)
                 if right_is_int && right_int != 0 {
-                    state.slots[dst] = Value(left_int % right_int)
+                    if left_int >= 0 && right_int > 0 {
+                        state.slots[dst] = Value(left_int % right_int)
+                        continue
+                    }
+
+                    state.slots[dst] = Value(left_int %% right_int)
+                    continue
+                }
+
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float && right_float != 0.0 {
+                    left := f64(left_int)
+                    state.slots[dst] = Value(left - math.floor(left / right_float) * right_float)
+                    continue
+                }
+            }
+
+            left_float, left_is_float := state.slots[lhs].(f64)
+            if left_is_float {
+                right_int, right_is_int := rhs.(i64)
+                if right_is_int && right_int != 0 {
+                    right := f64(right_int)
+                    state.slots[dst] = Value(left_float - math.floor(left_float / right) * right)
+                    continue
+                }
+
+                right_float, right_is_float := rhs.(f64)
+                if right_is_float && right_float != 0.0 {
+                    state.slots[dst] = Value(left_float - math.floor(left_float / right_float) * right_float)
                     continue
                 }
             }
