@@ -1730,11 +1730,9 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     alias_token := Token{}
-    has_alias := false
     if Parser.current_token.kind == .IDENT {
         alias_token = advance_token(proto_state)
         if Parser.failed { return }
-        has_alias = true
     }
 
     if Parser.current_token.kind != .STRING {
@@ -1747,7 +1745,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
     module_path := path_token.value.(^StringObject).data
     namespace_name := module_namespace_from_path(module_path)
     namespace_token := path_token
-    if has_alias {
+    if alias_token.kind == .IDENT {
         namespace_name = alias_token.value.(string)
         namespace_token = alias_token
     }
@@ -2096,13 +2094,8 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
     first_expr := parse_expr(proto_state)
     if Parser.failed { return }
 
-    is_for_clause := false
     #partial switch Parser.current_token.kind {
     case .DECL, .IMMUTABLE_DECL, .ASSIGN, .SEMICOLON:
-        is_for_clause = true
-    }
-
-    if is_for_clause {
         // forInit = ident declOp expr | assignTarget "=" expr.
         // forInit allows one target only.
         lhs_tokens: [1]Token
@@ -2206,29 +2199,30 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
 
         end_scope(proto_state)
         return
+
+    case:
+        condition_slot := expr_read_slot(proto_state, first_expr)
+        if Parser.failed { return }
+
+        exit_jump := emit_jump_false(proto_state, condition_slot)
+
+        // Condition is dead after the branch; reclaim its temp slots.
+        proto_state.next_temp_slot = temp_save
+
+        parse_block_stmt(proto_state)
+        if Parser.failed { return }
+
+        emit_jump(proto_state, header_start)
+        if Parser.failed { return }
+
+        patch_jump(proto_state, exit_jump)
+        if Parser.failed { return }
+
+        patch_loop_breaks(proto_state)
+        if Parser.failed { return }
+
+        end_scope(proto_state)
     }
-
-    condition_slot := expr_read_slot(proto_state, first_expr)
-    if Parser.failed { return }
-
-    exit_jump := emit_jump_false(proto_state, condition_slot)
-
-    // Condition is dead after the branch; reclaim its temp slots.
-    proto_state.next_temp_slot = temp_save
-
-    parse_block_stmt(proto_state)
-    if Parser.failed { return }
-
-    emit_jump(proto_state, header_start)
-    if Parser.failed { return }
-
-    patch_jump(proto_state, exit_jump)
-    if Parser.failed { return }
-
-    patch_loop_breaks(proto_state)
-    if Parser.failed { return }
-
-    end_scope(proto_state)
 }
 
 // Switch parsing ==================================================================================
@@ -2772,13 +2766,11 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
     }
 
     if target_count == 1 && expr_count == 1 {
-        has_label := false
         label := ""
 
         #partial switch target in targets[0] {
         case ExprLocalBinding:
             label = proto_state.local_bindings[int(target)].name
-            has_label = true
 
         case ExprFileBinding:
             binding_name := Active_State.envs[proto_state.env_index].names[int(target)]
@@ -2788,23 +2780,20 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
             } else {
                 label = binding_name
             }
-            has_label = true
 
         case ExprGlobalBinding:
             label = Active_State.global_env.names[int(target)]
-            has_label = true
 
         case ExprImportedBinding:
             env := &Active_State.envs[target.env_index]
             module_name := module_namespace_from_path(env.id)
             binding_name := env.names[target.binding_index]
             label = fmt.tprintf("%s.%s", module_name, binding_name)
-            has_label = true
 
         case:
         }
 
-        if has_label {
+        if label != "" {
             try_label_function(proto_state, last_expr, label)
         }
     }
@@ -2884,20 +2873,16 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     // Read current target value into value_slot.
     // Locals are safe to mutate in-place; non-locals need a temp + writeback.
     value_slot := -1
-    needs_writeback := false
 
     local_target, target_is_local := resolved_target.(ExprLocalBinding)
     if target_is_local {
         value_slot = int(local_target)
-        needs_writeback = false
     } else {
         value_slot = claim_temp_slot(proto_state)
         if Parser.failed { return }
 
         lower_expr_desc(proto_state, resolved_target, value_slot)
         if Parser.failed { return }
-
-        needs_writeback = true
     }
 
     rhs_expr := parse_expr(proto_state)
@@ -2951,7 +2936,7 @@ finish_compound_assign_stmt :: proc(proto_state: ^ProtoState, lhs_token: Token, 
     }
     set_last_inst_line(proto_state, op_line)
 
-    if needs_writeback {
+    if !target_is_local {
         set_assign_target(proto_state, value_slot, resolved_target)
         if Parser.failed { return }
     }
@@ -2994,15 +2979,12 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    is_mutable: bool
-    if Parser.current_token.kind == .DECL {
-        is_mutable = true
-    } else if Parser.current_token.kind == .IMMUTABLE_DECL {
-        is_mutable = false
-    } else {
+    decl_kind := Parser.current_token.kind
+    if decl_kind != .DECL && decl_kind != .IMMUTABLE_DECL {
         compile_error_near(Parser.current_token, "expected ':=' or '::' after global binding list")
         return
     }
+    is_mutable := decl_kind == .DECL
     advance_token(proto_state)
     if Parser.failed { return }
 

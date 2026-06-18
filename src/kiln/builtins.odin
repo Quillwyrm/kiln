@@ -33,119 +33,138 @@ value_type_to_string :: proc(value: Value) -> string {
     panic("unreachable")
 }
 
-// active_objects tracks the current recursive formatting path so collection cycles
-// emit finite placeholders instead of recursing forever.
-value_to_string_with_active_objects :: proc(value: Value, active_objects: ^[dynamic]^Object) -> string {
+value_to_string :: proc(value: Value) -> string {
+    parts := make([dynamic]string)
+    parents := make([dynamic]^Object)
+
+    append_value_string(&parts, value, &parents)
+
+    result := strings.concatenate(parts[:])
+    delete(parts)
+    delete(parents)
+    return result
+}
+
+// parents tracks array/map objects currently being formatted above this value.
+// Seeing one again means a cycle, so print [...] or {...}.
+append_value_string :: proc(parts: ^[dynamic]string, value: Value, parents: ^[dynamic]^Object) {
     if value == nil {
-        return "nil"
+        append(parts, "nil")
+        return
     }
 
     switch v in value {
     case bool:
-        return fmt.tprint(v)
+        append(parts, fmt.tprint(v))
+        return
     case i64:
-        return fmt.tprint(v)
+        append(parts, fmt.tprint(v))
+        return
     case f64:
-        return fmt.tprint(v)
+        text := fmt.tprintf("%g", v)
+        append(parts, text)
+
+        for i := 0; i < len(text); i += 1 {
+            if i == 0 && text[i] == '-' {
+                continue
+            }
+            if text[i] < '0' || text[i] > '9' {
+                return
+            }
+        }
+
+        append(parts, ".0")
+        return
 
     case ^Object:
         switch v.kind {
         case .STRING:
             string_object := cast(^StringObject)v
-            return string_object.data
+            append(parts, string_object.data)
+            return
 
         case .ARRAY:
-            for active_index := 0; active_index < len(active_objects); active_index += 1 {
-                if active_objects[active_index] == v {
-                    return "[...]"
+            for i := 0; i < len(parents); i += 1 {
+                if parents[i] == v {
+                    append(parts, "[...]")
+                    return
                 }
             }
-            append(active_objects, v)
+            append(parents, v)
 
             array_object := cast(^ArrayObject)v
-            parts := make([dynamic]string)
 
-            append(&parts, "[")
+            append(parts, "[")
             for item_index := 0; item_index < len(array_object.data); item_index += 1 {
                 if item_index > 0 {
-                    append(&parts, ", ")
+                    append(parts, ", ")
                 }
 
                 item := array_object.data[item_index]
                 item_object, item_is_object := item.(^Object)
                 if item_is_object && item_object.kind == .STRING {
                     string_object := cast(^StringObject)item_object
-                    append(&parts, "\"")
-                    append(&parts, string_object.data)
-                    append(&parts, "\"")
+                    append(parts, "\"")
+                    append(parts, string_object.data)
+                    append(parts, "\"")
                 } else {
-                    append(&parts, value_to_string_with_active_objects(item, active_objects))
+                    append_value_string(parts, item, parents)
                 }
             }
-            append(&parts, "]")
+            append(parts, "]")
 
-            result := strings.concatenate(parts[:])
-            delete(parts)
-            pop(active_objects)
-            return result
+            pop(parents)
+            return
 
         case .MAP:
-            for active_index := 0; active_index < len(active_objects); active_index += 1 {
-                if active_objects[active_index] == v {
-                    return "{...}"
+            for i := 0; i < len(parents); i += 1 {
+                if parents[i] == v {
+                    append(parts, "{...}")
+                    return
                 }
             }
-            append(active_objects, v)
+            append(parents, v)
 
             map_object := cast(^MapObject)v
-            parts := make([dynamic]string)
 
-            append(&parts, "{")
+            append(parts, "{")
             item_index := 0
             for entry in map_object.entries {
                 if entry.key == nil {
                     continue
                 }
                 if item_index > 0 {
-                    append(&parts, ", ")
+                    append(parts, ", ")
                 }
 
-                append(&parts, "\"")
-                append(&parts, entry.key.data)
-                append(&parts, "\": ")
+                append(parts, "\"")
+                append(parts, entry.key.data)
+                append(parts, "\": ")
 
                 item_object, item_is_object := entry.value.(^Object)
                 if item_is_object && item_object.kind == .STRING {
                     string_object := cast(^StringObject)item_object
-                    append(&parts, "\"")
-                    append(&parts, string_object.data)
-                    append(&parts, "\"")
+                    append(parts, "\"")
+                    append(parts, string_object.data)
+                    append(parts, "\"")
                 } else {
-                    append(&parts, value_to_string_with_active_objects(entry.value, active_objects))
+                    append_value_string(parts, entry.value, parents)
                 }
 
                 item_index += 1
             }
-            append(&parts, "}")
+            append(parts, "}")
 
-            result := strings.concatenate(parts[:])
-            delete(parts)
-            pop(active_objects)
-            return result
+            pop(parents)
+            return
 
         case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-            return "function()"
+            append(parts, "function()")
+            return
         }
     }
 
     panic("unreachable: value must match one Value variant")
-}
-
-value_to_string :: proc(value: Value) -> string {
-    active_objects := make([dynamic]^Object)
-    result := value_to_string_with_active_objects(value, &active_objects)
-    delete(active_objects)
-    return result
 }
 
 
