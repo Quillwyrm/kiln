@@ -266,7 +266,7 @@ scan_number :: proc() -> Token {
         }
 
         if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-            return scanner_error("number literal must be separated from following identifier")
+            return scanner_error("invalid number literal; unexpected identifier after number")
         }
 
         hex_digits := Scanner.source[hex_start:Scanner.index]
@@ -314,7 +314,7 @@ scan_number :: proc() -> Token {
     }
 
     if Scanner.index < len(Scanner.source) && is_ident_char(Scanner.source[Scanner.index]) {
-        return scanner_error("number literal must be separated from following identifier")
+        return scanner_error("invalid number literal; unexpected identifier after number")
     }
 
     if is_float {

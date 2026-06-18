@@ -786,7 +786,7 @@ parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     }
 
     token := Parser.current_token
-    compile_error_near(token, fmt.tprintf("expected chain expression, got `%s`", current_token_text()))
+    compile_error_near(token, fmt.tprintf("expected expression, got `%s`", current_token_text()))
     return ExprInvalid{}
 }
 
