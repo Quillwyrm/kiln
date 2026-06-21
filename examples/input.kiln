@@ -1,14 +1,16 @@
-import "io"
 
-print("welcome! whats your name?")
-name := io.read_line()
-print("hello there", name .. ".", "whats your credit card number?")
-num := to_number(io.read_line())
+Vec3 :: struct { x, y: float }
 
-if type(num) != "int" {
-    print("your a gonner buddy, thats not a number")
-} else {
-    print("nice! thanks bro")
+Entity :: struct {
+    pos: Vec3,
+    hp: int,
 }
 
-print(type(num), num)
+e := Entity { hp = 100 }
+e.hp = 80
+
+v := Vec3 { x = 10, y = 20 }
+
+print(e.hp)
+print(e)
+print(v)

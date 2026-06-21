@@ -15,14 +15,19 @@ TokenKind :: enum {
 
     // Literals
     IDENT,
-    INT,
-    FLOAT,
-    STRING,
+    INT_LIT,
+    FLOAT_LIT,
+    STRING_LIT,
 
     // Literal Keywords
     TRUE,
     FALSE,
     NIL,
+    INT,
+    FLOAT,
+    STRING,
+    BOOL,
+    ARRAY,
 
     // Control Flow
     IF,
@@ -37,6 +42,7 @@ TokenKind :: enum {
     // Binding / Construction Keywords
     GLOBAL,
     MAP,
+    STRUCT,
     IMPORT,
     EXPORT,
 
@@ -85,8 +91,8 @@ TokenKind :: enum {
     SEMICOLON,
 }
 
-// TokenValue stores payload data for IDENT/INT/FLOAT/STRING/ERROR tokens.
-// IDENT and ERROR use string. STRING uses ^StringObject.
+// TokenValue stores payload data for IDENT/INT_LIT/FLOAT_LIT/STRING_LIT/ERROR tokens.
+// IDENT and ERROR use string. STRING_LIT uses ^StringObject.
 // Other token kinds leave Token.value empty.
 TokenValue :: union {
     i64,
@@ -181,6 +187,16 @@ ident_token_kind :: proc(text: string) -> TokenKind {
         return .FALSE
     case "nil":
         return .NIL
+    case "int":
+        return .INT
+    case "float":
+        return .FLOAT
+    case "string":
+        return .STRING
+    case "bool":
+        return .BOOL
+    case "array":
+        return .ARRAY
     case "and":
         return .AND
     case "or":
@@ -205,6 +221,8 @@ ident_token_kind :: proc(text: string) -> TokenKind {
         return .GLOBAL
     case "map":
         return .MAP
+    case "struct":
+        return .STRUCT
     case "import":
         return .IMPORT
     case "export":
@@ -274,7 +292,7 @@ scan_number :: proc() -> Token {
         if !ok {
             return scanner_error(fmt.tprintf("failed to parse hex literal '%s'", hex_digits))
         }
-        return make_token(.INT, TokenValue(value))
+        return make_token(.INT_LIT, TokenValue(value))
     }
 
     is_float := false
@@ -323,7 +341,7 @@ scan_number :: proc() -> Token {
         if !ok {
             return scanner_error(fmt.tprintf("failed to parse float literal '%s'", token_text))
         }
-        return make_token(.FLOAT, TokenValue(value))
+        return make_token(.FLOAT_LIT, TokenValue(value))
     }
 
     token_text := Scanner.source[Scanner.token_start:Scanner.index]
@@ -331,7 +349,7 @@ scan_number :: proc() -> Token {
     if !ok {
         return scanner_error(fmt.tprintf("failed to parse int literal '%s'", token_text))
     }
-    return make_token(.INT, TokenValue(value))
+    return make_token(.INT_LIT, TokenValue(value))
 }
 
 // Interpreted strings support: \n, \t, \r, \\, \".
@@ -355,14 +373,14 @@ scan_string :: proc() -> Token {
                 string_object := new_string_object(decoded_text)
 
                 delete(decoded)
-                return make_token(.STRING, TokenValue(string_object))
+                return make_token(.STRING_LIT, TokenValue(string_object))
             }
 
             str_content := Scanner.source[string_start:Scanner.index]
             advance_char()
 
             string_object := new_string_object(str_content)
-            return make_token(.STRING, TokenValue(string_object))
+            return make_token(.STRING_LIT, TokenValue(string_object))
 
         case '\n':
             if has_escapes {
@@ -438,7 +456,7 @@ scan_raw_string :: proc() -> Token {
             advance_char()
 
             string_object := new_string_object(str_content)
-            return make_token(.STRING, TokenValue(string_object))
+            return make_token(.STRING_LIT, TokenValue(string_object))
         }
 
         advance_char()

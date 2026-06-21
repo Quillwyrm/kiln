@@ -1,11 +1,11 @@
-import "array"
+import "arrays"
 
 sieve :: function(limit) {
     is_prime := []
     i := 0
 
     for i <= limit {
-        array.push(is_prime, true)
+        arrays.push(is_prime, true)
         i += 1
     }
 

@@ -279,6 +279,31 @@ const_string_object :: proc(proto_state: ^ProtoState, string_object: ^StringObje
     return const_index
 }
 
+const_struct_def :: proc(proto_state: ^ProtoState, def: ^StructDefObject) -> int {
+    for const_index := 0; const_index < len(proto_state.const_pool); const_index += 1 {
+        object, is_object := proto_state.const_pool[const_index].(^Object)
+        if !is_object || object.kind != .STRUCT_DEF {
+            continue
+        }
+
+        existing := cast(^StructDefObject)object
+        if existing == def {
+            return const_index
+        }
+    }
+
+    if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
+        Parser.failed = true
+        return 0
+    }
+
+    const_index := len(proto_state.const_pool)
+    append(&proto_state.const_pool, Value(cast(^Object)def))
+
+    return const_index
+}
+
 // Instruction emitters ===========================================================================
 // All slot operands are frame-local indexes for the current proto.
 
@@ -440,6 +465,29 @@ emit_map_set_const :: proc(proto_state: ^ProtoState, map_slot, const_idx, src: i
     record_slots(proto_state, map_slot, src)
 
     inst := u32(InstABC{ op= .MAP_SET_CONST, a= u8(map_slot), b= u8(const_idx), c= u8(src) })
+    emit_inst(proto_state, inst)
+}
+
+// Struct operations ==============================================================================
+
+emit_new_struct :: proc(proto_state: ^ProtoState, dst, const_idx: int) {
+    record_slots(proto_state, dst)
+
+    inst := u32(InstABx{ op= .NEW_STRUCT, a= u8(dst), b= u16(const_idx) })
+    emit_inst(proto_state, inst)
+}
+
+emit_struct_get_const :: proc(proto_state: ^ProtoState, dst, struct_slot, const_idx: int) {
+    record_slots(proto_state, dst, struct_slot)
+
+    inst := u32(InstABC{ op= .STRUCT_GET_CONST, a= u8(dst), b= u8(struct_slot), c= u8(const_idx) })
+    emit_inst(proto_state, inst)
+}
+
+emit_struct_set_const :: proc(proto_state: ^ProtoState, struct_slot, const_idx, src: int) {
+    record_slots(proto_state, struct_slot, src)
+
+    inst := u32(InstABC{ op= .STRUCT_SET_CONST, a= u8(struct_slot), b= u8(const_idx), c= u8(src) })
     emit_inst(proto_state, inst)
 }
 
@@ -744,7 +792,7 @@ retarget_last_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) ->
         record_slots(proto_state, new_dst)
         return true
 
-    case .LOAD_CONST, .LOAD_FUNC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEG, .NOT, .GET_FILE_BIND, .GET_GLOBAL_BIND:
+    case .LOAD_CONST, .LOAD_FUNC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEW_STRUCT, .NEG, .NOT, .GET_FILE_BIND, .GET_GLOBAL_BIND:
         inst := InstABx(word)
         if int(inst.a) != old_dst {
             return false
@@ -755,7 +803,7 @@ retarget_last_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) ->
         record_slots(proto_state, new_dst)
         return true
 
-    case .INDEX_GET, .ARRAY_GET_CONST, .MAP_GET_CONST,
+    case .INDEX_GET, .ARRAY_GET_CONST, .MAP_GET_CONST, .STRUCT_GET_CONST,
          .ADD, .SUB, .CONCAT, .MUL, .DIV, .MOD,
          .ADD_CONST, .SUB_CONST, .MUL_CONST, .DIV_CONST, .MOD_CONST,
          .EQUAL, .LESS, .LESS_OR_EQUAL,
@@ -812,6 +860,13 @@ emit_get_global_bind :: proc(proto_state: ^ProtoState, dst: int, binding_index: 
     record_slots(proto_state, dst)
 
     inst := u32(InstABx{ op= .GET_GLOBAL_BIND, a= u8(dst), b= u16(binding_index) })
+    emit_inst(proto_state, inst)
+}
+
+emit_decl_global_bind :: proc(proto_state: ^ProtoState, src: int, binding_index: int) {
+    record_slots(proto_state, src)
+
+    inst := u32(InstABx{ op= .DECL_GLOBAL_BIND, a= u8(src), b= u16(binding_index) })
     emit_inst(proto_state, inst)
 }
 

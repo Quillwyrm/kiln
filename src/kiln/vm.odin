@@ -28,6 +28,11 @@ Opcode :: enum u8 {
     NEW_MAP,       // ABx: A=dst, B=capacity
     // MAP_LEN,    // ABx: A=dst,     B=src_map
 
+    // Struct Operations
+    NEW_STRUCT,       // ABx: A=dst, B=const_struct_def
+    STRUCT_GET_CONST, // ABC: A=dst,    B=struct, C=const_string_field
+    STRUCT_SET_CONST, // ABC: A=struct, B=const_string_field, C=src
+
     // Indexed Access
     INDEX_GET,     // ABC: A=dst,       B=container, C=key
     INDEX_SET,     // ABC: A=container, B=key,       C=src
@@ -78,6 +83,7 @@ Opcode :: enum u8 {
 
     // Global Bindings
     GET_GLOBAL_BIND, // ABx: A=dst, B=binding_index
+    DECL_GLOBAL_BIND, // ABx: A=src, B=binding_index
     SET_GLOBAL_BIND, // ABx: A=src, B=binding_index
 }
 
@@ -147,6 +153,8 @@ ObjectKind :: enum u8 {
     NATIVE_FUNCTION,
     ARRAY,
     MAP,
+    STRUCT_DEF,
+    STRUCT,
 }
 
 Object :: struct {
@@ -186,6 +194,23 @@ MapObject :: struct {
     entries:         [dynamic]MapEntry,
     count:           int,
     tombstone_count: int,
+}
+
+StructField :: struct {
+    name: string,
+    spec: Value,
+}
+
+StructDefObject :: struct {
+    header: Object,
+    name:   string,
+    fields: []StructField,
+}
+
+StructObject :: struct {
+    header: Object,
+    def:    ^StructDefObject,
+    fields: []Value,
 }
 
 
@@ -233,6 +258,7 @@ MAX_BINDINGS :: 256 // binding operands use u8 binding indexes
 BindingFlag :: enum u8 {
     MUTABLE,
     EXPORTED,
+    INITIALIZED,
 }
 
 BindingFlags :: bit_set[BindingFlag; u8]
@@ -241,7 +267,8 @@ BindingFlags :: bit_set[BindingFlag; u8]
 // Entries occupy 0..<count. names[i], values[i], and flags[i] describe the same binding.
 // Bytecode stores i and indexes the arrays directly.
 // Bindings are appended and never removed, so their indexes remain stable.
-// flags[i] stores per-binding policy bits such as mutability and namespace export visibility.
+// flags[i] stores per-binding policy bits such as mutability, namespace export
+// visibility, and whether runtime storage has been initialized.
 BindingEnv :: struct {
     id:     string,
     names:  [MAX_BINDINGS]string,
@@ -330,6 +357,13 @@ new_array_object :: #force_inline proc(capacity: int = 0) -> ^ArrayObject {
     }
 
     return array_object
+}
+
+new_map_object :: #force_inline proc(capacity: int = 0) -> ^MapObject {
+    map_object := new(MapObject)
+    map_object.header.kind = .MAP
+    map_init(map_object, capacity)
+    return map_object
 }
 
 string_hash :: #force_inline proc(s: ^StringObject) -> u64 {
@@ -511,6 +545,81 @@ map_grow :: proc(map_object: ^MapObject) {
     delete(old_entries)
 }
 
+copy_struct_default :: proc(value: Value) -> Value {
+    object, is_object := value.(^Object)
+    if !is_object {
+        return value
+    }
+
+    switch object.kind {
+    case .ARRAY:
+        array_object := cast(^ArrayObject)object
+        array_copy := new_array_object(len(array_object.data))
+
+        for item in array_object.data {
+            append(&array_copy.data, copy_struct_default(item))
+        }
+
+        return Value(cast(^Object)array_copy)
+
+    case .MAP:
+        map_object := cast(^MapObject)object
+        map_copy := new_map_object(map_object.count)
+
+        for entry in map_object.entries {
+            if entry.key == nil {
+                continue
+            }
+
+            map_set(map_copy, entry.key, copy_struct_default(entry.value))
+        }
+
+        return Value(cast(^Object)map_copy)
+
+    case .STRUCT:
+        struct_object := cast(^StructObject)object
+        struct_copy := new(StructObject)
+        struct_copy.header.kind = .STRUCT
+        struct_copy.def = struct_object.def
+        struct_copy.fields = make([]Value, len(struct_object.fields))
+
+        for field_index := 0; field_index < len(struct_object.fields); field_index += 1 {
+            struct_copy.fields[field_index] = copy_struct_default(struct_object.fields[field_index])
+        }
+
+        return Value(cast(^Object)struct_copy)
+
+    case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+        return value
+    case .STRUCT_DEF:
+        panic("struct definitions are not struct field defaults")
+    }
+
+    panic("unreachable: object must match one ObjectKind")
+}
+
+new_struct_object :: proc(def: ^StructDefObject) -> ^StructObject {
+    struct_object := new(StructObject)
+    struct_object.header.kind = .STRUCT
+    struct_object.def = def
+    struct_object.fields = make([]Value, len(def.fields))
+
+    for field_index := 0; field_index < len(def.fields); field_index += 1 {
+        struct_object.fields[field_index] = copy_struct_default(def.fields[field_index].spec)
+    }
+
+    return struct_object
+}
+
+struct_find_field :: proc(def: ^StructDefObject, name: string) -> int {
+    for field_index := 0; field_index < len(def.fields); field_index += 1 {
+        if def.fields[field_index].name == name {
+            return field_index
+        }
+    }
+
+    return -1
+}
 
 // Binding operations =============================================================================
 
@@ -559,6 +668,7 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     native_function.impl = native_proc
 
     Active_State.global_env.values[binding_index] = Value(cast(^Object)native_function)
+    Active_State.global_env.flags[binding_index] += {.INITIALIZED}
 }
 
 env_find :: proc(id: string) -> int {
@@ -601,7 +711,7 @@ bind_env_native_function :: proc(env_index: int, name: string, native_proc: Nati
         binding_index = binding_env_append(env, name, false)
     }
     env.flags[binding_index] -= {.MUTABLE}
-    env.flags[binding_index] += {.EXPORTED}
+    env.flags[binding_index] += {.EXPORTED, .INITIALIZED}
 
     native_function := new(NativeFunctionObject)
     native_function.header.kind = .NATIVE_FUNCTION
@@ -1148,7 +1258,10 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
                     state.slots[dst] = Value{}
                 }
 
-            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+            case .STRUCT_DEF:
+                panic("struct definitions are not runtime values")
+
+            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION, .STRUCT:
                 frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index read; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
@@ -1200,7 +1313,10 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
 
                 map_set(map_object, key_object, value)
 
-            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+            case .STRUCT_DEF:
+                panic("struct definitions are not runtime values")
+
+            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION, .STRUCT:
                 frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
@@ -1296,6 +1412,131 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
 
             map_set(map_object, key_object, state.slots[value_slot])
 
+        case .NEW_STRUCT:
+            inst := InstABx(word)
+            dst := slot_base + int(inst.a)
+            def_object := cast(^StructDefObject)const_pool[int(inst.b)].(^Object)
+
+            state.slots[dst] = Value(cast(^Object)new_struct_object(def_object))
+
+        case .STRUCT_GET_CONST:
+            inst := InstABC(word)
+            dst := slot_base + int(inst.a)
+            struct_slot := slot_base + int(inst.b)
+            field_name := cast(^StringObject)const_pool[int(inst.c)].(^Object)
+
+            struct_header, is_object := state.slots[struct_slot].(^Object)
+            if !is_object || struct_header.kind != .STRUCT {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("invalid struct field read; expected `struct`, got `%s`", value_type_to_string(state.slots[struct_slot])))
+            }
+
+            struct_object := cast(^StructObject)struct_header
+            field_index := struct_find_field(struct_object.def, field_name.data)
+            if field_index < 0 {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("struct `%s` has no field `%s`", struct_object.def.name, field_name.data))
+            }
+
+            state.slots[dst] = struct_object.fields[field_index]
+
+        case .STRUCT_SET_CONST:
+            inst := InstABC(word)
+            struct_slot := slot_base + int(inst.a)
+            field_name := cast(^StringObject)const_pool[int(inst.b)].(^Object)
+            value_slot := slot_base + int(inst.c)
+
+            struct_header, is_object := state.slots[struct_slot].(^Object)
+            if !is_object || struct_header.kind != .STRUCT {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("invalid struct field assignment; expected `struct`, got `%s`", value_type_to_string(state.slots[struct_slot])))
+            }
+
+            struct_object := cast(^StructObject)struct_header
+            field_index := struct_find_field(struct_object.def, field_name.data)
+            if field_index < 0 {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("struct `%s` has no field `%s`", struct_object.def.name, field_name.data))
+            }
+
+            value := state.slots[value_slot]
+            if value == nil {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("invalid struct field assignment; field `%s` cannot be nil", field_name.data))
+            }
+
+            field_spec := struct_object.def.fields[field_index].spec
+            stored_value := value
+            assignment_matches := false
+
+            switch spec in field_spec {
+            case bool:
+                _, assignment_matches = value.(bool)
+
+            case i64:
+                _, assignment_matches = value.(i64)
+
+            case f64:
+                if _, value_is_float := value.(f64); value_is_float {
+                    assignment_matches = true
+                } else if value_int, value_is_int := value.(i64); value_is_int {
+                    stored_value = Value(f64(value_int))
+                    assignment_matches = true
+                }
+
+            case ^Object:
+                value_object, value_is_object := value.(^Object)
+                if value_is_object {
+                    switch spec.kind {
+                    case .STRING:
+                        assignment_matches = value_object.kind == .STRING
+
+                    case .ARRAY:
+                        assignment_matches = value_object.kind == .ARRAY
+
+                    case .MAP:
+                        assignment_matches = value_object.kind == .MAP
+
+                    case .PROTO_FUNCTION, .NATIVE_FUNCTION:
+                        assignment_matches = value_object.kind == .PROTO_FUNCTION ||
+                                             value_object.kind == .NATIVE_FUNCTION
+
+                    case .STRUCT:
+                        if value_object.kind == .STRUCT {
+                            spec_struct := cast(^StructObject)spec
+                            value_struct := cast(^StructObject)value_object
+                            assignment_matches = value_struct.def == spec_struct.def
+                        }
+
+                    case .STRUCT_DEF:
+                        panic("struct definitions are not struct field specs")
+                    }
+                }
+            }
+
+            if !assignment_matches {
+                frame.instruction_index = pc
+
+                expected := value_type_to_string(field_spec)
+                got := value_type_to_string(value)
+
+                spec_object, spec_is_object := field_spec.(^Object)
+                if spec_is_object && spec_object.kind == .STRUCT {
+                    spec_struct := cast(^StructObject)spec_object
+                    expected = spec_struct.def.name
+
+                    value_object, value_is_object := value.(^Object)
+                    if value_is_object && value_object.kind == .STRUCT {
+                        value_struct := cast(^StructObject)value_object
+                        got = value_struct.def.name
+                    }
+                }
+
+                return Value{}, runtime_error(fmt.tprintf("invalid struct field assignment; field `%s` expected `%s`, got `%s`", field_name.data, expected, got))
+            }
+
+            struct_object.fields[field_index] = stored_value
+
         case .ARRAY_PUSH:
             inst := InstABx(word)
             array_slot := slot_base + int(inst.a)
@@ -1335,11 +1576,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             dst := slot_base + int(inst.a)
             capacity := int(inst.b)
 
-            map_object := new(MapObject)
-            map_object.header.kind = .MAP
-            map_init(map_object, capacity)
-
-            state.slots[dst] = Value(cast(^Object)map_object)
+            state.slots[dst] = Value(cast(^Object)new_map_object(capacity))
 
         // case .MAP_LEN:
         //     inst := InstABx(word)
@@ -2124,7 +2361,10 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
                 slot_base = frame.slot_base
                 file_env = &state.envs[current_proto.env_index]
 
-            case .STRING, .ARRAY, .MAP:
+            case .STRUCT_DEF:
+                panic("struct definitions are not runtime values")
+
+            case .STRING, .ARRAY, .MAP, .STRUCT:
                 frame.instruction_index = pc
                 message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
@@ -2134,6 +2374,10 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             inst := InstABx(word)
             dst := slot_base + int(inst.a)
             binding_index := int(inst.b)
+            if !(.INITIALIZED in file_env.flags[binding_index]) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("file binding `%s` is not initialized", file_env.names[binding_index]))
+            }
             state.slots[dst] = file_env.values[binding_index]
 
         case .SET_FILE_BIND:
@@ -2141,31 +2385,69 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             src := slot_base + int(inst.a)
             binding_index := int(inst.b)
             file_env.values[binding_index] = state.slots[src]
+            file_env.flags[binding_index] += {.INITIALIZED}
 
         case .GET_MODULE_BIND:
             inst := InstABC(word)
             dst := slot_base + int(inst.a)
             env_index := int(inst.b)
             binding_index := int(inst.c)
-            state.slots[dst] = state.envs[env_index].values[binding_index]
+            module_env := &state.envs[env_index]
+            if !(.INITIALIZED in module_env.flags[binding_index]) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("module binding `%s` is not initialized", module_env.names[binding_index]))
+            }
+            state.slots[dst] = module_env.values[binding_index]
 
         case .SET_MODULE_BIND:
             inst := InstABC(word)
             src := slot_base + int(inst.a)
             env_index := int(inst.b)
             binding_index := int(inst.c)
-            state.envs[env_index].values[binding_index] = state.slots[src]
+            module_env := &state.envs[env_index]
+            if !(.INITIALIZED in module_env.flags[binding_index]) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("module binding `%s` is not initialized", module_env.names[binding_index]))
+            }
+            if !(.MUTABLE in module_env.flags[binding_index]) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("cannot assign to immutable module binding `%s`", module_env.names[binding_index]))
+            }
+            module_env.values[binding_index] = state.slots[src]
 
         case .GET_GLOBAL_BIND:
             inst := InstABx(word)
             dst := slot_base + int(inst.a)
             binding_index := int(inst.b)
+            if !(.INITIALIZED in state.global_env.flags[binding_index]) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("global binding `%s` is not initialized", state.global_env.names[binding_index]))
+            }
             state.slots[dst] = state.global_env.values[binding_index]
+
+        case .DECL_GLOBAL_BIND:
+            inst := InstABx(word)
+            src := slot_base + int(inst.a)
+            binding_index := int(inst.b)
+            if .INITIALIZED in state.global_env.flags[binding_index] {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("global binding `%s` is already initialized", state.global_env.names[binding_index]))
+            }
+            state.global_env.values[binding_index] = state.slots[src]
+            state.global_env.flags[binding_index] += {.INITIALIZED}
 
         case .SET_GLOBAL_BIND:
             inst := InstABx(word)
             src := slot_base + int(inst.a)
             binding_index := int(inst.b)
+            if !(.INITIALIZED in state.global_env.flags[binding_index]) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("global binding `%s` is not initialized", state.global_env.names[binding_index]))
+            }
+            if !(.MUTABLE in state.global_env.flags[binding_index]) {
+                frame.instruction_index = pc
+                return Value{}, runtime_error(fmt.tprintf("cannot assign to immutable global binding `%s`", state.global_env.names[binding_index]))
+            }
             state.global_env.values[binding_index] = state.slots[src]
 
         case .RETURN:

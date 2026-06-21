@@ -13,6 +13,8 @@ Parser := struct {
     failed:        bool, // mutating parser operations set this, callers check and return immediately
 }{}
 
+MAX_GROUPED_STRUCT_FIELDS :: 16
+
 
 // ExprDesc types ==================================================================================
 // Expression descriptors decouple parsing from slot emission.
@@ -59,6 +61,11 @@ ExprMapIndexConst :: struct {
     key_const:  int,
 }
 
+ExprStructFieldConst :: struct {
+    struct_slot: int,
+    field_const: int,
+}
+
 // Parser/lowering handles. These are not all runtime values.
 ExprDesc :: union {
     ExprInvalid, // parse failed; Parser.failed already owns the real error
@@ -88,6 +95,7 @@ ExprDesc :: union {
     ExprIndex,
     ExprArrayIndexConst,
     ExprMapIndexConst,
+    ExprStructFieldConst,
 }
 
 // Token cursor ===================================================================================
@@ -134,7 +142,7 @@ token_text_for_error :: proc(token: Token) -> string {
     case .IDENT, .ERROR:
         return token.value.(string)
 
-    case .STRING:
+    case .STRING_LIT:
         return token.value.(^StringObject).data
     }
 
@@ -359,6 +367,12 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
         env := &Active_State.envs[proto_state.env_index]
         binding_index := binding_env_find(env, ident_name)
         if binding_index >= 0 {
+            object, is_object := env.values[binding_index].(^Object)
+            if is_object && object.kind == .STRUCT_DEF {
+                compile_error(Token(desc), fmt.tprintf("`%s` is a struct definition; use `::` to alias it or construct an instance", ident_name))
+                return
+            }
+
             emit_get_file_bind(proto_state, dst_slot, binding_index)
             return
         }
@@ -379,6 +393,12 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
             return
         }
 
+        object, is_object := Active_State.global_env.values[global_index].(^Object)
+        if is_object && object.kind == .STRUCT_DEF {
+            compile_error(Token(desc), fmt.tprintf("`%s` is a global struct definition; use `::` to alias it or construct an instance", ident_name))
+            return
+        }
+
         emit_get_global_bind(proto_state, dst_slot, global_index)
 
     case ExprLocalBinding:
@@ -388,12 +408,35 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
         }
 
     case ExprFileBinding:
+        env := &Active_State.envs[proto_state.env_index]
+        object, is_object := env.values[int(desc)].(^Object)
+        if is_object && object.kind == .STRUCT_DEF {
+            name := env.names[int(desc)]
+            compile_error(Parser.current_token, fmt.tprintf("`%s` is a struct definition; use `::` to alias it or construct an instance", name))
+            return
+        }
+
         emit_get_file_bind(proto_state, dst_slot, int(desc))
 
     case ExprGlobalBinding:
+        object, is_object := Active_State.global_env.values[int(desc)].(^Object)
+        if is_object && object.kind == .STRUCT_DEF {
+            name := Active_State.global_env.names[int(desc)]
+            compile_error(Parser.current_token, fmt.tprintf("`%s` is a global struct definition; use `::` to alias it or construct an instance", name))
+            return
+        }
+
         emit_get_global_bind(proto_state, dst_slot, int(desc))
 
     case ExprImportedBinding:
+        env := &Active_State.envs[desc.env_index]
+        object, is_object := env.values[desc.binding_index].(^Object)
+        if is_object && object.kind == .STRUCT_DEF {
+            name := env.names[desc.binding_index]
+            compile_error(Parser.current_token, fmt.tprintf("imported struct definition `%s` is not a value; use it as a constructor target, field spec, or alias RHS", name))
+            return
+        }
+
         emit_get_module_bind(proto_state, dst_slot, desc.env_index, desc.binding_index)
 
     case ExprSlot:
@@ -426,6 +469,9 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
 
     case ExprMapIndexConst:
         emit_map_get_const(proto_state, dst_slot, desc.map_slot, desc.key_const)
+
+    case ExprStructFieldConst:
+        emit_struct_get_const(proto_state, dst_slot, desc.struct_slot, desc.field_const)
 
     }
 }
@@ -482,6 +528,13 @@ expr_read_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
         emit_map_get_const(proto_state, dst_slot, desc.map_slot, desc.key_const)
         return dst_slot
 
+    case ExprStructFieldConst:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_struct_get_const(proto_state, dst_slot, desc.struct_slot, desc.field_const)
+        return dst_slot
+
     case:
         dst_slot := claim_temp_slot(proto_state)
         if Parser.failed { return 0 }
@@ -522,6 +575,13 @@ expr_writable_slot :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> int {
         if Parser.failed { return 0 }
 
         emit_map_get_const(proto_state, dst_slot, desc.map_slot, desc.key_const)
+        return dst_slot
+
+    case ExprStructFieldConst:
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return 0 }
+
+        emit_struct_get_const(proto_state, dst_slot, desc.struct_slot, desc.field_const)
         return dst_slot
 
     case:
@@ -590,6 +650,43 @@ parse_array_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return ExprSlot(array_slot)
 }
 
+parse_map_literal_key :: proc(proto_state: ^ProtoState) -> (key_token: Token, key_object: ^StringObject) {
+    key_token = Parser.current_token
+
+    #partial switch key_token.kind {
+    case .IDENT:
+        key_object = new_string_object(key_token.value.(string))
+        advance_token(proto_state)
+        if Parser.failed { return }
+
+        if Parser.current_token.kind == .LEFT_PAREN {
+            compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got call expression")
+            return
+        }
+
+        if Parser.current_token.kind == .LEFT_BRACKET {
+            compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got indexed expression")
+            return
+        }
+
+        if Parser.current_token.kind == .DOT {
+            compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got field or namespace expression")
+            return
+        }
+
+    case .STRING_LIT:
+        key_object = key_token.value.(^StringObject)
+        advance_token(proto_state)
+        if Parser.failed { return }
+
+    case:
+        compile_error_near(key_token, "map key invalid; expected identifier shorthand or string literal")
+        return
+    }
+
+    return
+}
+
 // mapLiteral = "map" "{" [mapEntryList [","]] "}".
 parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind != .MAP {
@@ -617,39 +714,8 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
     if Parser.current_token.kind != .RIGHT_BRACE {
         for {
-            key_token := Parser.current_token
-            key_object: ^StringObject
-
-            #partial switch key_token.kind {
-            case .IDENT:
-                key_object = new_string_object(key_token.value.(string))
-                advance_token(proto_state)
-                if Parser.failed { return ExprInvalid{} }
-
-                if Parser.current_token.kind == .LEFT_PAREN {
-                    compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got call expression")
-                    return ExprInvalid{}
-                }
-
-                if Parser.current_token.kind == .LEFT_BRACKET {
-                    compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got indexed expression")
-                    return ExprInvalid{}
-                }
-
-                if Parser.current_token.kind == .DOT {
-                    compile_error_near(Parser.current_token, "map key invalid; expected identifier shorthand or string literal, got field or namespace expression")
-                    return ExprInvalid{}
-                }
-
-            case .STRING:
-                key_object = key_token.value.(^StringObject)
-                advance_token(proto_state)
-                if Parser.failed { return ExprInvalid{} }
-
-            case:
-                compile_error_near(key_token, "map key invalid; expected identifier shorthand or string literal")
-                return ExprInvalid{}
-            }
+            key_token, key_object := parse_map_literal_key(proto_state)
+            if Parser.failed { return ExprInvalid{} }
 
             key_text := key_object.data
             for existing_key in key_texts {
@@ -724,15 +790,573 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
         compile_error_near(Parser.current_token, "map entry invalid; expected ',' or '}' after map value")
         return ExprInvalid{}
     }
-
-    if Parser.current_token.kind != .RIGHT_BRACE {
-        compile_error_near(Parser.current_token, "expected '}' after map literal")
-        return ExprInvalid{}
-    }
     advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     return ExprSlot(map_slot)
+}
+
+parse_struct_array_spec :: proc(proto_state: ^ProtoState, spec_name: string) -> Value {
+    if Parser.current_token.kind != .LEFT_BRACKET {
+        compile_error_near(Parser.current_token, "expected '[' to start array field spec")
+        return Value{}
+    }
+    advance_token(proto_state)
+    if Parser.failed { return Value{} }
+
+    array_object := new_array_object()
+    element_index := 0
+
+    if Parser.current_token.kind != .RIGHT_BRACKET {
+        for {
+            element_spec_name := fmt.tprintf("%s[%d]", spec_name, element_index)
+            element_spec := parse_struct_field_spec_value(proto_state, element_spec_name, true)
+            if Parser.failed { return Value{} }
+
+            append(&array_object.data, element_spec)
+            element_index += 1
+
+            if Parser.current_token.kind != .COMMA {
+                break
+            }
+
+            advance_token(proto_state)
+            if Parser.failed { return Value{} }
+            if Parser.current_token.kind == .RIGHT_BRACKET {
+                break
+            }
+        }
+    }
+
+    if Parser.current_token.kind != .RIGHT_BRACKET {
+        compile_error_near(Parser.current_token, "expected ']' after array field spec")
+        return Value{}
+    }
+    advance_token(proto_state)
+    if Parser.failed { return Value{} }
+
+    return Value(cast(^Object)array_object)
+}
+
+parse_struct_map_spec :: proc(proto_state: ^ProtoState, spec_name: string) -> Value {
+    if Parser.current_token.kind != .MAP {
+        compile_error_near(Parser.current_token, "expected 'map'")
+        return Value{}
+    }
+    advance_token(proto_state)
+    if Parser.failed { return Value{} }
+
+    if Parser.current_token.kind != .LEFT_BRACE {
+        return Value(cast(^Object)new_map_object())
+    }
+    advance_token(proto_state)
+    if Parser.failed { return Value{} }
+
+    map_object := new_map_object()
+
+    key_texts := make([dynamic]string)
+    defer delete(key_texts)
+
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        for {
+            key_token, key_object := parse_map_literal_key(proto_state)
+            if Parser.failed { return Value{} }
+
+            key_text := key_object.data
+            for existing_key in key_texts {
+                if existing_key == key_text {
+                    compile_error(key_token, fmt.tprintf("duplicate map key `%s`", key_text))
+                    return Value{}
+                }
+            }
+            append(&key_texts, key_text)
+
+            if Parser.current_token.kind != .COLON {
+                compile_error_near(Parser.current_token, "map entry invalid; expected ':' after map key")
+                return Value{}
+            }
+            advance_token(proto_state)
+            if Parser.failed { return Value{} }
+
+            value_token := Parser.current_token
+            if value_token.kind == .NIL {
+                compile_error(value_token, fmt.tprintf("invalid field spec for key `%s` in map field spec; nil is not valid in map field specs", key_text))
+                return Value{}
+            }
+
+            value_spec_name := fmt.tprintf("%s.%s", spec_name, key_text)
+            value_spec := parse_struct_field_spec_value(proto_state, value_spec_name)
+            if Parser.failed { return Value{} }
+
+            map_set(map_object, key_object, value_spec)
+
+            if Parser.current_token.kind != .COMMA {
+                break
+            }
+
+            advance_token(proto_state)
+            if Parser.failed { return Value{} }
+            if Parser.current_token.kind == .RIGHT_BRACE {
+                break
+            }
+        }
+    }
+
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "map entry invalid; expected ',' or '}' after map value")
+        return Value{}
+    }
+    advance_token(proto_state)
+    if Parser.failed { return Value{} }
+
+    return Value(cast(^Object)map_object)
+}
+
+parse_struct_def_object :: proc(proto_state: ^ProtoState, def_name: string) -> ^StructDefObject {
+    if Parser.current_token.kind != .STRUCT {
+        compile_error_near(Parser.current_token, "expected 'struct'")
+        return nil
+    }
+    advance_token(proto_state)
+    if Parser.failed { return nil }
+
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "expected '{' after struct")
+        return nil
+    }
+    advance_token(proto_state)
+    if Parser.failed { return nil }
+
+    fields := make([dynamic]StructField)
+    defer delete(fields)
+
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        for {
+            field_tokens: [MAX_GROUPED_STRUCT_FIELDS]Token
+            field_count := 0
+
+            for {
+                if Parser.current_token.kind != .IDENT {
+                    compile_error_near(Parser.current_token, "expected field name in struct")
+                    return nil
+                }
+
+                field_token := advance_token(proto_state)
+                if Parser.failed { return nil }
+                field_name := field_token.value.(string)
+
+                for field in fields {
+                    if field.name == field_name {
+                        compile_error(field_token, fmt.tprintf("duplicate struct field `%s`", field_name))
+                        return nil
+                    }
+                }
+
+                for i := 0; i < field_count; i += 1 {
+                    previous_name := field_tokens[i].value.(string)
+                    if previous_name == field_name {
+                        compile_error(field_token, fmt.tprintf("duplicate struct field `%s`", field_name))
+                        return nil
+                    }
+                }
+
+                if field_count >= MAX_GROUPED_STRUCT_FIELDS {
+                    compile_error(field_token, fmt.tprintf("too many fields in grouped struct declaration; maximum is %d", MAX_GROUPED_STRUCT_FIELDS))
+                    return nil
+                }
+
+                field_tokens[field_count] = field_token
+                field_count += 1
+
+                if Parser.current_token.kind != .COMMA {
+                    break
+                }
+
+                advance_token(proto_state)
+                if Parser.failed { return nil }
+            }
+
+            if Parser.current_token.kind != .COLON {
+                compile_error_near(Parser.current_token, "expected ':' after struct field name")
+                return nil
+            }
+            advance_token(proto_state)
+            if Parser.failed { return nil }
+
+            first_field_name := field_tokens[0].value.(string)
+            field_spec := parse_struct_field_spec_value(proto_state, fmt.tprintf("%s.%s", def_name, first_field_name))
+            if Parser.failed { return nil }
+
+            for i := 0; i < field_count; i += 1 {
+                field_name := field_tokens[i].value.(string)
+                append(&fields, StructField{
+                    name = strings.clone(field_name),
+                    spec = field_spec,
+                })
+            }
+
+            if Parser.current_token.kind != .COMMA {
+                break
+            }
+
+            advance_token(proto_state)
+            if Parser.failed { return nil }
+            if Parser.current_token.kind == .RIGHT_BRACE {
+                break
+            }
+        }
+    }
+
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "expected ',' or '}' after struct field")
+        return nil
+    }
+    advance_token(proto_state)
+    if Parser.failed { return nil }
+
+    struct_def := new(StructDefObject)
+    struct_def.header.kind = .STRUCT_DEF
+    struct_def.name = strings.clone(def_name)
+    struct_def.fields = make([]StructField, len(fields))
+    copy(struct_def.fields, fields[:])
+
+    return struct_def
+}
+
+bind_file_struct_def :: proc(proto_state: ^ProtoState, name_token: Token, def: ^StructDefObject) {
+    if proto_state.is_function || len(proto_state.scope_local_marks) != 0 {
+        compile_error(name_token, "struct definitions and aliases are only valid at top level")
+        return
+    }
+
+    env := &Active_State.envs[proto_state.env_index]
+    name := name_token.value.(string)
+
+    if binding_env_find(env, name) >= 0 {
+        compile_error(name_token, fmt.tprintf("top-level binding `%s` is already declared", name))
+        return
+    }
+
+    if import_namespace_find(proto_state, name) >= 0 {
+        compile_error(name_token, fmt.tprintf("top-level binding `%s` conflicts with imported namespace", name))
+        return
+    }
+
+    if env.count >= MAX_BINDINGS {
+        compile_error(name_token, "too many top-level bindings")
+        return
+    }
+
+    binding_index := binding_env_append(env, name, false)
+    env.values[binding_index] = Value(cast(^Object)def)
+    env.flags[binding_index] += {.INITIALIZED}
+}
+
+try_consume_struct_def_alias_rhs :: proc(proto_state: ^ProtoState) -> (def: ^StructDefObject, ok: bool) {
+    if Parser.current_token.kind != .IDENT {
+        return nil, false
+    }
+
+    ident_token := Parser.current_token
+
+    saved_index := Scanner.index
+    saved_token_start := Scanner.token_start
+    saved_failed := Scanner.failed
+
+    next_token := scan_next_token()
+    next_next_token := Token{}
+    if next_token.kind == .DOT {
+        next_next_token = scan_next_token()
+    }
+
+    Scanner.index = saved_index
+    Scanner.token_start = saved_token_start
+    Scanner.failed = saved_failed
+
+    if next_token.kind == .DOT && next_next_token.kind == .IDENT {
+        namespace_name := ident_token.value.(string)
+        if local_binding_find(proto_state, namespace_name) >= 0 {
+            return nil, false
+        }
+
+        env := &Active_State.envs[proto_state.env_index]
+        if binding_env_find(env, namespace_name) >= 0 {
+            return nil, false
+        }
+
+        if binding_env_find(&Active_State.global_env, namespace_name) >= 0 {
+            return nil, false
+        }
+
+        import_index := import_namespace_find(proto_state, namespace_name)
+        if import_index < 0 {
+            return nil, false
+        }
+
+        imported_env := &Active_State.envs[proto_state.import_env_indexes[import_index]]
+        binding_index := binding_env_find(imported_env, next_next_token.value.(string))
+        if binding_index < 0 || !(.EXPORTED in imported_env.flags[binding_index]) {
+            return nil, false
+        }
+
+        object, is_object := imported_env.values[binding_index].(^Object)
+        if !is_object || object.kind != .STRUCT_DEF {
+            return nil, false
+        }
+
+        advance_token(proto_state)
+        if Parser.failed { return nil, true }
+        advance_token(proto_state)
+        if Parser.failed { return nil, true }
+        advance_token(proto_state)
+        if Parser.failed { return nil, true }
+
+        return cast(^StructDefObject)object, true
+    }
+
+    if next_token.kind == .DOT {
+        return nil, false
+    }
+
+    ident_name := ident_token.value.(string)
+    if local_binding_find(proto_state, ident_name) >= 0 {
+        return nil, false
+    }
+
+    env := &Active_State.envs[proto_state.env_index]
+    binding_index := binding_env_find(env, ident_name)
+    if binding_index >= 0 {
+        object, is_object := env.values[binding_index].(^Object)
+        if !is_object || object.kind != .STRUCT_DEF {
+            return nil, false
+        }
+
+        advance_token(proto_state)
+        if Parser.failed { return nil, true }
+        return cast(^StructDefObject)object, true
+    }
+
+    if import_namespace_find(proto_state, ident_name) >= 0 {
+        return nil, false
+    }
+
+    global_index := binding_env_find(&Active_State.global_env, ident_name)
+    if global_index < 0 {
+        return nil, false
+    }
+
+    object, is_object := Active_State.global_env.values[global_index].(^Object)
+    if !is_object || object.kind != .STRUCT_DEF {
+        return nil, false
+    }
+
+    advance_token(proto_state)
+    if Parser.failed { return nil, true }
+    return cast(^StructDefObject)object, true
+}
+
+parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: string, allow_nil: bool = false) -> Value {
+    #partial switch Parser.current_token.kind {
+    case .INT:
+        advance_token(proto_state)
+        return Value(i64(0))
+
+    case .FLOAT:
+        advance_token(proto_state)
+        return Value(f64(0))
+
+    case .STRING:
+        advance_token(proto_state)
+        return Value(cast(^Object)new_string_object(""))
+
+    case .BOOL:
+        advance_token(proto_state)
+        return Value(bool(false))
+
+    case .ARRAY:
+        advance_token(proto_state)
+        return Value(cast(^Object)new_array_object())
+
+    case .MAP:
+        return parse_struct_map_spec(proto_state, spec_name)
+
+    case .STRUCT:
+        nested_def := parse_struct_def_object(proto_state, spec_name)
+        if Parser.failed { return Value{} }
+        return Value(cast(^Object)new_struct_object(nested_def))
+
+    case .IDENT:
+        ident_token := advance_token(proto_state)
+        if Parser.failed { return Value{} }
+
+        ident_name := ident_token.value.(string)
+        if Parser.current_token.kind == .DOT {
+            advance_token(proto_state)
+            if Parser.failed { return Value{} }
+
+            if Parser.current_token.kind != .IDENT {
+                compile_error_near(Parser.current_token, "expected struct name after '.'")
+                return Value{}
+            }
+            member_token := advance_token(proto_state)
+            if Parser.failed { return Value{} }
+            member_name := member_token.value.(string)
+            qualified_name := fmt.tprintf("%s.%s", ident_name, member_name)
+
+            current_env := &Active_State.envs[proto_state.env_index]
+            if local_binding_find(proto_state, ident_name) >= 0 ||
+               binding_env_find(current_env, ident_name) >= 0 ||
+               binding_env_find(&Active_State.global_env, ident_name) >= 0 {
+                compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not declared", qualified_name))
+                return Value{}
+            }
+
+            import_index := import_namespace_find(proto_state, ident_name)
+            if import_index < 0 {
+                compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not declared", qualified_name))
+                return Value{}
+            }
+
+            env := &Active_State.envs[proto_state.import_env_indexes[import_index]]
+            binding_index := binding_env_find(env, member_name)
+            if binding_index < 0 || !(.EXPORTED in env.flags[binding_index]) {
+                compile_error(member_token, fmt.tprintf("module `%s` does not export binding `%s`", ident_name, member_name))
+                return Value{}
+            }
+
+            object, is_object := env.values[binding_index].(^Object)
+            if !is_object || object.kind != .STRUCT_DEF {
+                compile_error(member_token, fmt.tprintf("struct field spec `%s` is not a struct", qualified_name))
+                return Value{}
+            }
+
+            def := cast(^StructDefObject)object
+            return Value(cast(^Object)new_struct_object(def))
+        }
+
+        if local_binding_find(proto_state, ident_name) >= 0 {
+            compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not a struct", ident_name))
+            return Value{}
+        }
+
+        env := &Active_State.envs[proto_state.env_index]
+        binding_index := binding_env_find(env, ident_name)
+        if binding_index >= 0 {
+            object, is_object := env.values[binding_index].(^Object)
+            if !is_object || object.kind != .STRUCT_DEF {
+                compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not a struct", ident_name))
+                return Value{}
+            }
+
+            def := cast(^StructDefObject)object
+            return Value(cast(^Object)new_struct_object(def))
+        }
+
+        if import_namespace_find(proto_state, ident_name) >= 0 {
+            compile_error(ident_token, fmt.tprintf("namespace `%s` cannot be used as a struct field spec; use `%s.Name`", ident_name, ident_name))
+            return Value{}
+        }
+
+        global_index := binding_env_find(&Active_State.global_env, ident_name)
+        if global_index < 0 {
+            compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not declared", ident_name))
+            return Value{}
+        }
+
+        object, is_object := Active_State.global_env.values[global_index].(^Object)
+        if !is_object || object.kind != .STRUCT_DEF {
+            compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not a struct", ident_name))
+            return Value{}
+        }
+
+        def := cast(^StructDefObject)object
+        return Value(cast(^Object)new_struct_object(def))
+
+    case .INT_LIT:
+        token := advance_token(proto_state)
+        return Value(token.value.(i64))
+
+    case .FLOAT_LIT:
+        token := advance_token(proto_state)
+        return Value(token.value.(f64))
+
+    case .STRING_LIT:
+        token := advance_token(proto_state)
+        return Value(cast(^Object)token.value.(^StringObject))
+
+    case .TRUE:
+        advance_token(proto_state)
+        return Value(bool(true))
+
+    case .FALSE:
+        advance_token(proto_state)
+        return Value(bool(false))
+
+    case .NIL:
+        if allow_nil {
+            advance_token(proto_state)
+            return Value{}
+        }
+
+        compile_error(Parser.current_token, "struct field spec cannot be nil")
+        return Value{}
+
+    case .LEFT_BRACKET:
+        return parse_struct_array_spec(proto_state, spec_name)
+
+    case .FUNCTION:
+        origin_token := Parser.current_token
+        child_proto: ^Proto
+
+        saved_index := Scanner.index
+        saved_token_start := Scanner.token_start
+        saved_failed := Scanner.failed
+
+        next_token := scan_next_token()
+
+        Scanner.index = saved_index
+        Scanner.token_start = saved_token_start
+        Scanner.failed = saved_failed
+
+        if len(proto_state.child_protos) >= MAX_CHILD_PROTOS {
+            compile_error(origin_token, "too many functions in function")
+            return Value{}
+        }
+
+        if next_token.kind == .LEFT_PAREN {
+            child_proto = parse_function_proto(proto_state, spec_name, origin_token)
+            if Parser.failed { return Value{} }
+        } else {
+            // `function` as a field spec is equivalent to `function() {}`.
+            advance_token(proto_state)
+            if Parser.failed { return Value{} }
+
+            child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
+            child_proto_state := begin_function_proto(proto_state, spec_name, child_line, 0, false)
+
+            return_slot := claim_temp_slot(&child_proto_state)
+            if Parser.failed {
+                delete_proto_state(&child_proto_state)
+                return Value{}
+            }
+            emit_load_nil(&child_proto_state, return_slot)
+            emit_return(&child_proto_state, return_slot, 1)
+
+            child_proto = end_proto(&child_proto_state)
+        }
+
+        _ = append_child_proto(proto_state, child_proto, origin_token)
+        if Parser.failed { return Value{} }
+
+        function_object := new(ProtoFunctionObject)
+        function_object.header.kind = .PROTO_FUNCTION
+        function_object.impl = child_proto
+        return Value(cast(^Object)function_object)
+
+    case:
+        compile_error_near(Parser.current_token, "expected struct field spec")
+        return Value{}
+    }
 }
 
 // groupedExpr = "(" expr ")".
@@ -921,14 +1545,105 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
     return ExprIndex{container_slot, key_slot}
 }
 
+parse_struct_constructor_postfix :: proc(proto_state: ^ProtoState, def: ^StructDefObject) -> ExprDesc {
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "expected '{' to start struct constructor")
+        return ExprInvalid{}
+    }
+    advance_token(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    dst_slot := claim_temp_slot(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    def_const := const_struct_def(proto_state, def)
+    if Parser.failed { return ExprInvalid{} }
+    emit_new_struct(proto_state, dst_slot, def_const)
+
+    override_names := make([dynamic]string)
+    defer delete(override_names)
+
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        for {
+            if Parser.current_token.kind != .IDENT {
+                compile_error_near(Parser.current_token, "expected field name in struct constructor")
+                return ExprInvalid{}
+            }
+
+            field_token := advance_token(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+            field_name := field_token.value.(string)
+
+            for existing_name in override_names {
+                if existing_name == field_name {
+                    compile_error(field_token, fmt.tprintf("duplicate constructor field `%s`", field_name))
+                    return ExprInvalid{}
+                }
+            }
+            append(&override_names, field_name)
+
+            if struct_find_field(def, field_name) < 0 {
+                compile_error(field_token, fmt.tprintf("struct `%s` has no field `%s`", def.name, field_name))
+                return ExprInvalid{}
+            }
+
+            if Parser.current_token.kind == .COLON {
+                compile_error_near(Parser.current_token, "struct constructor fields use '=', not ':'")
+                return ExprInvalid{}
+            }
+
+            if Parser.current_token.kind != .ASSIGN {
+                compile_error_near(Parser.current_token, "expected '=' after struct constructor field")
+                return ExprInvalid{}
+            }
+            advance_token(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+
+            value_expr := parse_expr(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+
+            value_slot := expr_read_slot(proto_state, value_expr)
+            if Parser.failed { return ExprInvalid{} }
+
+            field_const := const_string_object(proto_state, new_string_object(field_name))
+            if Parser.failed { return ExprInvalid{} }
+            if field_const >= 256 {
+                compile_error(field_token, "too many constants before struct field access")
+                return ExprInvalid{}
+            }
+
+            emit_struct_set_const(proto_state, dst_slot, field_const, value_slot)
+            proto_state.next_temp_slot = dst_slot + 1
+
+            if Parser.current_token.kind != .COMMA {
+                break
+            }
+
+            advance_token(proto_state)
+            if Parser.failed { return ExprInvalid{} }
+            if Parser.current_token.kind == .RIGHT_BRACE {
+                break
+            }
+        }
+    }
+
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "expected ',' or '}' after struct constructor field")
+        return ExprInvalid{}
+    }
+    advance_token(proto_state)
+    if Parser.failed { return ExprInvalid{} }
+
+    return ExprSlot(dst_slot)
+}
+
 // fieldPostfix = "." ident.
-// Current implementation supports imported module namespace access only.
 parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDesc {
     if Parser.current_token.kind != .DOT {
         compile_error_near(Parser.current_token, "expected '.' to start access expression")
         return ExprInvalid{}
     }
-    dot_token := advance_token(proto_state)
+    advance_token(proto_state)
     if Parser.failed { return ExprInvalid{} }
 
     if Parser.current_token.kind != .IDENT {
@@ -939,43 +1654,44 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
     if Parser.failed { return ExprInvalid{} }
 
     namespace_token, is_namespace_candidate := left.(ExprUnresolvedBinding)
-    if !is_namespace_candidate {
-        compile_error(dot_token, "invalid access expression; expected imported namespace before '.'")
-        return ExprInvalid{}
-    }
-
-    namespace_name := namespace_token.value.(string)
-    import_index := import_namespace_find(proto_state, namespace_name)
-    local_index := local_binding_find(proto_state, namespace_name)
-    if local_index >= 0 {
-        if import_index >= 0 {
-            compile_error(Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` shadows imported namespace", namespace_name))
-        } else {
-            compile_error(Token(namespace_token), fmt.tprintf("invalid access expression; local binding `%s` is not an imported namespace", namespace_name))
-        }
-        return ExprInvalid{}
-    }
-
-    if import_index < 0 {
-        compile_error(Token(namespace_token), fmt.tprintf("invalid access expression; namespace `%s` not found", namespace_name))
-        return ExprInvalid{}
-    }
-
-    env_index := proto_state.import_env_indexes[import_index]
     member_name := member_token.value.(string)
-    env := &Active_State.envs[env_index]
-    binding_index := binding_env_find(env, member_name)
-    if binding_index < 0 {
-        compile_error(member_token, fmt.tprintf("invalid access expression; module `%s` has no binding `%s`", namespace_name, member_name))
+
+    if is_namespace_candidate {
+        namespace_name := namespace_token.value.(string)
+        local_index := local_binding_find(proto_state, namespace_name)
+        file_index := binding_env_find(&Active_State.envs[proto_state.env_index], namespace_name)
+        global_index := binding_env_find(&Active_State.global_env, namespace_name)
+        import_index := import_namespace_find(proto_state, namespace_name)
+
+        if local_index < 0 && file_index < 0 && global_index < 0 && import_index >= 0 {
+            env_index := proto_state.import_env_indexes[import_index]
+            env := &Active_State.envs[env_index]
+            binding_index := binding_env_find(env, member_name)
+            if binding_index < 0 {
+                compile_error(member_token, fmt.tprintf("invalid access expression; module `%s` has no binding `%s`", namespace_name, member_name))
+                return ExprInvalid{}
+            }
+
+            if !(.EXPORTED in env.flags[binding_index]) {
+                compile_error(member_token, fmt.tprintf("module `%s` does not export binding `%s`", namespace_name, member_name))
+                return ExprInvalid{}
+            }
+
+            return ExprImportedBinding{env_index, binding_index}
+        }
+    }
+
+    left_slot := expr_read_slot(proto_state, left)
+    if Parser.failed { return ExprInvalid{} }
+
+    field_const := const_string_object(proto_state, new_string_object(member_name))
+    if Parser.failed { return ExprInvalid{} }
+    if field_const >= 256 {
+        compile_error(member_token, "too many constants before struct field access")
         return ExprInvalid{}
     }
 
-    if !(.EXPORTED in env.flags[binding_index]) {
-        compile_error(member_token, fmt.tprintf("module `%s` does not export binding `%s`", namespace_name, member_name))
-        return ExprInvalid{}
-    }
-
-    return ExprImportedBinding{env_index, binding_index}
+    return ExprStructFieldConst{left_slot, field_const}
 }
 
 // chainExpr = rootExpr {postfix}.
@@ -996,6 +1712,57 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
             continue
         }
 
+        if Parser.current_token.kind == .LEFT_BRACE {
+            // `{ ... }` is only a constructor postfix for a known struct definition.
+            // Otherwise leave `{` for block parsers such as if/for.
+            target_token, is_constructor_candidate := expr.(ExprUnresolvedBinding)
+            if is_constructor_candidate {
+                name := target_token.value.(string)
+                if local_binding_find(proto_state, name) >= 0 {
+                    break
+                }
+
+                env := &Active_State.envs[proto_state.env_index]
+                binding_index := binding_env_find(env, name)
+                if binding_index >= 0 {
+                    object, is_object := env.values[binding_index].(^Object)
+                    if is_object && object.kind == .STRUCT_DEF {
+                        expr = parse_struct_constructor_postfix(proto_state, cast(^StructDefObject)object)
+                        if Parser.failed { return ExprInvalid{} }
+                        continue
+                    }
+                    break
+                }
+
+                if import_namespace_find(proto_state, name) >= 0 {
+                    break
+                }
+
+                global_index := binding_env_find(&Active_State.global_env, name)
+                if global_index >= 0 {
+                    object, is_object := Active_State.global_env.values[global_index].(^Object)
+                    if is_object && object.kind == .STRUCT_DEF {
+                        expr = parse_struct_constructor_postfix(proto_state, cast(^StructDefObject)object)
+                        if Parser.failed { return ExprInvalid{} }
+                        continue
+                    }
+                }
+            }
+
+            imported_target, is_imported_target := expr.(ExprImportedBinding)
+            if is_imported_target {
+                env := &Active_State.envs[imported_target.env_index]
+                object, is_object := env.values[imported_target.binding_index].(^Object)
+                if is_object && object.kind == .STRUCT_DEF {
+                    expr = parse_struct_constructor_postfix(proto_state, cast(^StructDefObject)object)
+                    if Parser.failed { return ExprInvalid{} }
+                    continue
+                }
+            }
+
+            break
+        }
+
         if Parser.current_token.kind == .DOT {
             expr = parse_field_postfix(proto_state, expr)
             if Parser.failed { return ExprInvalid{} }
@@ -1014,13 +1781,13 @@ parse_chain_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 // primaryExpr = chainExpr | basicLiteral | groupedExpr.
 parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     #partial switch Parser.current_token.kind {
-    case .INT:
+    case .INT_LIT:
         token := advance_token(proto_state)
         return token.value.(i64)
-    case .FLOAT:
+    case .FLOAT_LIT:
         token := advance_token(proto_state)
         return token.value.(f64)
-    case .STRING:
+    case .STRING_LIT:
         token := advance_token(proto_state)
         return token.value.(^StringObject)
     case .TRUE:
@@ -1555,23 +2322,33 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
     advance_token(proto_state)
 }
 
+append_child_proto :: proc(parent_proto_state: ^ProtoState, child_proto: ^Proto, origin_token: Token) -> int {
+    if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
+        compile_error(origin_token, "too many functions in function")
+        return 0
+    }
+
+    child_proto_index := len(parent_proto_state.child_protos)
+    append(&parent_proto_state.child_protos, child_proto)
+    return child_proto_index
+}
+
 // functionLiteral = "function" "(" [paramList [","]] ")" block.
 // param = IDENT ["..."]; a vararg parameter must be final.
-// The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
-parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
+parse_function_proto :: proc(parent_proto_state: ^ProtoState, function_name: string, origin_token: Token) -> ^Proto {
     if Parser.current_token.kind != .FUNCTION {
         compile_error_near(Parser.current_token, "expected 'function'")
-        return
+        return nil
     }
     advance_token(parent_proto_state)
-    if Parser.failed { return }
+    if Parser.failed { return nil }
 
     if Parser.current_token.kind != .LEFT_PAREN {
         compile_error_near(Parser.current_token, "expected '(' after function")
-        return
+        return nil
     }
     advance_token(parent_proto_state)
-    if Parser.failed { return }
+    if Parser.failed { return nil }
 
     // Parameters are collected before creating the child proto so its arity is known.
     param_tokens: [MAX_CALL_ARGS]Token
@@ -1581,35 +2358,35 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
         for {
             if param_count >= MAX_CALL_ARGS {
                 compile_error(Parser.current_token, "too many function parameters")
-                return
+                return nil
             }
 
             if Parser.current_token.kind != .IDENT {
                 compile_error_near(Parser.current_token, "expected parameter identifier")
-                return
+                return nil
             }
             param_tokens[param_count] = advance_token(parent_proto_state)
             if Parser.failed {
-                return
+                return nil
             }
             param_count += 1
 
             if Parser.current_token.kind == .ELLIPSIS {
                 advance_token(parent_proto_state)
-                if Parser.failed { return }
+                if Parser.failed { return nil }
 
                 has_vararg = true
 
                 if Parser.current_token.kind == .COMMA {
                     advance_token(parent_proto_state)
-                    if Parser.failed { return }
+                    if Parser.failed { return nil }
                     if Parser.current_token.kind != .RIGHT_PAREN {
                         compile_error_near(Parser.current_token, "vararg parameter must be last")
-                        return
+                        return nil
                     }
                 } else if Parser.current_token.kind != .RIGHT_PAREN {
                     compile_error_near(Parser.current_token, "vararg parameter must be last")
-                    return
+                    return nil
                 }
 
                 break
@@ -1620,7 +2397,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
             }
 
             advance_token(parent_proto_state)
-            if Parser.failed { return }
+            if Parser.failed { return nil }
             if Parser.current_token.kind == .RIGHT_PAREN {
                 break
             }
@@ -1629,10 +2406,10 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
     if Parser.current_token.kind != .RIGHT_PAREN {
         compile_error_near(Parser.current_token, "expected ')' after function parameters")
-        return
+        return nil
     }
     advance_token(parent_proto_state)
-    if Parser.failed { return }
+    if Parser.failed { return nil }
 
     child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
     child_proto_state := begin_function_proto(parent_proto_state, function_name, child_line, param_count, has_vararg)
@@ -1646,7 +2423,7 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
             if param_tokens[prev_index].value.(string) == param_name {
                 compile_error(param_tokens[param_index], fmt.tprintf("parameter binding `%s` is already declared in this function", param_name))
                 delete_proto_state(&child_proto_state)
-                return
+                return nil
             }
         }
 
@@ -1656,28 +2433,35 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
     parse_function_body(&child_proto_state)
     if Parser.failed {
         delete_proto_state(&child_proto_state)
-        return
+        return nil
     }
 
     // Function fallthrough is an implicit nil return.
     return_slot := claim_temp_slot(&child_proto_state)
     if Parser.failed {
         delete_proto_state(&child_proto_state)
-        return
+        return nil
     }
     emit_load_nil(&child_proto_state, return_slot)
     emit_return(&child_proto_state, return_slot, 1)
 
-    // LOAD_FUNC creates the runtime function object when the parent executes.
+    return end_proto(&child_proto_state)
+}
+
+// The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
+parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
     if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
-        delete_proto_state(&child_proto_state)
         compile_error(origin_token, "too many functions in function")
         return
     }
 
-    child_proto := end_proto(&child_proto_state)
-    child_proto_index := len(parent_proto_state.child_protos)
-    append(&parent_proto_state.child_protos, child_proto)
+    child_proto := parse_function_proto(parent_proto_state, function_name, origin_token)
+    if Parser.failed { return }
+
+    child_proto_index := append_child_proto(parent_proto_state, child_proto, origin_token)
+    if Parser.failed { return }
+
+    child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
     parent_proto_state.current_inst_line = child_line
     emit_load_func(parent_proto_state, dst, child_proto_index)
 }
@@ -1735,7 +2519,7 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
         if Parser.failed { return }
     }
 
-    if Parser.current_token.kind != .STRING {
+    if Parser.current_token.kind != .STRING_LIT {
         compile_error_near(Parser.current_token, "expected module path string after import")
         return
     }
@@ -1862,18 +2646,13 @@ parse_import_stmt :: proc(proto_state: ^ProtoState) {
 }
 
 // exportStmt = "export" | "export" "{" ident {"," ident} [","] "}".
-parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
+parse_export_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.current_token.kind != .EXPORT {
         compile_error_near(Parser.current_token, "expected 'export'")
         return
     }
-    export_token := advance_token(proto_state)
+    advance_token(proto_state)
     if Parser.failed { return }
-
-    if !allow_export {
-        compile_error(export_token, "export is only valid in module files")
-        return
-    }
 
     env := &Active_State.envs[proto_state.env_index]
 
@@ -1884,10 +2663,6 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
         return
     }
 
-    if Parser.current_token.kind != .LEFT_BRACE {
-        compile_error_near(Parser.current_token, "expected '{' after export")
-        return
-    }
     advance_token(proto_state)
     if Parser.failed { return }
 
@@ -1923,7 +2698,7 @@ parse_export_stmt :: proc(proto_state: ^ProtoState, allow_export: bool) {
 
         binding_index := binding_env_find(env, name)
         if binding_index < 0 {
-            compile_error(name_token, fmt.tprintf("export binding `%s` is not declared in this module", name))
+            compile_error(name_token, fmt.tprintf("export binding `%s` is not declared in this file", name))
             return
         }
 
@@ -2123,9 +2898,10 @@ parse_for_stmt :: proc(proto_state: ^ProtoState) {
                  ExprImportedBinding,
                  ExprIndex,
                  ExprArrayIndexConst,
-                 ExprMapIndexConst:
+                 ExprMapIndexConst,
+                 ExprStructFieldConst:
             case:
-                compile_error(first_token, "assignment target must be an identifier or indexed expression")
+                compile_error(first_token, "assignment target must be an identifier, indexed expression, or field expression")
                 return
             }
 
@@ -2500,11 +3276,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
     return
 }
 
-// declStmt = ["global"] identList declOp exprList.
-finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutable: bool) {
-    advance_token(proto_state)
-    if Parser.failed { return }
-
+finish_decl_stmt_after_operator :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutable: bool) {
     lhs_count := len(lhs_tokens)
 
     if !proto_state.is_function && len(proto_state.scope_local_marks) == 0 {
@@ -2636,6 +3408,90 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
     }
 }
 
+// declStmt = ["global"] identList declOp exprList.
+finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutable: bool) {
+    advance_token(proto_state)
+    if Parser.failed { return }
+
+    finish_decl_stmt_after_operator(proto_state, lhs_tokens, is_mutable)
+}
+
+finish_inline_struct_instance_decl :: proc(proto_state: ^ProtoState, name_token: Token, def: ^StructDefObject, is_mutable: bool) {
+    name := name_token.value.(string)
+
+    top_level := !proto_state.is_function && len(proto_state.scope_local_marks) == 0
+    if top_level {
+        env := &Active_State.envs[proto_state.env_index]
+
+        if binding_env_find(env, name) >= 0 {
+            compile_error(name_token, fmt.tprintf("top-level binding `%s` is already declared", name))
+            return
+        }
+
+        if import_namespace_find(proto_state, name) >= 0 {
+            compile_error(name_token, fmt.tprintf("top-level binding `%s` conflicts with imported namespace", name))
+            return
+        }
+
+        if env.count >= MAX_BINDINGS {
+            compile_error(name_token, "too many top-level bindings")
+            return
+        }
+    } else {
+        scope_start := 0
+        if len(proto_state.scope_local_marks) > 0 {
+            scope_start = proto_state.scope_local_marks[len(proto_state.scope_local_marks) - 1]
+        }
+
+        for local_index := scope_start; local_index < proto_state.local_count; local_index += 1 {
+            if proto_state.local_bindings[local_index].name == name {
+                compile_error(name_token, fmt.tprintf("local binding `%s` is already declared in this scope", name))
+                return
+            }
+        }
+
+        if proto_state.local_count + 1 > MAX_FRAME_SLOTS {
+            compile_error(name_token, "too many local bindings in function")
+            return
+        }
+    }
+
+    if Parser.current_token.kind != .LEFT_BRACE {
+        compile_error_near(Parser.current_token, "bare struct layout is not a value; use `struct { ... } {}` to construct an instance")
+        return
+    }
+    advance_token(proto_state)
+    if Parser.failed { return }
+
+    if Parser.current_token.kind != .RIGHT_BRACE {
+        compile_error_near(Parser.current_token, "inline struct construction uses field defaults; constructor body must be empty")
+        return
+    }
+    advance_token(proto_state)
+    if Parser.failed { return }
+
+    def_const := const_struct_def(proto_state, def)
+    if Parser.failed { return }
+
+    if top_level {
+        env := &Active_State.envs[proto_state.env_index]
+        binding_index := binding_env_append(env, name, is_mutable)
+
+        dst_slot := claim_temp_slot(proto_state)
+        if Parser.failed { return }
+
+        emit_new_struct(proto_state, dst_slot, def_const)
+        emit_set_file_bind(proto_state, dst_slot, binding_index)
+        return
+    }
+
+    dst_slot := proto_state.local_count
+    proto_state.next_temp_slot = dst_slot
+
+    emit_new_struct(proto_state, dst_slot, def_const)
+    local_binding_append(proto_state, name, is_mutable)
+}
+
 // assignTarget = ident | ident {postfix} accessPostfix.
 resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, target: ExprDesc) -> ExprDesc {
     // Assignment target resolution checks mutability; normal expression reads do not.
@@ -2687,11 +3543,11 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
         return ExprGlobalBinding(global_index)
 
-    case ExprLocalBinding, ExprFileBinding, ExprGlobalBinding, ExprIndex, ExprArrayIndexConst, ExprMapIndexConst:
+    case ExprLocalBinding, ExprFileBinding, ExprGlobalBinding, ExprIndex, ExprArrayIndexConst, ExprMapIndexConst, ExprStructFieldConst:
         return target
 
     case ExprCall:
-        compile_error(source_token, fmt.tprintf("call expression `%s` is not an assignment target; expected identifier or indexed expression", source_token.value.(string)))
+        compile_error(source_token, fmt.tprintf("call expression `%s` is not an assignment target; expected identifier, indexed expression, or field expression", source_token.value.(string)))
         return ExprInvalid{}
 
     case ExprImportedBinding:
@@ -2736,6 +3592,9 @@ set_assign_target :: proc(proto_state: ^ProtoState, src_slot: int, target: ExprD
 
     case ExprMapIndexConst:
         emit_map_set_const(proto_state, t.map_slot, t.key_const, src_slot)
+
+    case ExprStructFieldConst:
+        emit_struct_set_const(proto_state, t.struct_slot, t.field_const, src_slot)
 
     case:
         panic("assignment lowering reached non-assignable expression descriptor")
@@ -3010,6 +3869,78 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
+    top_level := !proto_state.is_function && len(proto_state.scope_local_marks) == 0
+
+    if Parser.current_token.kind == .STRUCT {
+        if lhs_count != 1 {
+            compile_error(lhs_tokens[0], "global struct declaration expects one binding")
+            return
+        }
+
+        def := parse_struct_def_object(proto_state, lhs_tokens[0].value.(string))
+        if Parser.failed { return }
+
+        if Parser.current_token.kind == .LEFT_BRACE {
+            advance_token(proto_state)
+            if Parser.failed { return }
+
+            if Parser.current_token.kind != .RIGHT_BRACE {
+                compile_error_near(Parser.current_token, "inline struct construction uses field defaults; constructor body must be empty")
+                return
+            }
+            advance_token(proto_state)
+            if Parser.failed { return }
+
+            binding_index := binding_env_append(&Active_State.global_env, lhs_tokens[0].value.(string), is_mutable)
+
+            dst_slot := claim_temp_slot(proto_state)
+            if Parser.failed { return }
+
+            def_const := const_struct_def(proto_state, def)
+            if Parser.failed { return }
+
+            emit_new_struct(proto_state, dst_slot, def_const)
+            emit_decl_global_bind(proto_state, dst_slot, binding_index)
+            return
+        }
+
+        if is_mutable {
+            compile_error_near(Parser.current_token, "bare struct layout is not a value; use `struct { ... } {}` to construct an instance")
+            return
+        }
+
+        // A bare global struct layout installs a binding-time definition, not a
+        // runtime value. Keep that form at top level; inline `struct { ... } {}`
+        // above remains a normal runtime global declaration.
+        if !top_level {
+            compile_error(lhs_tokens[0], "global struct definitions are only valid at top level")
+            return
+        }
+
+        binding_index := binding_env_append(&Active_State.global_env, lhs_tokens[0].value.(string), false)
+        Active_State.global_env.values[binding_index] = Value(cast(^Object)def)
+        Active_State.global_env.flags[binding_index] += {.INITIALIZED}
+        return
+    }
+
+    if !is_mutable && lhs_count == 1 {
+        def, is_alias := try_consume_struct_def_alias_rhs(proto_state)
+        if Parser.failed { return }
+        if is_alias {
+            // Aliases are binding-time names for existing struct definitions.
+            // Runtime global value declarations still fall through normally.
+            if !top_level {
+                compile_error(lhs_tokens[0], "global struct aliases are only valid at top level")
+                return
+            }
+
+            binding_index := binding_env_append(&Active_State.global_env, lhs_tokens[0].value.(string), false)
+            Active_State.global_env.values[binding_index] = Value(cast(^Object)def)
+            Active_State.global_env.flags[binding_index] += {.INITIALIZED}
+            return
+        }
+    }
+
     for target_index := 0; target_index < lhs_count; target_index += 1 {
         binding_indexes[target_index] = binding_env_append(&Active_State.global_env, lhs_tokens[target_index].value.(string), is_mutable)
     }
@@ -3033,7 +3964,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
             src_slot := expr_read_slot(proto_state, last_expr)
             if Parser.failed { return }
 
-            emit_set_global_bind(proto_state, src_slot, binding_indexes[0])
+            emit_decl_global_bind(proto_state, src_slot, binding_indexes[0])
             return
         }
     }
@@ -3042,7 +3973,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
     if Parser.failed { return }
 
     for target_index := 0; target_index < lhs_count; target_index += 1 {
-        emit_set_global_bind(proto_state, rhs_base + target_index, binding_indexes[target_index])
+        emit_decl_global_bind(proto_state, rhs_base + target_index, binding_indexes[target_index])
     }
 }
 
@@ -3157,7 +4088,23 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             }
         }
 
-        finish_decl_stmt(proto_state, lhs_tokens[:lhs_count], true)
+        advance_token(proto_state)
+        if Parser.failed { return }
+
+        if Parser.current_token.kind == .STRUCT {
+            if lhs_count != 1 {
+                compile_error(lhs_tokens[0], "inline struct construction expects one binding")
+                return
+            }
+
+            def := parse_struct_def_object(proto_state, lhs_tokens[0].value.(string))
+            if Parser.failed { return }
+
+            finish_inline_struct_instance_decl(proto_state, lhs_tokens[0], def, true)
+            return
+        }
+
+        finish_decl_stmt_after_operator(proto_state, lhs_tokens[:lhs_count], true)
         return
     }
 
@@ -3171,7 +4118,38 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             }
         }
 
-        finish_decl_stmt(proto_state, lhs_tokens[:lhs_count], false)
+        advance_token(proto_state)
+        if Parser.failed { return }
+
+        if Parser.current_token.kind == .STRUCT {
+            if lhs_count != 1 {
+                compile_error(lhs_tokens[0], "struct declaration expects one binding")
+                return
+            }
+
+            def := parse_struct_def_object(proto_state, lhs_tokens[0].value.(string))
+            if Parser.failed { return }
+
+            if Parser.current_token.kind == .LEFT_BRACE {
+                finish_inline_struct_instance_decl(proto_state, lhs_tokens[0], def, false)
+                return
+            }
+
+            bind_file_struct_def(proto_state, lhs_tokens[0], def)
+            return
+        }
+
+        top_level := !proto_state.is_function && len(proto_state.scope_local_marks) == 0
+        if top_level && lhs_count == 1 {
+            def, is_alias := try_consume_struct_def_alias_rhs(proto_state)
+            if Parser.failed { return }
+            if is_alias {
+                bind_file_struct_def(proto_state, lhs_tokens[0], def)
+                return
+            }
+        }
+
+        finish_decl_stmt_after_operator(proto_state, lhs_tokens[:lhs_count], false)
         return
     }
 
@@ -3206,6 +4184,8 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             compile_error(lhs_tokens[0], fmt.tprintf("bare expression `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
         case ExprIndex, ExprArrayIndexConst, ExprMapIndexConst:
             compile_error(lhs_tokens[0], fmt.tprintf("indexed expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)))
+        case ExprStructFieldConst:
+            compile_error(lhs_tokens[0], fmt.tprintf("field expression `%s` is not a statement; expected assignment", lhs_tokens[0].value.(string)))
         case:
             compile_error(lhs_tokens[0], fmt.tprintf("expression starting with `%s` is not a statement; expected declaration, assignment, or call", lhs_tokens[0].value.(string)))
         }
@@ -3267,7 +4247,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .EXPORT {
-        compile_error(Parser.current_token, "export is only valid as final top-level module statement")
+        compile_error(Parser.current_token, "export must be final top-level statement")
         return
     }
 
@@ -3282,7 +4262,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
 
 // sourceFile = {importStmt} fileBody [exportStmt].
 // Top-level statement temps die at statement end.
-parse_top_level_statements :: proc(proto_state: ^ProtoState, allow_export: bool) {
+parse_top_level_statements :: proc(proto_state: ^ProtoState) {
     for !Parser.failed && Parser.current_token.kind == .IMPORT {
         parse_import_stmt(proto_state)
         if Parser.failed { return }
@@ -3290,7 +4270,7 @@ parse_top_level_statements :: proc(proto_state: ^ProtoState, allow_export: bool)
 
     for !Parser.failed && Parser.current_token.kind != .EOF {
         if Parser.current_token.kind == .EXPORT {
-            parse_export_stmt(proto_state, allow_export)
+            parse_export_stmt(proto_state)
             if Parser.failed { return }
 
             if Parser.current_token.kind != .EOF {
@@ -3332,7 +4312,7 @@ compile_source :: proc(source, source_name: string) -> string {
         return Active_State.error_string
     }
 
-    parse_top_level_statements(&entry_proto_state, false)
+    parse_top_level_statements(&entry_proto_state)
     if Parser.failed {
         delete_proto_state(&entry_proto_state)
         return Active_State.error_string
@@ -3368,7 +4348,7 @@ compile_imported_source :: proc(source, source_name: string, env_index: int) -> 
         return nil, Active_State.error_string
     }
 
-    parse_top_level_statements(&module_proto_state, true)
+    parse_top_level_statements(&module_proto_state)
     if Parser.failed {
         delete_proto_state(&module_proto_state)
         return nil, Active_State.error_string

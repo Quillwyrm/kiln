@@ -1,4 +1,4 @@
-import "array"
+import "arrays"
 
 run :: function() {
     n := 50000
@@ -12,7 +12,7 @@ run :: function() {
         i := 0
 
         for i < n {
-            array.push(arr, i % 1000)
+            arrays.push(arr, i % 1000)
             i += 1
         }
 

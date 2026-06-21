@@ -25,6 +25,10 @@ value_type_to_string :: proc(value: Value) -> string {
             return "array"
         case .MAP:
             return "map"
+        case .STRUCT:
+            return "struct"
+        case .STRUCT_DEF:
+            panic("struct definitions are not runtime values")
         case .PROTO_FUNCTION, .NATIVE_FUNCTION:
             return "function"
         }
@@ -45,8 +49,8 @@ value_to_string :: proc(value: Value) -> string {
     return result
 }
 
-// parents tracks array/map objects currently being formatted above this value.
-// Seeing one again means a cycle, so print [...] or {...}.
+// parents tracks array/map/struct objects currently being formatted above this value.
+// Seeing one again means a cycle, so print a finite placeholder.
 append_value_string :: proc(parts: ^[dynamic]string, value: Value, parents: ^[dynamic]^Object) {
     if value == nil {
         append(parts, "nil")
@@ -158,9 +162,49 @@ append_value_string :: proc(parts: ^[dynamic]string, value: Value, parents: ^[dy
             pop(parents)
             return
 
+        case .STRUCT:
+            struct_object := cast(^StructObject)v
+
+            for i := 0; i < len(parents); i += 1 {
+                if parents[i] == v {
+                    append(parts, struct_object.def.name)
+                    append(parts, " {...}")
+                    return
+                }
+            }
+            append(parents, v)
+
+            append(parts, struct_object.def.name)
+            append(parts, " {")
+            for field_index := 0; field_index < len(struct_object.fields); field_index += 1 {
+                if field_index > 0 {
+                    append(parts, ", ")
+                }
+
+                append(parts, struct_object.def.fields[field_index].name)
+                append(parts, ": ")
+
+                field_value := struct_object.fields[field_index]
+                field_object, field_is_object := field_value.(^Object)
+                if field_is_object && field_object.kind == .STRING {
+                    string_object := cast(^StringObject)field_object
+                    append(parts, "\"")
+                    append(parts, string_object.data)
+                    append(parts, "\"")
+                } else {
+                    append_value_string(parts, field_value, parents)
+                }
+            }
+            append(parts, "}")
+
+            pop(parents)
+            return
+
         case .PROTO_FUNCTION, .NATIVE_FUNCTION:
             append(parts, "function()")
             return
+        case .STRUCT_DEF:
+            panic("struct definitions are not runtime values")
         }
     }
 
@@ -170,13 +214,13 @@ append_value_string :: proc(parts: ^[dynamic]string, value: Value, parents: ^[dy
 
 // Native builtin implementations =================================================================
 
-native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+native_print :: proc(vm_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     for arg_index := 0; arg_index < arg_count; arg_index += 1 {
         if arg_index > 0 {
             fmt.print(" ")
         }
 
-        fmt.print(value_to_string(kiln_state.slots[args_base + arg_index]))
+        fmt.print(value_to_string(vm_state.slots[args_base + arg_index]))
     }
 
     fmt.println()
@@ -184,7 +228,7 @@ native_print :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_
 }
 
 
-native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+native_type :: proc(vm_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `type()`: expected 1, got %d", arg_count))
         return 0
@@ -192,15 +236,15 @@ native_type :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_s
 
     value := Value{}
     if arg_count >= 1 {
-        value = kiln_state.slots[args_base]
+        value = vm_state.slots[args_base]
     }
 
-    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(value_type_to_string(value)))
+    vm_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(value_type_to_string(value)))
     return 1
 }
 
 
-native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+native_length :: proc(vm_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `length()`: expected 1, got %d", arg_count))
         return 0
@@ -208,7 +252,7 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 
     value := Value{}
     if arg_count >= 1 {
-        value = kiln_state.slots[args_base]
+        value = vm_state.slots[args_base]
     }
 
     object_header, is_object := value.(^Object)
@@ -216,17 +260,20 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
         switch object_header.kind {
         case .ARRAY:
             array_object := cast(^ArrayObject)object_header
-            kiln_state.slots[return_slot_base] = Value(i64(len(array_object.data)))
+            vm_state.slots[return_slot_base] = Value(i64(len(array_object.data)))
             return 1
         case .MAP:
             map_object := cast(^MapObject)object_header
-            kiln_state.slots[return_slot_base] = Value(i64(map_object.count))
+            vm_state.slots[return_slot_base] = Value(i64(map_object.count))
             return 1
         case .STRING:
             string_object := cast(^StringObject)object_header
-            kiln_state.slots[return_slot_base] = Value(i64(len(string_object.data)))
+            vm_state.slots[return_slot_base] = Value(i64(len(string_object.data)))
             return 1
-        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
+        case .STRUCT_DEF:
+            panic("struct definitions are not runtime values")
+
+        case .STRUCT, .PROTO_FUNCTION, .NATIVE_FUNCTION:
         }
     }
 
@@ -236,7 +283,7 @@ native_length :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 }
 
 
-native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+native_assert :: proc(vm_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 2 {
         runtime_error(fmt.tprintf("too many arguments for `assert()`: expected 2, got %d", arg_count))
         return 0
@@ -244,12 +291,12 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
 
     condition := Value{}
     if arg_count >= 1 {
-        condition = kiln_state.slots[args_base]
+        condition = vm_state.slots[args_base]
     }
 
     if value_is_falsey(condition) {
         if arg_count >= 2 {
-            message_value := kiln_state.slots[args_base + 1]
+            message_value := vm_state.slots[args_base + 1]
             message_object, is_object := message_value.(^Object)
             if is_object && message_object.kind == .STRING {
                 string_object := cast(^StringObject)message_object
@@ -265,12 +312,12 @@ native_assert :: proc(kiln_state: ^State, args_base: int, arg_count: int, return
         return 0
     }
 
-    kiln_state.slots[return_slot_base] = condition
+    vm_state.slots[return_slot_base] = condition
     return 1
 }
 
 
-native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+native_to_string :: proc(vm_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `to_string()`: expected 1, got %d", arg_count))
         return 0
@@ -278,22 +325,22 @@ native_to_string :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 
     value := Value{}
     if arg_count >= 1 {
-        value = kiln_state.slots[args_base]
+        value = vm_state.slots[args_base]
     }
 
     object, is_object := value.(^Object)
     if is_object && object.kind == .STRING {
-        kiln_state.slots[return_slot_base] = value
+        vm_state.slots[return_slot_base] = value
         return 1
     }
 
-    kiln_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(value_to_string(value)))
+    vm_state.slots[return_slot_base] = Value(cast(^Object)new_string_object(value_to_string(value)))
     return 1
 }
 
 
 // Returns nil on failure instead of erroring.
-native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
+native_to_number :: proc(vm_state: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int {
     if arg_count > 1 {
         runtime_error(fmt.tprintf("too many arguments for `to_number()`: expected 1, got %d", arg_count))
         return 0
@@ -301,24 +348,24 @@ native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 
     value := Value{}
     if arg_count >= 1 {
-        value = kiln_state.slots[args_base]
+        value = vm_state.slots[args_base]
     }
 
     int_value, is_int := value.(i64)
     if is_int {
-        kiln_state.slots[return_slot_base] = Value(int_value)
+        vm_state.slots[return_slot_base] = Value(int_value)
         return 1
     }
 
     float_value, is_float := value.(f64)
     if is_float {
-        kiln_state.slots[return_slot_base] = Value(float_value)
+        vm_state.slots[return_slot_base] = Value(float_value)
         return 1
     }
 
     object_header, is_object := value.(^Object)
     if !is_object || object_header.kind != .STRING {
-        kiln_state.slots[return_slot_base] = Value{}
+        vm_state.slots[return_slot_base] = Value{}
         return 1
     }
 
@@ -326,16 +373,16 @@ native_to_number :: proc(kiln_state: ^State, args_base: int, arg_count: int, ret
 
     parsed_int, is_int_text := strconv.parse_i64(string_object.data)
     if is_int_text {
-        kiln_state.slots[return_slot_base] = Value(parsed_int)
+        vm_state.slots[return_slot_base] = Value(parsed_int)
         return 1
     }
 
     parsed_float, is_float_text := strconv.parse_f64(string_object.data)
     if is_float_text {
-        kiln_state.slots[return_slot_base] = Value(parsed_float)
+        vm_state.slots[return_slot_base] = Value(parsed_float)
         return 1
     }
 
-    kiln_state.slots[return_slot_base] = Value{}
+    vm_state.slots[return_slot_base] = Value{}
     return 1
 }

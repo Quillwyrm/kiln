@@ -12,6 +12,11 @@ disasm_value_text :: proc(value: Value) -> string {
         return fmt.tprintf("\"%s\"", string_object.data)
     }
 
+    if is_object && object.kind == .STRUCT_DEF {
+        struct_def := cast(^StructDefObject)object
+        return fmt.tprintf("struct %s", struct_def.name)
+    }
+
     return value_to_string(value)
 }
 
@@ -84,7 +89,7 @@ disasm_append_proto_sections :: proc(parts: ^[dynamic]string, state: ^State, pro
             file_refs[binding_index] = true
             has_bindings = true
 
-        case .GET_GLOBAL_BIND, .SET_GLOBAL_BIND:
+        case .GET_GLOBAL_BIND, .DECL_GLOBAL_BIND, .SET_GLOBAL_BIND:
             inst := InstABx(word)
             binding_index := int(inst.b)
 
@@ -239,6 +244,12 @@ disasm_append_code :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto
             operands := fmt.tprintf("R%d, %d", inst.a, inst.b)
             disasm_append_inst(parts, ip, "NEW_MAP", operands, "")
 
+        case .NEW_STRUCT:
+            inst := InstABx(word)
+            operands := fmt.tprintf("R%d, C%d", inst.a, inst.b)
+            comment := disasm_value_text(proto.const_pool[int(inst.b)])
+            disasm_append_inst(parts, ip, "NEW_STRUCT", operands, comment)
+
         case .INDEX_GET:
             inst := InstABC(word)
             operands := fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c)
@@ -272,6 +283,18 @@ disasm_append_code :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto
             operands := fmt.tprintf("R%d, C%d, R%d", inst.a, inst.b, inst.c)
             comment := disasm_value_text(proto.const_pool[int(inst.b)])
             disasm_append_inst(parts, ip, "MAP_SET_CONST", operands, comment)
+
+        case .STRUCT_GET_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.c)])
+            disasm_append_inst(parts, ip, "STRUCT_GET_CONST", operands, comment)
+
+        case .STRUCT_SET_CONST:
+            inst := InstABC(word)
+            operands := fmt.tprintf("R%d, C%d, R%d", inst.a, inst.b, inst.c)
+            comment := disasm_value_text(proto.const_pool[int(inst.b)])
+            disasm_append_inst(parts, ip, "STRUCT_SET_CONST", operands, comment)
 
         case .ADD:
             inst := InstABC(word)
@@ -419,6 +442,12 @@ disasm_append_code :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto
             operands := fmt.tprintf("R%d, G%d", inst.a, inst.b)
             comment := state.global_env.names[int(inst.b)]
             disasm_append_inst(parts, ip, "GET_GLOBAL_BIND", operands, comment)
+
+        case .DECL_GLOBAL_BIND:
+            inst := InstABx(word)
+            operands := fmt.tprintf("R%d, G%d", inst.a, inst.b)
+            comment := state.global_env.names[int(inst.b)]
+            disasm_append_inst(parts, ip, "DECL_GLOBAL_BIND", operands, comment)
 
         case .SET_GLOBAL_BIND:
             inst := InstABx(word)

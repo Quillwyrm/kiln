@@ -1,14 +1,14 @@
-import "array"
-import "string"
+import "arrays"
+import "strings"
 
 n := 25000
 parts := []
 i := 0
 
 for i < n {
-    array.push(parts, to_string(i))
+    arrays.push(parts, to_string(i))
     i += 1
 }
 
-s := string.join(parts, "")
+s := strings.join(parts, "")
 print(length(s))
