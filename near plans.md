@@ -1,4 +1,4 @@
-Yeah, your ordering is mostly right. I’d make the next thing **three-part `for` clauses**.
+Yeah, your ordering is mostly right. I???d make the next thing **three-part `for` clauses**.
 
 My suggested order:
 
@@ -12,7 +12,7 @@ My suggested order:
 7. GC
 ```
 
-I’d maybe swap **module bundles** earlier if you want a non-VM task between heavier runtime features, but conceptually it is least connected to GC/object semantics, so I would not let it block the core language surface.
+I???d maybe swap **module bundles** earlier if you want a non-VM task between heavier runtime features, but conceptually it is least connected to GC/object semantics, so I would not let it block the core language surface.
 
 ## 1. Three-part `for` clauses next
 
@@ -59,12 +59,12 @@ This is a nice contained win.
 
 ## 2. Varargs after that
 
-Varargs are also a good next target, but they touch function call setup more than `for` does.
+Varargs are also a good next target, but they touch proc call setup more than `for` does.
 
 Spec shape:
 
 ```kiln
-log := function(prefix, ...values) {
+log := proc(prefix, ...values) {
     print(values[0])
 }
 ```
@@ -82,7 +82,7 @@ Implementation pressure points:
 
 ```txt
 parser: parameter list recognizes ...name only at end
-proto/function metadata: has_vararg + vararg local slot
+proto/proc metadata: has_vararg + vararg local slot
 call setup: create array from extra args
 arity check: fixed-only errors on extra args, vararg accepts them
 ```

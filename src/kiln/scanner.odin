@@ -34,7 +34,7 @@ TokenKind :: enum {
     ELSE,
     FOR,
     BREAK,
-    FUNCTION,
+    PROC,
     RETURN,
     SWITCH,
     CASE,
@@ -209,8 +209,8 @@ ident_token_kind :: proc(text: string) -> TokenKind {
         return .FOR
     case "break":
         return .BREAK
-    case "function":
-        return .FUNCTION
+    case "proc":
+        return .PROC
     case "return":
         return .RETURN
     case "switch":

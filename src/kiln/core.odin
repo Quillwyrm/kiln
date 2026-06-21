@@ -20,33 +20,33 @@ native_arg_value :: proc(vm_state: ^State, args_base, arg_count, arg_index: int)
     return vm_state.slots[args_base + arg_index]
 }
 
-native_arg_array :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, fn_name, arg_name: string) -> (^ArrayObject, bool) {
+native_arg_array :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, proc_name, arg_name: string) -> (^ArrayObject, bool) {
     value := native_arg_value(vm_state, args_base, arg_count, arg_index)
     header, is_object := value.(^Object)
     if !is_object || header.kind != .ARRAY {
-        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `array`, got `%s`", fn_name, arg_name, value_type_to_string(value)))
+        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `array`, got `%s`", proc_name, arg_name, value_type_to_string(value)))
         return nil, false
     }
 
     return cast(^ArrayObject)header, true
 }
 
-native_arg_map :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, fn_name, arg_name: string) -> (^MapObject, bool) {
+native_arg_map :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, proc_name, arg_name: string) -> (^MapObject, bool) {
     value := native_arg_value(vm_state, args_base, arg_count, arg_index)
     header, is_object := value.(^Object)
     if !is_object || header.kind != .MAP {
-        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `map`, got `%s`", fn_name, arg_name, value_type_to_string(value)))
+        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `map`, got `%s`", proc_name, arg_name, value_type_to_string(value)))
         return nil, false
     }
 
     return cast(^MapObject)header, true
 }
 
-native_arg_string :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, fn_name, arg_name: string) -> (string, bool) {
+native_arg_string :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, proc_name, arg_name: string) -> (string, bool) {
     value := native_arg_value(vm_state, args_base, arg_count, arg_index)
     header, is_object := value.(^Object)
     if !is_object || header.kind != .STRING {
-        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `string`, got `%s`", fn_name, arg_name, value_type_to_string(value)))
+        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `string`, got `%s`", proc_name, arg_name, value_type_to_string(value)))
         return "", false
     }
 
@@ -54,11 +54,11 @@ native_arg_string :: proc(vm_state: ^State, args_base, arg_count, arg_index: int
     return string_object.data, true
 }
 
-native_arg_int :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, fn_name, arg_name: string) -> (i64, bool) {
+native_arg_int :: proc(vm_state: ^State, args_base, arg_count, arg_index: int, proc_name, arg_name: string) -> (i64, bool) {
     value := native_arg_value(vm_state, args_base, arg_count, arg_index)
     int_value, is_int := value.(i64)
     if !is_int {
-        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `int`, got `%s`", fn_name, arg_name, value_type_to_string(value)))
+        runtime_error(fmt.tprintf("`%s()` called with invalid %s argument; expected `int`, got `%s`", proc_name, arg_name, value_type_to_string(value)))
         return 0, false
     }
 
@@ -339,7 +339,7 @@ native_fs_make_dir :: proc(vm_state: ^State, args_base: int, arg_count: int, ret
 
 
 // Path module ====================================================================================
-// Path functions are pure path-string transforms. They do not touch the filesystem.
+// Path procs are pure path-string transforms. They do not touch the filesystem.
 // Caller contract errors are runtime errors. Allocation failure is a runtime error.
 
 // join(parts...) -> string
@@ -461,7 +461,7 @@ native_path_normalize :: proc(vm_state: ^State, args_base: int, arg_count: int, 
 
 
 // IO module ======================================================================================
-// IO functions talk to host standard streams. Caller contract errors are runtime errors.
+// IO procs talk to host standard streams. Caller contract errors are runtime errors.
 // Recoverable stream failures return error strings.
 
 // read_all() -> string | nil, err
@@ -1220,66 +1220,66 @@ bind_core_modules :: proc(state: ^State) {
     Active_State = state
 
     debug_env := bind_env("debug")
-    bind_env_native_function(debug_env, "echo", native_debug_echo)
+    bind_env_native_proc(debug_env, "echo", native_debug_echo)
 
     os_env := bind_env("os")
-    bind_env_native_function(os_env, "argv", native_os_argv)
-    bind_env_native_function(os_env, "args", native_os_args)
-    bind_env_native_function(os_env, "exit", native_os_exit)
+    bind_env_native_proc(os_env, "argv", native_os_argv)
+    bind_env_native_proc(os_env, "args", native_os_args)
+    bind_env_native_proc(os_env, "exit", native_os_exit)
 
     fs_env := bind_env("fs")
-    bind_env_native_function(fs_env, "read_file", native_fs_read_file)
-    bind_env_native_function(fs_env, "write_file", native_fs_write_file)
-    bind_env_native_function(fs_env, "get_cwd", native_fs_get_cwd)
-    bind_env_native_function(fs_env, "set_cwd", native_fs_set_cwd)
-    bind_env_native_function(fs_env, "exists", native_fs_exists)
-    bind_env_native_function(fs_env, "is_file", native_fs_is_file)
-    bind_env_native_function(fs_env, "is_dir", native_fs_is_dir)
-    bind_env_native_function(fs_env, "list_dir", native_fs_list_dir)
-    bind_env_native_function(fs_env, "make_dir", native_fs_make_dir)
+    bind_env_native_proc(fs_env, "read_file", native_fs_read_file)
+    bind_env_native_proc(fs_env, "write_file", native_fs_write_file)
+    bind_env_native_proc(fs_env, "get_cwd", native_fs_get_cwd)
+    bind_env_native_proc(fs_env, "set_cwd", native_fs_set_cwd)
+    bind_env_native_proc(fs_env, "exists", native_fs_exists)
+    bind_env_native_proc(fs_env, "is_file", native_fs_is_file)
+    bind_env_native_proc(fs_env, "is_dir", native_fs_is_dir)
+    bind_env_native_proc(fs_env, "list_dir", native_fs_list_dir)
+    bind_env_native_proc(fs_env, "make_dir", native_fs_make_dir)
 
     path_env := bind_env("path")
-    bind_env_native_function(path_env, "join", native_path_join)
-    bind_env_native_function(path_env, "base_name", native_path_base_name)
-    bind_env_native_function(path_env, "dir_name", native_path_dir_name)
-    bind_env_native_function(path_env, "extension", native_path_extension)
-    bind_env_native_function(path_env, "stem", native_path_stem)
-    bind_env_native_function(path_env, "normalize", native_path_normalize)
+    bind_env_native_proc(path_env, "join", native_path_join)
+    bind_env_native_proc(path_env, "base_name", native_path_base_name)
+    bind_env_native_proc(path_env, "dir_name", native_path_dir_name)
+    bind_env_native_proc(path_env, "extension", native_path_extension)
+    bind_env_native_proc(path_env, "stem", native_path_stem)
+    bind_env_native_proc(path_env, "normalize", native_path_normalize)
 
     io_env := bind_env("io")
-    bind_env_native_function(io_env, "read_all", native_io_read_all)
-    bind_env_native_function(io_env, "read_line", native_io_read_line)
-    bind_env_native_function(io_env, "write", native_io_write)
-    bind_env_native_function(io_env, "print", native_io_print)
-    bind_env_native_function(io_env, "write_error", native_io_write_error)
-    bind_env_native_function(io_env, "print_error", native_io_print_error)
+    bind_env_native_proc(io_env, "read_all", native_io_read_all)
+    bind_env_native_proc(io_env, "read_line", native_io_read_line)
+    bind_env_native_proc(io_env, "write", native_io_write)
+    bind_env_native_proc(io_env, "print", native_io_print)
+    bind_env_native_proc(io_env, "write_error", native_io_write_error)
+    bind_env_native_proc(io_env, "print_error", native_io_print_error)
 
     array_env := bind_env("arrays")
-    bind_env_native_function(array_env, "push", native_array_push)
-    bind_env_native_function(array_env, "pop", native_array_pop)
-    bind_env_native_function(array_env, "clear", native_array_clear)
-    bind_env_native_function(array_env, "copy", native_array_copy)
-    bind_env_native_function(array_env, "slice", native_array_slice)
-    bind_env_native_function(array_env, "insert", native_array_insert)
-    bind_env_native_function(array_env, "remove", native_array_remove)
+    bind_env_native_proc(array_env, "push", native_array_push)
+    bind_env_native_proc(array_env, "pop", native_array_pop)
+    bind_env_native_proc(array_env, "clear", native_array_clear)
+    bind_env_native_proc(array_env, "copy", native_array_copy)
+    bind_env_native_proc(array_env, "slice", native_array_slice)
+    bind_env_native_proc(array_env, "insert", native_array_insert)
+    bind_env_native_proc(array_env, "remove", native_array_remove)
 
     map_env := bind_env("maps")
-    bind_env_native_function(map_env, "clear", native_map_clear)
-    bind_env_native_function(map_env, "copy", native_map_copy)
-    bind_env_native_function(map_env, "get_keys", native_map_get_keys)
-    bind_env_native_function(map_env, "get_values", native_map_get_values)
+    bind_env_native_proc(map_env, "clear", native_map_clear)
+    bind_env_native_proc(map_env, "copy", native_map_copy)
+    bind_env_native_proc(map_env, "get_keys", native_map_get_keys)
+    bind_env_native_proc(map_env, "get_values", native_map_get_values)
 
     string_env := bind_env("strings")
-    bind_env_native_function(string_env, "contains", native_string_contains)
-    bind_env_native_function(string_env, "has_prefix", native_string_has_prefix)
-    bind_env_native_function(string_env, "has_suffix", native_string_has_suffix)
-    bind_env_native_function(string_env, "split", native_string_split)
-    bind_env_native_function(string_env, "slice", native_string_slice)
-    bind_env_native_function(string_env, "replace", native_string_replace)
-    bind_env_native_function(string_env, "trim", native_string_trim)
-    bind_env_native_function(string_env, "to_lower", native_string_to_lower)
-    bind_env_native_function(string_env, "to_upper", native_string_to_upper)
-    bind_env_native_function(string_env, "get_byte", native_string_get_byte)
-    bind_env_native_function(string_env, "to_bytes", native_string_to_bytes)
-    bind_env_native_function(string_env, "join", native_string_join)
+    bind_env_native_proc(string_env, "contains", native_string_contains)
+    bind_env_native_proc(string_env, "has_prefix", native_string_has_prefix)
+    bind_env_native_proc(string_env, "has_suffix", native_string_has_suffix)
+    bind_env_native_proc(string_env, "split", native_string_split)
+    bind_env_native_proc(string_env, "slice", native_string_slice)
+    bind_env_native_proc(string_env, "replace", native_string_replace)
+    bind_env_native_proc(string_env, "trim", native_string_trim)
+    bind_env_native_proc(string_env, "to_lower", native_string_to_lower)
+    bind_env_native_proc(string_env, "to_upper", native_string_to_upper)
+    bind_env_native_proc(string_env, "get_byte", native_string_get_byte)
+    bind_env_native_proc(string_env, "to_bytes", native_string_to_bytes)
+    bind_env_native_proc(string_env, "join", native_string_join)
 }

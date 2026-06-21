@@ -29,8 +29,8 @@ value_type_to_string :: proc(value: Value) -> string {
             return "struct"
         case .STRUCT_DEF:
             panic("struct definitions are not runtime values")
-        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-            return "function"
+        case .PROC, .NATIVE_PROC:
+            return "proc"
         }
     }
 
@@ -200,8 +200,8 @@ append_value_string :: proc(parts: ^[dynamic]string, value: Value, parents: ^[dy
             pop(parents)
             return
 
-        case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-            append(parts, "function()")
+        case .PROC, .NATIVE_PROC:
+            append(parts, "proc()")
             return
         case .STRUCT_DEF:
             panic("struct definitions are not runtime values")
@@ -273,7 +273,7 @@ native_length :: proc(vm_state: ^State, args_base: int, arg_count: int, return_s
         case .STRUCT_DEF:
             panic("struct definitions are not runtime values")
 
-        case .STRUCT, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+        case .STRUCT, .PROC, .NATIVE_PROC:
         }
     }
 

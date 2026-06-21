@@ -23,7 +23,7 @@ ProtoState :: struct {
     proto_label:  string,
     param_count:  int,
     has_vararg:   bool,
-    is_function:  bool,
+    is_proc:  bool,
     env_index:    int,
 
     // Unfinished compiled output copied into Proto by end_proto.
@@ -90,7 +90,7 @@ begin_entry_proto :: proc() -> ProtoState {
         proto_label             = strings.clone("entry"),
         param_count             = 0,
         has_vararg              = false,
-        is_function             = false,
+        is_proc             = false,
         env_index               = 0,
         frame_slot_count        = 0,
         bytecode                = make([dynamic]u32),
@@ -113,7 +113,7 @@ begin_module_proto :: proc(env_index: int) -> ProtoState {
         proto_label             = strings.clone(proto_label),
         param_count             = 0,
         has_vararg              = false,
-        is_function             = false,
+        is_proc             = false,
         env_index               = env_index,
         frame_slot_count        = 0,
         bytecode                = make([dynamic]u32),
@@ -127,14 +127,14 @@ begin_module_proto :: proc(env_index: int) -> ProtoState {
     }
 }
 
-begin_function_proto :: proc(parent_proto_state: ^ProtoState, proto_label: string, source_line, param_count: int, has_vararg: bool) -> ProtoState {
+begin_proc_proto :: proc(parent_proto_state: ^ProtoState, proto_label: string, source_line, param_count: int, has_vararg: bool) -> ProtoState {
     child_proto_state := ProtoState{
         source_name             = strings.clone(parent_proto_state.source_name),
         source_line             = source_line,
         proto_label             = strings.clone(proto_label),
         param_count             = param_count,
         has_vararg              = has_vararg,
-        is_function             = true,
+        is_proc             = true,
         env_index               = parent_proto_state.env_index,
         frame_slot_count        = param_count,
         bytecode                = make([dynamic]u32),
@@ -186,7 +186,7 @@ end_proto :: proc(proto_state: ^ProtoState) -> ^Proto {
         source_name      = proto_state.source_name,
         source_line      = proto_state.source_line,
         proto_label      = proto_state.proto_label,
-        is_function      = proto_state.is_function,
+        is_proc      = proto_state.is_proc,
         bytecode         = bytecode,
         inst_lines       = inst_lines,
         const_pool       = const_pool,
@@ -223,7 +223,7 @@ const_int :: proc(proto_state: ^ProtoState, value: i64) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in proc", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -243,7 +243,7 @@ const_float :: proc(proto_state: ^ProtoState, value: f64) -> int {
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in proc", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -268,7 +268,7 @@ const_string_object :: proc(proto_state: ^ProtoState, string_object: ^StringObje
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in proc", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -293,7 +293,7 @@ const_struct_def :: proc(proto_state: ^ProtoState, def: ^StructDefObject) -> int
     }
 
     if len(proto_state.const_pool) >= MAX_CONST_POOL_ENTRIES {
-        set_error(fmt.tprintf("%s[%d] Error: too many constants in function", error_source_name(proto_state.source_name), proto_state.source_line))
+        set_error(fmt.tprintf("%s[%d] Error: too many constants in proc", error_source_name(proto_state.source_name), proto_state.source_line))
         Parser.failed = true
         return 0
     }
@@ -337,10 +337,10 @@ emit_load_const :: proc(proto_state: ^ProtoState, dst, const_index: int) {
     emit_inst(proto_state, inst)
 }
 
-emit_load_func :: proc(proto_state: ^ProtoState, dst, child_proto_index: int) {
+emit_load_proc :: proc(proto_state: ^ProtoState, dst, child_proto_index: int) {
     record_slots(proto_state, dst)
 
-    inst := u32(InstABx{ op= .LOAD_FUNC, a= u8(dst), b= u16(child_proto_index) })
+    inst := u32(InstABx{ op= .LOAD_PROC, a= u8(dst), b= u16(child_proto_index) })
     emit_inst(proto_state, inst)
 }
 
@@ -792,7 +792,7 @@ retarget_last_result :: proc(proto_state: ^ProtoState, old_dst, new_dst: int) ->
         record_slots(proto_state, new_dst)
         return true
 
-    case .LOAD_CONST, .LOAD_FUNC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEW_STRUCT, .NEG, .NOT, .GET_FILE_BIND, .GET_GLOBAL_BIND:
+    case .LOAD_CONST, .LOAD_PROC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEW_STRUCT, .NEG, .NOT, .GET_FILE_BIND, .GET_GLOBAL_BIND:
         inst := InstABx(word)
         if int(inst.a) != old_dst {
             return false

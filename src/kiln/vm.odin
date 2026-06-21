@@ -10,12 +10,12 @@ import "core:strings"
 // Instruction layout and operand meaning is documented inline on each opcode name.
 
 Opcode :: enum u8 {
-    // Immediate, Constant, and Function Loads
+    // Immediate, Constant, and Proc Loads
     LOAD_NIL,      // Ax: A=dst
     LOAD_TRUE,     // Ax: A=dst
     LOAD_FALSE,    // Ax: A=dst
     LOAD_CONST,    // ABx: A=dst, B=const
-    LOAD_FUNC,     // ABx: A=dst, B=child_proto
+    LOAD_PROC,     // ABx: A=dst, B=child_proto
     MOVE,          // ABx: A=dst, B=src
 
     // Array Operations
@@ -92,7 +92,7 @@ Opcode :: enum u8 {
 MAX_FRAME_SLOTS :: 256       // u8 slot operands
 MAX_CALL_ARGS :: 255         // u8 CALL argument count
 MAX_CONST_POOL_ENTRIES :: 65536 // u16 LOAD_CONST index
-MAX_CHILD_PROTOS :: 65536       // u16 LOAD_FUNC index
+MAX_CHILD_PROTOS :: 65536       // u16 LOAD_PROC index
 
 MIN_COND_JUMP_OFFSET :: -32768 // i16 conditional jump offset
 MAX_COND_JUMP_OFFSET :: 32767
@@ -149,8 +149,8 @@ decode_op :: #force_inline proc(word: u32) -> Opcode {
 // ObjectKind tags the concrete struct behind a heap-backed Value.
 ObjectKind :: enum u8 {
     STRING,
-    PROTO_FUNCTION,
-    NATIVE_FUNCTION,
+    PROC,
+    NATIVE_PROC,
     ARRAY,
     MAP,
     STRUCT_DEF,
@@ -214,14 +214,14 @@ StructObject :: struct {
 }
 
 
-// Proto is one finished compiled file or function body executed by the VM.
+// Proto is one finished compiled file or proc body executed by the VM.
 // Bytecode operands address frame-relative runtime slots and index this proto's
 // const-pool and child-proto tables.
 Proto :: struct {
     source_name: string,
     source_line: int,
     proto_label: string,
-    is_function: bool,
+    is_proc: bool,
 
     // Execution shape.
     frame_slot_count: int,
@@ -236,21 +236,21 @@ Proto :: struct {
     child_protos: []^Proto,
 }
 
-// NativeFunction reads arg_count values starting at args_base, writes produced values
+// NativeProc reads arg_count values starting at args_base, writes produced values
 // starting at return_slot_base, and returns its produced result count.
 // CALL then shapes those results to its requested count.
-NativeFunction :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int
+NativeProc :: proc(vm: ^State, args_base: int, arg_count: int, return_slot_base: int) -> int
 
 // Runtime callable backed by one compiled Proto.
-ProtoFunctionObject :: struct {
+ProcObject :: struct {
     header: Object,
     impl:   ^Proto,
 }
 
 // Runtime callable backed by an Odin procedure.
-NativeFunctionObject :: struct {
+NativeProcObject :: struct {
     header: Object,
-    impl:   NativeFunction,
+    impl:   NativeProc,
 }
 
 MAX_BINDINGS :: 256 // binding operands use u8 binding indexes
@@ -589,7 +589,7 @@ copy_struct_default :: proc(value: Value) -> Value {
 
         return Value(cast(^Object)struct_copy)
 
-    case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION:
+    case .STRING, .PROC, .NATIVE_PROC:
         return value
     case .STRUCT_DEF:
         panic("struct definitions are not struct field defaults")
@@ -649,7 +649,7 @@ binding_env_append :: proc(env: ^BindingEnv, name: string, is_mutable: bool) -> 
     return binding_index
 }
 
-bind_native_global :: proc(name: string, native_proc: NativeFunction) {
+bind_native_global :: proc(name: string, native_proc: NativeProc) {
     binding_index := binding_env_find(&Active_State.global_env, name)
 
     if binding_index >= 0 {
@@ -663,11 +663,11 @@ bind_native_global :: proc(name: string, native_proc: NativeFunction) {
     }
     Active_State.global_env.flags[binding_index] -= {.MUTABLE}
 
-    native_function := new(NativeFunctionObject)
-    native_function.header.kind = .NATIVE_FUNCTION
-    native_function.impl = native_proc
+    native_proc_object := new(NativeProcObject)
+    native_proc_object.header.kind = .NATIVE_PROC
+    native_proc_object.impl = native_proc
 
-    Active_State.global_env.values[binding_index] = Value(cast(^Object)native_function)
+    Active_State.global_env.values[binding_index] = Value(cast(^Object)native_proc_object)
     Active_State.global_env.flags[binding_index] += {.INITIALIZED}
 }
 
@@ -698,8 +698,8 @@ bind_env :: proc(id: string) -> int {
     return env_index
 }
 
-// Installs one immutable exported native function in an existing module environment.
-bind_env_native_function :: proc(env_index: int, name: string, native_proc: NativeFunction) {
+// Installs one immutable exported native proc in an existing module environment.
+bind_env_native_proc :: proc(env_index: int, name: string, native_proc: NativeProc) {
     env := &Active_State.envs[env_index]
     binding_index := binding_env_find(env, name)
 
@@ -713,11 +713,11 @@ bind_env_native_function :: proc(env_index: int, name: string, native_proc: Nati
     env.flags[binding_index] -= {.MUTABLE}
     env.flags[binding_index] += {.EXPORTED, .INITIALIZED}
 
-    native_function := new(NativeFunctionObject)
-    native_function.header.kind = .NATIVE_FUNCTION
-    native_function.impl = native_proc
+    native_proc_object := new(NativeProcObject)
+    native_proc_object.header.kind = .NATIVE_PROC
+    native_proc_object.impl = native_proc
 
-    env.values[binding_index] = Value(cast(^Object)native_function)
+    env.values[binding_index] = Value(cast(^Object)native_proc_object)
 }
 
 // Value operations ===============================================================================
@@ -1063,7 +1063,7 @@ value_less_or_equal :: #force_inline proc(lhs, rhs: Value) -> bool {
 
 runtime_error :: proc(message: string) -> string {
     frame_context :: proc(proto: ^Proto) -> string {
-        if !proto.is_function {
+        if !proto.is_proc {
             if proto.env_index == 0 {
                 return "entry file"
             }
@@ -1172,17 +1172,17 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             dst := slot_base + int(inst.a)
             state.slots[dst] = const_pool[int(inst.b)]
 
-        case .LOAD_FUNC:
-            // Materializes a ProtoFunctionObject from this proto's child proto table.
+        case .LOAD_PROC:
+            // Materializes a ProcObject from this proto's child proto table.
             inst := InstABx(word)
             dst := slot_base + int(inst.a)
             child_proto := child_protos[int(inst.b)]
 
-            function_object := new(ProtoFunctionObject)
-            function_object.header.kind = .PROTO_FUNCTION
-            function_object.impl = child_proto
+            proc_object := new(ProcObject)
+            proc_object.header.kind = .PROC
+            proc_object.impl = child_proto
 
-            state.slots[dst] = Value(cast(^Object)function_object)
+            state.slots[dst] = Value(cast(^Object)proc_object)
 
         case .MOVE:
             inst := InstABx(word)
@@ -1261,7 +1261,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             case .STRUCT_DEF:
                 panic("struct definitions are not runtime values")
 
-            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION, .STRUCT:
+            case .STRING, .PROC, .NATIVE_PROC, .STRUCT:
                 frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index read; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
@@ -1316,7 +1316,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             case .STRUCT_DEF:
                 panic("struct definitions are not runtime values")
 
-            case .STRING, .PROTO_FUNCTION, .NATIVE_FUNCTION, .STRUCT:
+            case .STRING, .PROC, .NATIVE_PROC, .STRUCT:
                 frame.instruction_index = pc
                 return Value{}, runtime_error(fmt.tprintf("invalid index assignment; expected `array` or `map`, got `%s`", value_type_to_string(state.slots[container_slot])))
             }
@@ -1497,9 +1497,9 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
                     case .MAP:
                         assignment_matches = value_object.kind == .MAP
 
-                    case .PROTO_FUNCTION, .NATIVE_FUNCTION:
-                        assignment_matches = value_object.kind == .PROTO_FUNCTION ||
-                                             value_object.kind == .NATIVE_FUNCTION
+                    case .PROC, .NATIVE_PROC:
+                        assignment_matches = value_object.kind == .PROC ||
+                                             value_object.kind == .NATIVE_PROC
 
                     case .STRUCT:
                         if value_object.kind == .STRUCT {
@@ -2253,17 +2253,17 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
             callee_header, is_object := state.slots[call_base].(^Object)
             if !is_object {
                 frame.instruction_index = pc
-                message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
+                message := fmt.tprintf("invalid proc call; expected `proc`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
             }
 
             switch callee_header.kind {
-            case .NATIVE_FUNCTION:
+            case .NATIVE_PROC:
                 frame.instruction_index = pc
 
                 // Executes immediately in the caller frame. Writes results then shapes to requested.
-                native_function := cast(^NativeFunctionObject)callee_header
-                produced_results := native_function.impl(state, args_base, arg_count, call_base)
+                native_proc := cast(^NativeProcObject)callee_header
+                produced_results := native_proc.impl(state, args_base, arg_count, call_base)
                 if state.error_string != "" {
                     return Value{}, state.error_string
                 }
@@ -2287,12 +2287,12 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
                 }
                 // Extra produced results beyond requested count are ignored by contract.
 
-            case .PROTO_FUNCTION:
+            case .PROC:
                 frame.instruction_index = pc
 
                 // Pushes a new frame and continues the VM loop.
-                proto_function := cast(^ProtoFunctionObject)callee_header
-                callee_proto := proto_function.impl
+                proc_object := cast(^ProcObject)callee_header
+                callee_proto := proc_object.impl
 
                 if state.frame_count >= MAX_CALL_FRAMES {
                     return Value{}, runtime_error("call stack limit exceeded")
@@ -2366,7 +2366,7 @@ run_proto :: proc(state: ^State, proto: ^Proto) -> (result: Value, err: string) 
 
             case .STRING, .ARRAY, .MAP, .STRUCT:
                 frame.instruction_index = pc
-                message := fmt.tprintf("invalid function call; expected `function`, got `%s`", value_type_to_string(state.slots[call_base]))
+                message := fmt.tprintf("invalid proc call; expected `proc`, got `%s`", value_type_to_string(state.slots[call_base]))
                 return Value{}, runtime_error(message)
             }
 

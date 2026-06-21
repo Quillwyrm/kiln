@@ -218,11 +218,11 @@ disasm_append_code :: proc(parts: ^[dynamic]string, state: ^State, proto: ^Proto
             comment := disasm_value_text(proto.const_pool[int(inst.b)])
             disasm_append_inst(parts, ip, "LOAD_CONST", operands, comment)
 
-        case .LOAD_FUNC:
+        case .LOAD_PROC:
             inst := InstABx(word)
             operands := fmt.tprintf("R%d, P%d", inst.a, inst.b)
             comment := proto.child_protos[int(inst.b)].proto_label
-            disasm_append_inst(parts, ip, "LOAD_FUNC", operands, comment)
+            disasm_append_inst(parts, ip, "LOAD_PROC", operands, comment)
 
         case .MOVE:
             inst := InstABx(word)

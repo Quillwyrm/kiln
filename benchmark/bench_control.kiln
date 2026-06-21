@@ -1,4 +1,4 @@
-run :: function() {
+run :: proc() {
     n := 10000000
     half := 5000000
     i := 0

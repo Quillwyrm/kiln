@@ -171,7 +171,7 @@ compile_error_near :: proc(token: Token, message: string) {
 // while frame_slot_count only grows.
 claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
     if proto_state.next_temp_slot >= MAX_FRAME_SLOTS {
-        compile_error(Parser.current_token, "function uses too many values")
+        compile_error(Parser.current_token, "proc uses too many values")
         return 0
     }
 
@@ -184,7 +184,7 @@ claim_temp_slot :: proc(proto_state: ^ProtoState) -> int {
 // preventing temp reuse of slots that hold live expression results.
 reserve_slots_until :: proc(proto_state: ^ProtoState, slot_after_last: int) {
     if slot_after_last > MAX_FRAME_SLOTS {
-        compile_error(Parser.current_token, "function uses too many values")
+        compile_error(Parser.current_token, "proc uses too many values")
         return
     }
 
@@ -385,8 +385,8 @@ lower_expr_desc :: proc(proto_state: ^ProtoState, expr: ExprDesc, dst_slot: int)
 
         global_index := binding_env_find(&Active_State.global_env, ident_name)
         if global_index < 0 {
-            if proto_state.is_function {
-                compile_error(Token(desc), fmt.tprintf("binding `%s` is not declared in this function; Kiln does not support closures or upvalues", ident_name))
+            if proto_state.is_proc {
+                compile_error(Token(desc), fmt.tprintf("binding `%s` is not declared in this proc; Kiln does not support closures or upvalues", ident_name))
             } else {
                 compile_error(Token(desc), fmt.tprintf("binding `%s` is not declared", ident_name))
             }
@@ -1024,7 +1024,7 @@ parse_struct_def_object :: proc(proto_state: ^ProtoState, def_name: string) -> ^
 }
 
 bind_file_struct_def :: proc(proto_state: ^ProtoState, name_token: Token, def: ^StructDefObject) {
-    if proto_state.is_function || len(proto_state.scope_local_marks) != 0 {
+    if proto_state.is_proc || len(proto_state.scope_local_marks) != 0 {
         compile_error(name_token, "struct definitions and aliases are only valid at top level")
         return
     }
@@ -1304,7 +1304,7 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
     case .LEFT_BRACKET:
         return parse_struct_array_spec(proto_state, spec_name)
 
-    case .FUNCTION:
+    case .PROC:
         origin_token := Parser.current_token
         child_proto: ^Proto
 
@@ -1319,20 +1319,20 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
         Scanner.failed = saved_failed
 
         if len(proto_state.child_protos) >= MAX_CHILD_PROTOS {
-            compile_error(origin_token, "too many functions in function")
+            compile_error(origin_token, "too many procs in proc")
             return Value{}
         }
 
         if next_token.kind == .LEFT_PAREN {
-            child_proto = parse_function_proto(proto_state, spec_name, origin_token)
+            child_proto = parse_proc_proto(proto_state, spec_name, origin_token)
             if Parser.failed { return Value{} }
         } else {
-            // `function` as a field spec is equivalent to `function() {}`.
+            // `proc` as a field spec is equivalent to `proc() {}`.
             advance_token(proto_state)
             if Parser.failed { return Value{} }
 
             child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
-            child_proto_state := begin_function_proto(proto_state, spec_name, child_line, 0, false)
+            child_proto_state := begin_proc_proto(proto_state, spec_name, child_line, 0, false)
 
             return_slot := claim_temp_slot(&child_proto_state)
             if Parser.failed {
@@ -1348,10 +1348,10 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
         _ = append_child_proto(proto_state, child_proto, origin_token)
         if Parser.failed { return Value{} }
 
-        function_object := new(ProtoFunctionObject)
-        function_object.header.kind = .PROTO_FUNCTION
-        function_object.impl = child_proto
-        return Value(cast(^Object)function_object)
+        proc_object := new(ProcObject)
+        proc_object.header.kind = .PROC
+        proc_object.impl = child_proto
+        return Value(cast(^Object)proc_object)
 
     case:
         compile_error_near(Parser.current_token, "expected struct field spec")
@@ -1386,17 +1386,17 @@ parse_grouped_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     return expr
 }
 
-// rootExpr = ident | functionLiteral | arrayLiteral | mapLiteral.
+// rootExpr = ident | procLiteral | arrayLiteral | mapLiteral.
 parse_root_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
     if Parser.current_token.kind == .IDENT {
         return ExprUnresolvedBinding(advance_token(proto_state))
     }
 
-    if Parser.current_token.kind == .FUNCTION {
+    if Parser.current_token.kind == .PROC {
         slot := claim_temp_slot(proto_state)
         if Parser.failed { return ExprInvalid{} }
 
-        parse_function_literal(proto_state, slot, "function", Parser.current_token)
+        parse_proc_literal(proto_state, slot, "proc", Parser.current_token)
         if Parser.failed { return ExprInvalid{} }
         return ExprSlot(slot)
     }
@@ -1801,7 +1801,7 @@ parse_primary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
         return ExprNil{}
     case .LEFT_PAREN:
         return parse_grouped_expr(proto_state)
-    case .IDENT, .FUNCTION, .LEFT_BRACKET, .MAP:
+    case .IDENT, .PROC, .LEFT_BRACKET, .MAP:
         return parse_chain_expr(proto_state)
     case:
         token := Parser.current_token
@@ -2291,14 +2291,14 @@ finish_expr_list_to_slots :: proc(proto_state: ^ProtoState, base_slot: int, expr
 }
 
 
-// Function literals ==============================================================================
+// Proc literals ==============================================================================
 
-// functionBody = "{" {stmt} "}".
-// Parameters and body-root locals share the function root scope.
+// procBody = "{" {stmt} "}".
+// Parameters and body-root locals share the proc root scope.
 // Nested blocks still create scopes through normal statement parsing.
-parse_function_body :: proc(proto_state: ^ProtoState) {
+parse_proc_body :: proc(proto_state: ^ProtoState) {
     if Parser.current_token.kind != .LEFT_BRACE {
-        compile_error_near(Parser.current_token, "expected '{' to start function body")
+        compile_error_near(Parser.current_token, "expected '{' to start proc body")
         return
     }
     advance_token(proto_state)
@@ -2311,12 +2311,12 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
     }
 
     if Parser.current_token.kind == .EOF {
-        compile_error_near(Parser.current_token, "expected '}' to close function body")
+        compile_error_near(Parser.current_token, "expected '}' to close proc body")
         return
     }
 
     if Parser.current_token.kind != .RIGHT_BRACE {
-        compile_error_near(Parser.current_token, "expected '}' to close function body")
+        compile_error_near(Parser.current_token, "expected '}' to close proc body")
         return
     }
     advance_token(proto_state)
@@ -2324,7 +2324,7 @@ parse_function_body :: proc(proto_state: ^ProtoState) {
 
 append_child_proto :: proc(parent_proto_state: ^ProtoState, child_proto: ^Proto, origin_token: Token) -> int {
     if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
-        compile_error(origin_token, "too many functions in function")
+        compile_error(origin_token, "too many procs in proc")
         return 0
     }
 
@@ -2333,18 +2333,18 @@ append_child_proto :: proc(parent_proto_state: ^ProtoState, child_proto: ^Proto,
     return child_proto_index
 }
 
-// functionLiteral = "function" "(" [paramList [","]] ")" block.
+// procLiteral = "proc" "(" [paramList [","]] ")" block.
 // param = IDENT ["..."]; a vararg parameter must be final.
-parse_function_proto :: proc(parent_proto_state: ^ProtoState, function_name: string, origin_token: Token) -> ^Proto {
-    if Parser.current_token.kind != .FUNCTION {
-        compile_error_near(Parser.current_token, "expected 'function'")
+parse_proc_proto :: proc(parent_proto_state: ^ProtoState, proc_name: string, origin_token: Token) -> ^Proto {
+    if Parser.current_token.kind != .PROC {
+        compile_error_near(Parser.current_token, "expected 'proc'")
         return nil
     }
     advance_token(parent_proto_state)
     if Parser.failed { return nil }
 
     if Parser.current_token.kind != .LEFT_PAREN {
-        compile_error_near(Parser.current_token, "expected '(' after function")
+        compile_error_near(Parser.current_token, "expected '(' after proc")
         return nil
     }
     advance_token(parent_proto_state)
@@ -2357,7 +2357,7 @@ parse_function_proto :: proc(parent_proto_state: ^ProtoState, function_name: str
     if Parser.current_token.kind != .RIGHT_PAREN {
         for {
             if param_count >= MAX_CALL_ARGS {
-                compile_error(Parser.current_token, "too many function parameters")
+                compile_error(Parser.current_token, "too many proc parameters")
                 return nil
             }
 
@@ -2405,14 +2405,14 @@ parse_function_proto :: proc(parent_proto_state: ^ProtoState, function_name: str
     }
 
     if Parser.current_token.kind != .RIGHT_PAREN {
-        compile_error_near(Parser.current_token, "expected ')' after function parameters")
+        compile_error_near(Parser.current_token, "expected ')' after proc parameters")
         return nil
     }
     advance_token(parent_proto_state)
     if Parser.failed { return nil }
 
     child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
-    child_proto_state := begin_function_proto(parent_proto_state, function_name, child_line, param_count, has_vararg)
+    child_proto_state := begin_proc_proto(parent_proto_state, proc_name, child_line, param_count, has_vararg)
 
     // Parameters are local slots starting at slot 0.
     // The VM call path places arguments directly into those slots.
@@ -2421,7 +2421,7 @@ parse_function_proto :: proc(parent_proto_state: ^ProtoState, function_name: str
 
         for prev_index := 0; prev_index < param_index; prev_index += 1 {
             if param_tokens[prev_index].value.(string) == param_name {
-                compile_error(param_tokens[param_index], fmt.tprintf("parameter binding `%s` is already declared in this function", param_name))
+                compile_error(param_tokens[param_index], fmt.tprintf("parameter binding `%s` is already declared in this proc", param_name))
                 delete_proto_state(&child_proto_state)
                 return nil
             }
@@ -2430,13 +2430,13 @@ parse_function_proto :: proc(parent_proto_state: ^ProtoState, function_name: str
         local_binding_append(&child_proto_state, param_name, true)
     }
 
-    parse_function_body(&child_proto_state)
+    parse_proc_body(&child_proto_state)
     if Parser.failed {
         delete_proto_state(&child_proto_state)
         return nil
     }
 
-    // Function fallthrough is an implicit nil return.
+    // Proc fallthrough is an implicit nil return.
     return_slot := claim_temp_slot(&child_proto_state)
     if Parser.failed {
         delete_proto_state(&child_proto_state)
@@ -2448,14 +2448,14 @@ parse_function_proto :: proc(parent_proto_state: ^ProtoState, function_name: str
     return end_proto(&child_proto_state)
 }
 
-// The compiled child proto is stored on the parent and loaded by LOAD_FUNC at runtime.
-parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, function_name: string, origin_token: Token) {
+// The compiled child proto is stored on the parent and loaded by LOAD_PROC at runtime.
+parse_proc_literal :: proc(parent_proto_state: ^ProtoState, dst: int, proc_name: string, origin_token: Token) {
     if len(parent_proto_state.child_protos) >= MAX_CHILD_PROTOS {
-        compile_error(origin_token, "too many functions in function")
+        compile_error(origin_token, "too many procs in proc")
         return
     }
 
-    child_proto := parse_function_proto(parent_proto_state, function_name, origin_token)
+    child_proto := parse_proc_proto(parent_proto_state, proc_name, origin_token)
     if Parser.failed { return }
 
     child_proto_index := append_child_proto(parent_proto_state, child_proto, origin_token)
@@ -2463,10 +2463,10 @@ parse_function_literal :: proc(parent_proto_state: ^ProtoState, dst: int, functi
 
     child_line, _ := source_line_col_at(Scanner.source, origin_token.start)
     parent_proto_state.current_inst_line = child_line
-    emit_load_func(parent_proto_state, dst, child_proto_index)
+    emit_load_proc(parent_proto_state, dst, child_proto_index)
 }
 
-try_label_function :: proc(proto_state: ^ProtoState, rhs_expr: ExprDesc, label: string) -> bool {
+try_label_proc :: proc(proto_state: ^ProtoState, rhs_expr: ExprDesc, label: string) -> bool {
     rhs_slot, is_slot := rhs_expr.(ExprSlot)
     if !is_slot {
         return false
@@ -2477,7 +2477,7 @@ try_label_function :: proc(proto_state: ^ProtoState, rhs_expr: ExprDesc, label: 
     }
 
     word := proto_state.bytecode[len(proto_state.bytecode) - 1]
-    if decode_op(word) != .LOAD_FUNC {
+    if decode_op(word) != .LOAD_PROC {
         return false
     }
 
@@ -2488,11 +2488,11 @@ try_label_function :: proc(proto_state: ^ProtoState, rhs_expr: ExprDesc, label: 
 
     child_proto_index := int(inst.b)
     if child_proto_index >= len(proto_state.child_protos) {
-        panic("LOAD_FUNC child proto index out of range")
+        panic("LOAD_PROC child proto index out of range")
     }
 
     child_proto := proto_state.child_protos[child_proto_index]
-    if !child_proto.is_function || child_proto.proto_label != "function" {
+    if !child_proto.is_proc || child_proto.proto_label != "proc" {
         return false
     }
 
@@ -3279,7 +3279,7 @@ parse_simple_stmt_prefix :: proc(proto_state: ^ProtoState) -> (ident_token: Toke
 finish_decl_stmt_after_operator :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutable: bool) {
     lhs_count := len(lhs_tokens)
 
-    if !proto_state.is_function && len(proto_state.scope_local_marks) == 0 {
+    if !proto_state.is_proc && len(proto_state.scope_local_marks) == 0 {
         current_top_level_env := &Active_State.envs[proto_state.env_index]
         binding_indexes: [MAX_BINDINGS]int
 
@@ -3332,7 +3332,7 @@ finish_decl_stmt_after_operator :: proc(proto_state: ^ProtoState, lhs_tokens: []
                 module_name := module_namespace_from_path(Active_State.envs[proto_state.env_index].id)
                 label = fmt.tprintf("%s.%s", module_name, binding_name)
             }
-            try_label_function(proto_state, last_expr, label)
+            try_label_proc(proto_state, last_expr, label)
 
             _, final_is_call := last_expr.(ExprCall)
             if !final_is_call {
@@ -3378,7 +3378,7 @@ finish_decl_stmt_after_operator :: proc(proto_state: ^ProtoState, lhs_tokens: []
     }
 
     if proto_state.local_count + lhs_count > MAX_FRAME_SLOTS {
-        compile_error(lhs_tokens[0], "too many local bindings in function")
+        compile_error(lhs_tokens[0], "too many local bindings in proc")
         return
     }
 
@@ -3396,7 +3396,7 @@ finish_decl_stmt_after_operator :: proc(proto_state: ^ProtoState, lhs_tokens: []
 
     if lhs_count == 1 && expr_count == 1 {
         label := lhs_tokens[0].value.(string)
-        try_label_function(proto_state, last_expr, label)
+        try_label_proc(proto_state, last_expr, label)
     }
 
     finish_expr_list_to_slots(proto_state, rhs_base, expr_count, last_expr, lhs_count)
@@ -3419,7 +3419,7 @@ finish_decl_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, is_mutab
 finish_inline_struct_instance_decl :: proc(proto_state: ^ProtoState, name_token: Token, def: ^StructDefObject, is_mutable: bool) {
     name := name_token.value.(string)
 
-    top_level := !proto_state.is_function && len(proto_state.scope_local_marks) == 0
+    top_level := !proto_state.is_proc && len(proto_state.scope_local_marks) == 0
     if top_level {
         env := &Active_State.envs[proto_state.env_index]
 
@@ -3451,7 +3451,7 @@ finish_inline_struct_instance_decl :: proc(proto_state: ^ProtoState, name_token:
         }
 
         if proto_state.local_count + 1 > MAX_FRAME_SLOTS {
-            compile_error(name_token, "too many local bindings in function")
+            compile_error(name_token, "too many local bindings in proc")
             return
         }
     }
@@ -3528,8 +3528,8 @@ resolve_assign_target :: proc(proto_state: ^ProtoState, source_token: Token, tar
 
         global_index := binding_env_find(&Active_State.global_env, ident_text)
         if global_index < 0 {
-            if proto_state.is_function {
-                compile_error(source_token, fmt.tprintf("assignment target `%s` is not a declared binding in this function; Kiln does not support closures or upvalues", ident_text))
+            if proto_state.is_proc {
+                compile_error(source_token, fmt.tprintf("assignment target `%s` is not a declared binding in this proc; Kiln does not support closures or upvalues", ident_text))
             } else {
                 compile_error(source_token, fmt.tprintf("assignment target `%s` is not a declared binding", ident_text))
             }
@@ -3653,7 +3653,7 @@ finish_assign_stmt :: proc(proto_state: ^ProtoState, lhs_tokens: []Token, target
         }
 
         if label != "" {
-            try_label_function(proto_state, last_expr, label)
+            try_label_proc(proto_state, last_expr, label)
         }
     }
 
@@ -3869,7 +3869,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    top_level := !proto_state.is_function && len(proto_state.scope_local_marks) == 0
+    top_level := !proto_state.is_proc && len(proto_state.scope_local_marks) == 0
 
     if Parser.current_token.kind == .STRUCT {
         if lhs_count != 1 {
@@ -3957,7 +3957,7 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
     if lhs_count == 1 && expr_count == 1 {
         label := lhs_tokens[0].value.(string)
-        try_label_function(proto_state, last_expr, label)
+        try_label_proc(proto_state, last_expr, label)
 
         _, final_is_call := last_expr.(ExprCall)
         if !final_is_call {
@@ -3994,7 +3994,7 @@ parse_call_stmt :: proc(proto_state: ^ProtoState) {
 // forPost = assignTarget "=" expr | assignTarget compoundAssignOp expr | callStmt.
 // forPost allows one assignment target only.
 parse_for_post_stmt :: proc(proto_state: ^ProtoState) {
-    if Parser.current_token.kind == .FUNCTION {
+    if Parser.current_token.kind == .PROC {
         parse_call_stmt(proto_state)
         return
     }
@@ -4139,7 +4139,7 @@ parse_simple_stmt :: proc(proto_state: ^ProtoState) {
             return
         }
 
-        top_level := !proto_state.is_function && len(proto_state.scope_local_marks) == 0
+        top_level := !proto_state.is_proc && len(proto_state.scope_local_marks) == 0
         if top_level && lhs_count == 1 {
             def, is_alias := try_consume_struct_def_alias_rhs(proto_state)
             if Parser.failed { return }
@@ -4251,7 +4251,7 @@ parse_stmt :: proc(proto_state: ^ProtoState) {
         return
     }
 
-    if Parser.current_token.kind == .IDENT || Parser.current_token.kind == .FUNCTION || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .MAP {
+    if Parser.current_token.kind == .IDENT || Parser.current_token.kind == .PROC || Parser.current_token.kind == .LEFT_BRACKET || Parser.current_token.kind == .MAP {
         parse_simple_stmt(proto_state)
         return
     }

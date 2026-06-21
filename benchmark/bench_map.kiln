@@ -1,4 +1,4 @@
-run :: function() {
+run :: proc() {
     n := 750000
     mod := 100000
     total := 0

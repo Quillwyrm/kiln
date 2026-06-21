@@ -23,7 +23,7 @@ may still work via `MOVE`, but you’ll miss the existing retarget optimization 
 Shape:
 
 ```odin
-case .LOAD_CONST, .LOAD_FUNC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEW_STRUCT, .NEG, .NOT, ...
+case .LOAD_CONST, .LOAD_PROC, .MOVE, .NEW_ARRAY, .NEW_MAP, .NEW_STRUCT, .NEG, .NOT, ...
 ```
 
 and:
