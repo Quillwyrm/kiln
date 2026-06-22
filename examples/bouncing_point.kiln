@@ -1,7 +1,11 @@
 
-Vec2 :: struct { x, y: int }
+Vec2 :: struct {
+    x, y: int
+}
 
-Rect :: struct { width, height: int }
+Rect :: struct {
+    width, height: int
+}
 
 Bouncer :: struct {
     pos: Vec2,

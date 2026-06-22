@@ -91,6 +91,7 @@ Opcode :: enum u8 {
 
 MAX_FRAME_SLOTS :: 256       // u8 slot operands
 MAX_CALL_ARGS :: 255         // u8 CALL argument count
+MAX_ABC_OPERAND :: 255       // u8 ABC operands
 MAX_CONST_POOL_ENTRIES :: 65536 // u16 LOAD_CONST index
 MAX_CHILD_PROTOS :: 65536       // u16 LOAD_PROC index
 

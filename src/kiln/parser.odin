@@ -742,7 +742,7 @@ parse_map_literal :: proc(proto_state: ^ProtoState) -> ExprDesc {
                 return ExprInvalid{}
             }
 
-            if key_const < 256 {
+            if key_const <= MAX_ABC_OPERAND {
                 value_expr := parse_expr(proto_state)
                 if Parser.failed { return ExprInvalid{} }
 
@@ -880,7 +880,7 @@ parse_struct_map_spec :: proc(proto_state: ^ProtoState, spec_name: string) -> Va
 
             value_token := Parser.current_token
             if value_token.kind == .NIL {
-                compile_error(value_token, fmt.tprintf("invalid field spec for key `%s` in map field spec; nil is not valid in map field specs", key_text))
+                compile_error(value_token, fmt.tprintf("map field defaults cannot use nil values; key `%s` is nil", key_text))
                 return Value{}
             }
 
@@ -1181,6 +1181,21 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
         return parse_struct_map_spec(proto_state, spec_name)
 
     case .STRUCT:
+        saved_index := Scanner.index
+        saved_token_start := Scanner.token_start
+        saved_failed := Scanner.failed
+
+        next_token := scan_next_token()
+
+        Scanner.index = saved_index
+        Scanner.token_start = saved_token_start
+        Scanner.failed = saved_failed
+
+        if next_token.kind != .LEFT_BRACE {
+            compile_error(Parser.current_token, "anonymous struct fields require a body")
+            return Value{}
+        }
+
         nested_def := parse_struct_def_object(proto_state, spec_name)
         if Parser.failed { return Value{} }
         return Value(cast(^Object)new_struct_object(nested_def))
@@ -1207,26 +1222,26 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
             if local_binding_find(proto_state, ident_name) >= 0 ||
                binding_env_find(current_env, ident_name) >= 0 ||
                binding_env_find(&Active_State.global_env, ident_name) >= 0 {
-                compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not declared", qualified_name))
+                compile_error(ident_token, fmt.tprintf("`%s` is not a struct definition; `%s` is shadowed by another binding", qualified_name, ident_name))
                 return Value{}
             }
 
             import_index := import_namespace_find(proto_state, ident_name)
             if import_index < 0 {
-                compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not declared", qualified_name))
+                compile_error(ident_token, fmt.tprintf("module `%s` is not imported", ident_name))
                 return Value{}
             }
 
             env := &Active_State.envs[proto_state.import_env_indexes[import_index]]
             binding_index := binding_env_find(env, member_name)
             if binding_index < 0 || !(.EXPORTED in env.flags[binding_index]) {
-                compile_error(member_token, fmt.tprintf("module `%s` does not export binding `%s`", ident_name, member_name))
+                compile_error(member_token, fmt.tprintf("module `%s` has no exported struct definition `%s`", ident_name, member_name))
                 return Value{}
             }
 
             object, is_object := env.values[binding_index].(^Object)
             if !is_object || object.kind != .STRUCT_DEF {
-                compile_error(member_token, fmt.tprintf("struct field spec `%s` is not a struct", qualified_name))
+                compile_error(member_token, fmt.tprintf("`%s` is not a struct definition", qualified_name))
                 return Value{}
             }
 
@@ -1235,7 +1250,7 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
         }
 
         if local_binding_find(proto_state, ident_name) >= 0 {
-            compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not a struct", ident_name))
+            compile_error(ident_token, fmt.tprintf("`%s` is not a struct definition", ident_name))
             return Value{}
         }
 
@@ -1244,7 +1259,7 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
         if binding_index >= 0 {
             object, is_object := env.values[binding_index].(^Object)
             if !is_object || object.kind != .STRUCT_DEF {
-                compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not a struct", ident_name))
+                compile_error(ident_token, fmt.tprintf("`%s` is not a struct definition", ident_name))
                 return Value{}
             }
 
@@ -1253,19 +1268,19 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
         }
 
         if import_namespace_find(proto_state, ident_name) >= 0 {
-            compile_error(ident_token, fmt.tprintf("namespace `%s` cannot be used as a struct field spec; use `%s.Name`", ident_name, ident_name))
+            compile_error(ident_token, fmt.tprintf("`%s` is a module name; use `%s.Name` to name a struct definition from that module", ident_name, ident_name))
             return Value{}
         }
 
         global_index := binding_env_find(&Active_State.global_env, ident_name)
         if global_index < 0 {
-            compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not declared", ident_name))
+            compile_error(ident_token, fmt.tprintf("struct definition `%s` is not declared", ident_name))
             return Value{}
         }
 
         object, is_object := Active_State.global_env.values[global_index].(^Object)
         if !is_object || object.kind != .STRUCT_DEF {
-            compile_error(ident_token, fmt.tprintf("struct field spec `%s` is not a struct", ident_name))
+            compile_error(ident_token, fmt.tprintf("`%s` is not a struct definition", ident_name))
             return Value{}
         }
 
@@ -1298,7 +1313,7 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
             return Value{}
         }
 
-        compile_error(Parser.current_token, "struct field spec cannot be nil")
+        compile_error(Parser.current_token, "struct fields cannot default to nil")
         return Value{}
 
     case .LEFT_BRACKET:
@@ -1354,7 +1369,7 @@ parse_struct_field_spec_value :: proc(proto_state: ^ProtoState, spec_name: strin
         return Value(cast(^Object)proc_object)
 
     case:
-        compile_error_near(Parser.current_token, "expected struct field spec")
+        compile_error_near(Parser.current_token, "expected a field default or field kind")
         return Value{}
     }
 }
@@ -1523,7 +1538,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
         key_const := const_int(proto_state, key)
         if Parser.failed { return ExprInvalid{} }
 
-        if key_const < 256 {
+        if key_const <= MAX_ABC_OPERAND {
             return ExprArrayIndexConst{container_slot, key_const}
         }
 
@@ -1531,7 +1546,7 @@ parse_index_postfix :: proc(proto_state: ^ProtoState, container: ExprDesc) -> Ex
         key_const := const_string_object(proto_state, key)
         if Parser.failed { return ExprInvalid{} }
 
-        if key_const < 256 {
+        if key_const <= MAX_ABC_OPERAND {
             return ExprMapIndexConst{container_slot, key_const}
         }
     }
@@ -1607,7 +1622,7 @@ parse_struct_constructor_postfix :: proc(proto_state: ^ProtoState, def: ^StructD
 
             field_const := const_string_object(proto_state, new_string_object(field_name))
             if Parser.failed { return ExprInvalid{} }
-            if field_const >= 256 {
+            if field_const > MAX_ABC_OPERAND {
                 compile_error(field_token, "too many constants before struct field access")
                 return ExprInvalid{}
             }
@@ -1686,7 +1701,7 @@ parse_field_postfix :: proc(proto_state: ^ProtoState, left: ExprDesc) -> ExprDes
 
     field_const := const_string_object(proto_state, new_string_object(member_name))
     if Parser.failed { return ExprInvalid{} }
-    if field_const >= 256 {
+    if field_const > MAX_ABC_OPERAND {
         compile_error(member_token, "too many constants before struct field access")
         return ExprInvalid{}
     }
@@ -1851,18 +1866,18 @@ parse_unary_expr :: proc(proto_state: ^ProtoState) -> ExprDesc {
 
 // const_index_from_numeric_literal checks if an expression is a numeric literal
 // (i64 or f64) suitable for a const arithmetic opcode. Returns the const pool index
-// and true if the literal fits in 8-bit C field (< 256).
+// and true if the literal fits in an ABC const-index operand.
 const_index_from_numeric_literal :: proc(proto_state: ^ProtoState, expr: ExprDesc) -> (int, bool) {
     #partial switch v in expr {
     case i64:
         idx := const_int(proto_state, v)
         if Parser.failed { return 0, false }
-        return idx, idx < 256
+        return idx, idx <= MAX_ABC_OPERAND
 
     case f64:
         idx := const_float(proto_state, v)
         if Parser.failed { return 0, false }
-        return idx, idx < 256
+        return idx, idx <= MAX_ABC_OPERAND
     }
 
     return 0, false
@@ -3979,11 +3994,18 @@ parse_global_decl_stmt :: proc(proto_state: ^ProtoState) {
 
 // callStmt = rootExpr {postfix} callPostfix.
 parse_call_stmt :: proc(proto_state: ^ProtoState) {
+    root_token := Parser.current_token
+
     expr := parse_chain_expr(proto_state)
     if Parser.failed { return }
 
     call_expr, is_call := expr.(ExprCall)
     if !is_call {
+        if root_token.kind == .PROC {
+            compile_error(root_token, "bare proc literal is not a valid statement; declare it, assign it, or call it")
+            return
+        }
+
         compile_error(Parser.current_token, "call statement must end in a call")
         return
     }
